@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Login - Griffins Medicals Limited</title>
+    
+    <!-- External CSS -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <link rel="stylesheet" href="assets/css/style.css">
+    
+    <!-- Supabase JS SDK -->
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+    
+    <!-- Shared Supabase Config -->
+    <script src="assets/js/supabase-config.js"></script>
+    
+    <style>
+        /* Login Specific Styles */
+        body { display: flex; justify-content: center; align-items: center; height: 100vh; background: #0f172a; margin: 0; font-family: 'Segoe UI', sans-serif; }
+        .login-container {
+            background: white; padding: 40px; border-radius: 12px;
+            width: 100%; max-width: 400px; box-shadow: 0 10px 25px rgba(0,0,0,0.3);
+            position: relative; z-index: 10;
+        }
+        .login-logo { text-align: center; font-size: 1.8rem; font-weight: bold; color: #0f172a; margin-bottom: 30px; }
+        .login-logo i { color: #3b82f6; margin-right: 10px; }
+        .form-group { margin-bottom: 20px; }
+        .form-group label { display: block; font-weight: 500; margin-bottom: 6px; color: #475569; }
+        .form-group input {
+            width: 100%; padding: 12px; border: 1px solid #e2e8f0; border-radius: 6px;
+            outline: none; transition: 0.2s; font-size: 1rem;
+        }
+        .form-group input:focus { border-color: #3b82f6; box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.2); }
+        .login-btn {
+            width: 100%; padding: 12px; background: #2563eb; color: white; border: none;
+            border-radius: 6px; font-weight: 600; font-size: 1rem; cursor: pointer; transition: 0.2s;
+        }
+        .login-btn:hover { background: #1d4ed8; }
+        .login-btn:disabled { background: #93c5fd; cursor: not-allowed; }
+        .error-msg { color: #dc2626; text-align: center; margin-top: 10px; font-size: 0.9rem; display: none; }
+        .auth-toggle { text-align: center; margin-top: 20px; display: block; color: #2563eb; text-decoration: none; cursor: pointer; font-size: 0.95rem; }
+        .auth-toggle:hover { text-decoration: underline; }
+    </style>
+</head>
+<body>
+
+    <!-- ================= LOGIN BOX ================= -->
+    <div class="login-container" id="loginBox">
+        <div class="login-logo">
+            <i class="fa-solid fa-globe"></i> GLOBALCORP
+        </div>
+        
+        <form id="loginForm">
+            <div class="form-group">
+                <label for="loginEmail">Email Address</label>
+                <input type="email" id="loginEmail" placeholder="admin@globalcorp.com" required autocomplete="email">
+            </div>
+            
+            <div class="form-group">
+                <label for="loginPassword">Password</label>
+                <input type="password" id="loginPassword" placeholder="••••••••" required autocomplete="current-password">
+            </div>
+            
+            <button type="submit" class="login-btn" id="loginBtn">
+                <i class="fa-solid fa-right-to-bracket"></i> Sign In
+            </button>
+            
+            <p id="loginError" class="error-msg">Invalid email or password.</p>
+        </form>
+    </div>
+
+    <script src="assets/js/auth.js"></script>
+</body>
+</html>

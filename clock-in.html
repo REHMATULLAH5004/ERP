@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Clock In - GLOBALCORP ERP</title>
+
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+    <script src="assets/js/supabase-config.js"></script>
+    <script src="assets/js/shared-attendance-utils.js"></script>
+
+    <style>
+        body { display: flex; justify-content: center; align-items: center; min-height: 100vh; background: #0f172a; margin: 0; font-family: 'Segoe UI', sans-serif; padding: 20px; box-sizing: border-box; }
+        .card { background: white; padding: 30px; border-radius: 12px; width: 100%; max-width: 380px; box-shadow: 0 10px 25px rgba(0,0,0,0.3); text-align: center; }
+        .status-icon { font-size: 3rem; margin-bottom: 10px; }
+        h2 { margin: 0 0 4px 0; }
+        p.sub { color: #64748b; margin-top: 0; margin-bottom: 20px; }
+        .btn { width: 100%; padding: 14px; border: none; border-radius: 8px; font-weight: 600; font-size: 1rem; cursor: pointer; margin-top: 8px; }
+        .btn-in { background: #22c55e; color: white; }
+        .btn-out { background: #ef4444; color: white; }
+        .btn:disabled { opacity: 0.6; cursor: not-allowed; }
+        .error-box { background: #fef2f2; color: #dc2626; padding: 14px; border-radius: 8px; font-size: 0.9rem; }
+    </style>
+</head>
+<body>
+    <div class="card" id="clockInCard">
+        <div class="status-icon"><i class="fa-solid fa-spinner fa-spin" style="color:#2563eb;"></i></div>
+        <p>Checking code...</p>
+    </div>
+
+    <script>
+        (async function initClockIn() {
+            const card = document.getElementById('clockInCard');
+
+            function showError(message) {
+                card.innerHTML = `
+                    <div class="status-icon"><i class="fa-solid fa-triangle-exclamation" style="color:#dc2626;"></i></div>
+                    <h2>Can't Clock In</h2>
+                    <div class="error-box">${message}</div>
+                `;
+            }
+
+            // ============================================
+            // 1. CHECK SESSION -- redirect through login and back if needed
+            // ============================================
+            const { data: sessionData } = await supabaseClient.auth.getSession();
+            if (!sessionData?.session) {
+                window.location.href = `./login.html?returnTo=${encodeURIComponent(window.location.href)}`;
+                return;
+            }
+
+            // ============================================
+            // 2. VALIDATE THE TOKEN FROM THE SCANNED URL
+            // ============================================
+            const params = new URLSearchParams(window.location.search);
+            const token = params.get('token');
+            if (!token) {
+                showError('No code found in this link. Please scan the QR code at the pharmacy again.');
+                return;
+            }
+
+            const { data: tokenRow, error: tokenError } = await supabaseClient
+                .from('qr_clock_tokens')
+                .select('*')
+                .eq('token', token)
+                .maybeSingle();
+
+            if (tokenError || !tokenRow) {
+                showError('This code is not recognized. Please scan the current code at the pharmacy.');
+                return;
+            }
+            if (new Date(tokenRow.expires_at) < new Date()) {
+                showError('This code has expired. Please scan the current code -- it refreshes every 30 seconds.');
+                return;
+            }
+
+            // ============================================
+            // 3. RESOLVE CURRENT EMPLOYEE
+            // ============================================
+            const { data: profile, error: profileError } = await supabaseClient
+                .from('user_profiles')
+                .select('employee_id, employees(first_name, last_name)')
+                .eq('id', sessionData.session.user.id)
+                .maybeSingle();
+
+            if (profileError || !profile?.employee_id) {
+                showError('Your login is not linked to an employee record. Contact an admin.');
+                return;
+            }
+
+            const employeeId = profile.employee_id;
+            const employeeName = profile.employees ? `${profile.employees.first_name} ${profile.employees.last_name}` : 'there';
+
+            // ============================================
+            // 4. LOAD TODAY'S ATTENDANCE, SHOW THE RIGHT BUTTON
+            // ============================================
+            const today = new Date().toISOString().split('T')[0];
+            const { data: existing } = await supabaseClient
+                .from('employee_attendance')
+                .select('*')
+                .eq('employee_id', employeeId)
+                .eq('attendance_date', today)
+                .maybeSingle();
+
+            renderState(existing);
+
+            function renderState(record) {
+                if (!record || !record.check_in) {
+                    card.innerHTML = `
+                        <div class="status-icon"><i class="fa-solid fa-user-check" style="color:#2563eb;"></i></div>
+                        <h2>Hi, ${employeeName}</h2>
+                        <p class="sub">Not clocked in yet today.</p>
+                        <button class="btn btn-in" id="actionBtn"><i class="fa-solid fa-arrow-right-to-bracket"></i> Clock In</button>
+                    `;
+                    document.getElementById('actionBtn').addEventListener('click', handleClockIn);
+                } else if (record.check_in && !record.check_out) {
+                    card.innerHTML = `
+                        <div class="status-icon"><i class="fa-solid fa-circle-check" style="color:#059669;"></i></div>
+                        <h2>Hi, ${employeeName}</h2>
+                        <p class="sub">Clocked in at ${record.check_in}</p>
+                        <button class="btn btn-out" id="actionBtn"><i class="fa-solid fa-arrow-right-from-bracket"></i> Clock Out</button>
+                    `;
+                    document.getElementById('actionBtn').addEventListener('click', handleClockOut);
+                } else {
+                    card.innerHTML = `
+                        <div class="status-icon"><i class="fa-solid fa-circle-check" style="color:#2563eb;"></i></div>
+                        <h2>Hi, ${employeeName}</h2>
+                        <p class="sub">Already done for today: ${record.check_in} - ${record.check_out}</p>
+                    `;
+                }
+            }
+
+            // ============================================
+            // 🔥 Day-classification + overtime logic now lives in
+            // assets/js/shared-attendance-utils.js, loaded above --
+            // previously duplicated here and in attendance_index.js,
+            // hr_view.js, and dashboard_view.js. One source now, so a
+            // future rule change can't accidentally miss one of them.
+            async function isPublicHoliday(dateStr) {
+                const { data } = await supabaseClient.from('public_holidays').select('name').eq('holiday_date', dateStr).maybeSingle();
+                return data ? data.name : false;
+            }
+
+            async function handleClockIn() {
+                const btn = document.getElementById('actionBtn');
+                btn.disabled = true;
+                btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Clocking in...';
+
+                try {
+                    const now = new Date();
+                    const nowTime = now.toTimeString().slice(0, 5);
+                    const dayOfWeek = now.getDay();
+
+                    const { data: job } = await supabaseClient
+                        .from('employee_employment').select('weekly_off_day')
+                        .eq('employee_id', employeeId).maybeSingle();
+
+                    const isHoliday = await isPublicHoliday(today);
+                    const weeklyOff = isWeeklyOffDay(job?.weekly_off_day, dayOfWeek);
+
+                    let dayType = 'Work', status = 'Present';
+                    if (weeklyOff) { dayType = 'Off'; status = 'Present (Off Day)'; }
+                    else if (isHoliday) { dayType = 'Holiday'; status = 'Present (Holiday)'; }
+
+                    const { error } = await supabaseClient
+                        .from('employee_attendance')
+                        .upsert([{ employee_id: employeeId, attendance_date: today, check_in: nowTime, day_type: dayType, status: status }], { onConflict: 'employee_id,attendance_date' });
+
+                    if (error) throw error;
+
+                    const { data: updated } = await supabaseClient
+                        .from('employee_attendance').select('*')
+                        .eq('employee_id', employeeId).eq('attendance_date', today).maybeSingle();
+                    renderState(updated);
+                } catch (error) {
+                    showError('Error clocking in: ' + error.message);
+                }
+            }
+
+            async function handleClockOut() {
+                const btn = document.getElementById('actionBtn');
+                btn.disabled = true;
+                btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Clocking out...';
+
+                try {
+                    const now = new Date();
+                    const nowTime = now.toTimeString().slice(0, 5);
+                    const dayOfWeek = now.getDay();
+
+                    const { data: job } = await supabaseClient
+                        .from('employee_employment').select('weekly_off_day, is_fixed_pay')
+                        .eq('employee_id', employeeId).maybeSingle();
+
+                    const { data: current } = await supabaseClient
+                        .from('employee_attendance').select('*')
+                        .eq('employee_id', employeeId).eq('attendance_date', today).maybeSingle();
+
+                    const isHoliday = await isPublicHoliday(today);
+                    const [h1, m1] = current.check_in.split(':').map(Number);
+                    const [h2, m2] = nowTime.split(':').map(Number);
+                    const hoursWorked = ((h2 * 60 + m2) - (h1 * 60 + m1)) / 60;
+
+                    const dayCategory = getDayCategory(job?.weekly_off_day, dayOfWeek);
+                    const { isOvertime, overtimeHours } = computeOvertime(job?.is_fixed_pay ?? true, isHoliday, dayCategory, hoursWorked);
+
+                    let status = 'Present', dayType = current.day_type;
+                    if (isWeeklyOffDay(job?.weekly_off_day, dayOfWeek)) { dayType = 'Off'; status = 'Off'; }
+                    else if (isHoliday) { dayType = 'Holiday'; status = isOvertime ? 'Holiday OT' : 'Holiday'; }
+                    else if (hoursWorked * 60 < 450) { status = 'Short Day'; }
+
+                    const { error } = await supabaseClient
+                        .from('employee_attendance')
+                        .update({ check_out: nowTime, overtime_hours: overtimeHours, is_overtime: isOvertime, status, day_type: dayType, working_hours: hoursWorked })
+                        .eq('employee_id', employeeId).eq('attendance_date', today);
+
+                    if (error) throw error;
+
+                    const { data: updated } = await supabaseClient
+                        .from('employee_attendance').select('*')
+                        .eq('employee_id', employeeId).eq('attendance_date', today).maybeSingle();
+                    renderState(updated);
+                } catch (error) {
+                    showError('Error clocking out: ' + error.message);
+                }
+            }
+        })();
+    </script>
+</body>
+</html>
