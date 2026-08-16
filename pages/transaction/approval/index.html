@@ -1,0 +1,338 @@
+<div class="module-view-container">
+    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
+        <h3 style="margin: 0;"><i class="fa-solid fa-check-double"></i> Approval Queue</h3>
+        <div>
+            <button class="btn btn-outline" onclick="refreshApprovals()">
+                <i class="fa-solid fa-rotate"></i> Refresh
+            </button>
+        </div>
+    </div>
+
+    <!-- Stats Cards -->
+    <div style="display: grid; grid-template-columns: 1fr 1fr 1fr 1fr; gap: 15px; margin-bottom: 20px;">
+        <div class="stat-card" style="border-left: 4px solid #f59e0b; background: #fffbeb;">
+            <h4 style="color: #92400e; margin: 0 0 5px 0; font-size: 0.8rem; text-transform: uppercase;">Pending</h4>
+            <p style="font-size: 1.8rem; font-weight: 700; margin: 0; color: #92400e;" id="pendingCount">0</p>
+        </div>
+        <div class="stat-card" style="border-left: 4px solid #3b82f6; background: #eff6ff;">
+            <h4 style="color: #1e40af; margin: 0 0 5px 0; font-size: 0.8rem; text-transform: uppercase;">Approved (Today)</h4>
+            <p style="font-size: 1.8rem; font-weight: 700; margin: 0; color: #1e40af;" id="approvedCount">0</p>
+        </div>
+        <div class="stat-card" style="border-left: 4px solid #ef4444; background: #fef2f2;">
+            <h4 style="color: #991b1b; margin: 0 0 5px 0; font-size: 0.8rem; text-transform: uppercase;">Rejected (Today)</h4>
+            <p style="font-size: 1.8rem; font-weight: 700; margin: 0; color: #991b1b;" id="rejectedCount">0</p>
+        </div>
+        <div class="stat-card" style="border-left: 4px solid #8b5cf6; background: #f5f3ff;">
+            <h4 style="color: #5b21b6; margin: 0 0 5px 0; font-size: 0.8rem; text-transform: uppercase;">Total PO's</h4>
+            <p style="font-size: 1.8rem; font-weight: 700; margin: 0; color: #5b21b6;" id="totalCount">0</p>
+        </div>
+    </div>
+
+    <!-- Filters -->
+    <div style="display: flex; gap: 15px; margin-bottom: 20px; flex-wrap: wrap;">
+        <select class="form-control" id="approvalFilterType" style="min-width: 180px;">
+            <option value="all">All Types</option>
+            <option value="purchase_order">Purchase Orders</option>
+            <option value="leave_request">Leave Requests</option>
+            <option value="expense">Expense Claims</option>
+        </select>
+        <select class="form-control" id="approvalFilterStatus" style="min-width: 150px;">
+            <option value="pending">Pending</option>
+            <option value="all">All Status</option>
+            <option value="approved">Approved</option>
+            <option value="rejected">Rejected</option>
+        </select>
+        <input type="text" class="form-control" id="approvalSearch" placeholder="Search by Ref #..." style="min-width: 200px;">
+    </div>
+
+    <!-- Approval Table -->
+    <div class="card" style="padding: 0; overflow: hidden;">
+        <div class="card-header">
+            <span><i class="fa-regular fa-clock"></i> Approval Requests</span>
+            <span class="approval-count" id="approvalCount">0 items</span>
+        </div>
+        <div class="table-responsive">
+            <table class="table-minimal" id="approvalTable">
+                <thead>
+                    <tr>
+                        <th style="padding-left: 20px;">Ref #</th>
+                        <th>Type</th>
+                        <th>Requester</th>
+                        <th>Date</th>
+                        <th>Status</th>
+                        <th style="padding-right: 20px; text-align: center;">Actions</th>
+                    </tr>
+                </thead>
+                <tbody id="approvalTableBody">
+                    <tr>
+                        <td colspan="6" style="text-align: center; padding: 40px; color: #94a3b8;">
+                            <i class="fa-solid fa-spinner fa-spin"></i> Loading approvals...
+                        </td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+<!-- ============================================================ -->
+<!-- APPROVAL DETAIL MODAL -->
+<!-- ============================================================ -->
+<div class="modal" id="approvalDetailModal">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h4><i class="fa-regular fa-file-lines"></i> Approval Details</h4>
+                <button class="modal-close" onclick="closeModal('approvalDetailModal')">&times;</button>
+            </div>
+            <div class="modal-body" id="approvalDetailContent">
+                <!-- Dynamic content -->
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-outline" onclick="closeModal('approvalDetailModal')">Close</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- ============================================================ -->
+<!-- REJECT MODAL -->
+<!-- ============================================================ -->
+<div class="modal" id="rejectModal">
+    <div class="modal-dialog modal-md">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h4><i class="fa-solid fa-circle-xmark" style="color: #ef4444;"></i> Reject Request</h4>
+                <button class="modal-close" onclick="closeModal('rejectModal')">&times;</button>
+            </div>
+            <div class="modal-body">
+                <p>Are you sure you want to reject this request?</p>
+                <div class="form-group">
+                    <label>Reason for rejection:</label>
+                    <textarea class="form-control" id="rejectReason" rows="3" placeholder="Please provide a reason for rejection..."></textarea>
+                </div>
+                <input type="hidden" id="rejectItemId">
+                <input type="hidden" id="rejectItemType">
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-outline" onclick="closeModal('rejectModal')">Cancel</button>
+                <button class="btn btn-danger" onclick="confirmReject()">
+                    <i class="fa-solid fa-circle-xmark"></i> Confirm Reject
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<style>
+.stat-card {
+    background: white;
+    padding: 16px 20px;
+    border-radius: 8px;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+    border: 1px solid #e8edf3;
+}
+.stat-card h4 {
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: #64748b;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin: 0 0 4px 0;
+}
+.stat-card p {
+    font-size: 1.5rem;
+    font-weight: 700;
+    margin: 0;
+    color: #0f172a;
+}
+
+.approval-count {
+    font-size: 0.8rem;
+    color: #94a3b8;
+    font-weight: 400;
+}
+
+.btn {
+    padding: 8px 16px;
+    border: none;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 0.85rem;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    transition: all 0.2s;
+}
+.btn-outline {
+    background: transparent;
+    color: #475569;
+    border: 1px solid #cbd5e1;
+}
+.btn-outline:hover {
+    background: #f1f5f9;
+}
+.btn-success {
+    background: #22c55e;
+    color: white;
+}
+.btn-success:hover {
+    background: #16a34a;
+}
+.btn-danger {
+    background: #ef4444;
+    color: white;
+}
+.btn-danger:hover {
+    background: #dc2626;
+}
+.btn-primary {
+    background: #2563eb;
+    color: white;
+}
+.btn-primary:hover {
+    background: #1d4ed8;
+}
+.btn-sm {
+    padding: 4px 12px;
+    font-size: 0.75rem;
+}
+
+.status-badge {
+    padding: 3px 12px;
+    border-radius: 12px;
+    font-size: 0.7rem;
+    font-weight: 600;
+    display: inline-block;
+}
+.status-pending {
+    background: #fef3c7;
+    color: #b45309;
+}
+.status-approved {
+    background: #dcfce7;
+    color: #15803d;
+}
+.status-rejected {
+    background: #fee2e2;
+    color: #dc2626;
+}
+
+.form-group {
+    margin-bottom: 15px;
+}
+.form-group label {
+    display: block;
+    font-weight: 500;
+    color: #475569;
+    margin-bottom: 5px;
+}
+.form-control {
+    width: 100%;
+    padding: 8px 12px;
+    border: 1px solid #e2e8f0;
+    border-radius: 6px;
+    font-size: 0.85rem;
+    background: white;
+    transition: border-color 0.2s;
+}
+.form-control:focus {
+    outline: none;
+    border-color: #2563eb;
+    box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.1);
+}
+
+.modal {
+    display: none;
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: rgba(0,0,0,0.5);
+    z-index: 1000;
+    animation: modalFadeIn 0.25s ease;
+}
+.modal.show {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+@keyframes modalFadeIn {
+    from { opacity: 0; transform: scale(0.95); }
+    to { opacity: 1; transform: scale(1); }
+}
+.modal-dialog {
+    width: 95%;
+    max-width: 800px;
+    max-height: 90vh;
+    display: flex;
+    flex-direction: column;
+}
+.modal-md {
+    max-width: 500px;
+}
+.modal-content {
+    background: white;
+    border-radius: 12px;
+    display: flex;
+    flex-direction: column;
+    max-height: 90vh;
+    overflow: hidden;
+}
+.modal-header {
+    padding: 16px 24px;
+    border-bottom: 1px solid #e8edf3;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    flex-shrink: 0;
+}
+.modal-header h4 {
+    margin: 0;
+    color: #1e293b;
+}
+.modal-close {
+    background: none;
+    border: none;
+    font-size: 1.5rem;
+    cursor: pointer;
+    color: #94a3b8;
+    padding: 0 8px;
+}
+.modal-close:hover {
+    color: #475569;
+}
+.modal-body {
+    padding: 20px 24px;
+    overflow-y: auto;
+    flex: 1;
+}
+.modal-footer {
+    padding: 12px 24px;
+    border-top: 1px solid #e8edf3;
+    display: flex;
+    gap: 10px;
+    justify-content: flex-end;
+    flex-shrink: 0;
+    flex-wrap: wrap;
+}
+
+.approval-detail-row {
+    display: flex;
+    padding: 8px 0;
+    border-bottom: 1px solid #f1f5f9;
+}
+.approval-detail-row .label {
+    font-weight: 600;
+    width: 150px;
+    color: #475569;
+}
+.approval-detail-row .value {
+    flex: 1;
+}
+</style>
+
+<script>
+    document.dispatchEvent(new Event('loadModuleComplete'));
+</script>

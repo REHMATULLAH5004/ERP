@@ -1,0 +1,20 @@
+<div class="module-view-container">
+    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
+        <h3 style="margin: 0;"><i class="fa-solid fa-user-shield"></i> Roles & Permissions</h3>
+    </div>
+
+    <p style="color: #64748b; font-size: 0.85rem; margin-bottom: 20px;">
+        Three fixed roles control which sections a user can see. Admin always has full access, including this
+        page itself, and cannot be restricted here.
+    </p>
+
+    <div id="rolesContainer" style="display: flex; flex-direction: column; gap: 20px;">
+        <div class="card" style="padding: 30px; text-align: center; color: #94a3b8;">
+            <i class="fa-solid fa-spinner fa-spin"></i> Loading roles...
+        </div>
+    </div>
+</div>
+
+<script>
+    document.dispatchEvent(new Event('loadModuleComplete'));
+</script>

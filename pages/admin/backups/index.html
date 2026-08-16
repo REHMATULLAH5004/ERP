@@ -1,0 +1,43 @@
+<div class="module-view-container">
+    <div style="display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 20px; gap: 15px; flex-wrap: wrap;">
+        <div>
+            <h3 style="margin: 0 0 4px 0;"><i class="fa-solid fa-database"></i> Backups</h3>
+            <p class="helper-text" style="margin: 0; font-size: 0.85rem; color: #64748b;">
+                Runs automatically every night at 11:00 PM (WAT) via Supabase's own scheduler --
+                no dependency on this app being open, or on Claude. Backups older than 30 days are pruned automatically.
+            </p>
+        </div>
+        <button id="runBackupNowBtn" class="btn btn-primary" style="white-space: nowrap;">
+            <i class="fa-solid fa-play"></i> Run Backup Now
+        </button>
+    </div>
+
+    <div id="backupStatusBanner" style="display:none; margin-bottom: 15px; padding: 10px 14px; border-radius: 6px; font-size: 0.85rem;"></div>
+
+    <div class="card" style="padding: 0;">
+        <table class="table-minimal" id="backupTable">
+            <thead>
+                <tr>
+                    <th style="padding-left: 20px;">Started</th>
+                    <th>Status</th>
+                    <th>Triggered By</th>
+                    <th>Tables</th>
+                    <th>Rows</th>
+                    <th>Size</th>
+                    <th style="padding-right: 20px; text-align: right;">Download</th>
+                </tr>
+            </thead>
+            <tbody id="backupTableBody">
+                <tr>
+                    <td colspan="7" style="text-align: center; padding: 30px; color: #94a3b8;">
+                        <i class="fa-solid fa-spinner fa-spin"></i> Loading backup history...
+                    </td>
+                </tr>
+            </tbody>
+        </table>
+    </div>
+</div>
+
+<script>
+    document.dispatchEvent(new Event('loadModuleComplete'));
+</script>

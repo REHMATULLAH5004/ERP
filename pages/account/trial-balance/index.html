@@ -1,0 +1,157 @@
+<!-- ============================================ -->
+<!-- TRIAL BALANCE MODULE - ZMW Currency -->
+<!-- ============================================ -->
+
+<div class="module-view-container">
+    <div class="tb-header">
+        <div class="tb-header-left">
+            <h3><i class="fa-solid fa-scale-balanced"></i> Trial Balance</h3>
+            <span style="font-size: 0.8rem; color: #94a3b8; background: #f1f5f9; padding: 2px 10px; border-radius: 10px;">
+                <i class="fa-solid fa-coins"></i> ZMW
+            </span>
+        </div>
+        <div class="tb-header-actions">
+            <button class="btn btn-outline" onclick="refreshTrialBalance()">
+                <i class="fa-solid fa-rotate"></i> Refresh
+            </button>
+            <button class="btn btn-outline" onclick="exportTrialBalance()">
+                <i class="fa-solid fa-file-export"></i> Export
+            </button>
+        </div>
+    </div>
+
+    <div class="tb-info">
+        <p style="color: #64748b;">As of <span id="tbDate">Today</span></p>
+        <div style="display: flex; align-items: center; gap: 12px; margin-top: 8px; flex-wrap: wrap;">
+            <label style="font-weight: 500; color: #475569; font-size: 0.9rem;">
+                <i class="fa-regular fa-calendar"></i> As of:
+            </label>
+            <input type="date" id="tbDatePicker" value="" 
+                   style="padding: 6px 12px; border: 1px solid #e2e8f0; border-radius: 4px; font-size: 0.9rem;">
+            <button id="tbApplyDate" class="btn btn-primary btn-sm">
+                <i class="fa-solid fa-check"></i> Apply
+            </button>
+        </div>
+    </div>
+
+    <div class="card">
+        <div class="card-header">
+            <span><i class="fa-regular fa-file-lines"></i> Trial Balance</span>
+            <span style="font-size: 0.8rem; color: #94a3b8;" id="tbAccountCount">0 accounts</span>
+        </div>
+        <div class="table-responsive" id="trialBalanceContainer">
+            <table class="table-minimal">
+                <thead>
+                    <tr>
+                        <th style="width: 120px;">Account Code</th>
+                        <th>Account Name</th>
+                        <th style="text-align: right; width: 150px;">Debit (ZMW)</th>
+                        <th style="text-align: right; width: 150px;">Credit (ZMW)</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td colspan="4" style="text-align: center; padding: 40px; color: #94a3b8;">
+                            <i class="fa-solid fa-spinner fa-spin"></i> Loading...
+                        </td>
+                    </tr>
+                </tbody>
+                <tfoot>
+                    <tr class="total-row" style="background: #f8fafc; font-weight: 700; border-top: 2px solid #e2e8f0;">
+                        <td colspan="2" style="text-align: right; padding: 12px;">Total</td>
+                        <td style="text-align: right; padding: 12px; color: #dc2626;">K0.00</td>
+                        <td style="text-align: right; padding: 12px; color: #22c55e;">K0.00</td>
+                    </tr>
+                    <tr style="background: #f0fdf4; font-weight: 600;">
+                        <td colspan="4" style="text-align: center; padding: 12px;">
+                            <i class="fa-solid fa-circle-check" style="color: #22c55e; margin-right: 8px;"></i>
+                            ✅ TRIAL BALANCE IS BALANCED
+                        </td>
+                    </tr>
+                </tfoot>
+            </table>
+        </div>
+    </div>
+</div>
+
+<style>
+.tb-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 20px;
+    flex-wrap: wrap;
+    gap: 10px;
+}
+.tb-header-left {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+.tb-header-left h3 {
+    margin: 0;
+    font-size: 1.3rem;
+    color: #1e293b;
+}
+.tb-header-actions {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+}
+.tb-info {
+    margin-bottom: 16px;
+}
+.card {
+    background: white;
+    border-radius: 8px;
+    border: 1px solid #e2e8f0;
+    overflow: hidden;
+}
+.card-header {
+    padding: 16px 20px;
+    background: #f8fafc;
+    border-bottom: 1px solid #e2e8f0;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-weight: 600;
+    color: #1e293b;
+}
+.card-header span i {
+    margin-right: 8px;
+    color: #2563eb;
+}
+.table-responsive {
+    overflow-x: auto;
+    padding: 0;
+}
+.table-responsive table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.9rem;
+}
+.table-responsive th {
+    background: #f8fafc;
+    padding: 12px 16px;
+    text-align: left;
+    border-bottom: 2px solid #e2e8f0;
+    font-weight: 600;
+    color: #475569;
+}
+.table-responsive td {
+    padding: 10px 16px;
+    border-bottom: 1px solid #f1f5f9;
+}
+.table-responsive tr:hover {
+    background: #f8fafc;
+}
+.total-row td {
+    padding: 12px 16px !important;
+    font-weight: 700;
+}
+</style>
+
+<script>
+    // Signal that the module is ready to be initialized
+    document.dispatchEvent(new Event('loadModuleComplete'));
+</script>

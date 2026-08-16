@@ -1,0 +1,795 @@
+<div class="module-view-container">
+    <!-- Header -->
+    <div class="receivable-header">
+        <div class="receivable-header-left">
+            <h3><i class="fa-solid fa-hand-holding-dollar"></i> Receivables</h3>
+            <span class="receivable-count" id="receivableCount">Loading...</span>
+        </div>
+        <div class="receivable-header-actions">
+            <!-- NHIMA Bulk Settlement Button -->
+            <button class="btn btn-success" onclick="openNhimaBulkModal()" style="background: #059669;">
+                <i class="fa-solid fa-file-invoice"></i> NHIMA Bulk
+            </button>
+            
+            <!-- Download Template Button -->
+            <button class="btn btn-outline" onclick="downloadNhimaTemplate()" style="border-color: #059669; color: #059669;">
+                <i class="fa-solid fa-file-csv"></i> Download Template
+            </button>
+            
+            <!-- NHIMA CSV Upload Button -->
+            <button class="btn btn-outline" onclick="openNhimaSettlementModal()" style="border-color: #8b5cf6; color: #8b5cf6;">
+                <i class="fa-solid fa-upload"></i> CSV Upload
+            </button>
+            
+            <button class="btn btn-outline" onclick="refreshReceivableList()">
+                <i class="fa-solid fa-rotate"></i> Refresh
+            </button>
+        </div>
+    </div>
+
+    <!-- Stats Cards -->
+    <div class="receivable-stats">
+        <div class="stat-card" style="border-left: 4px solid #2563eb;">
+            <h4>Total Receivables</h4>
+            <p id="totalReceivableCustomers">ZK0.00</p>
+        </div>
+        <div class="stat-card" style="border-left: 4px solid #f59e0b;">
+            <h4>NHIMA Receivables</h4>
+            <p id="totalNhimaReceivables">ZK0.00</p>
+        </div>
+        <div class="stat-card" style="border-left: 4px solid #10b981;">
+            <h4>Retail Receivables</h4>
+            <p id="totalRetailReceivables">ZK0.00</p>
+        </div>
+        <div class="stat-card" style="border-left: 4px solid #8b5cf6;">
+            <h4>Wholesale Receivables</h4>
+            <p id="totalWholesaleReceivables">ZK0.00</p>
+        </div>
+        <div class="stat-card" style="border-left: 4px solid #059669;">
+            <h4>Received Today</h4>
+            <p id="totalReceivedToday">ZK0.00</p>
+        </div>
+    </div>
+
+    <!-- ============================================================ -->
+    <!-- TABLE 1: NHIMA RECEIVABLES -->
+    <!-- ============================================================ -->
+    <div class="card receivable-list-card" style="margin-bottom: 20px; border-left: 4px solid #2563eb;">
+        <div class="card-header" style="background: #eff6ff;">
+            <span><i class="fa-solid fa-file-invoice" style="color: #2563eb;"></i> NHIMA Receivables</span>
+            <span class="receivable-count" id="nhimaCount">0 claims</span>
+        </div>
+        <div class="table-responsive">
+            <table class="table-minimal" id="nhimaReceivableTable">
+                <thead>
+                    <tr>
+                        <th>Claim Number</th>
+                        <th>Customer</th>
+                        <th>NHIMA #</th>
+                        <th style="text-align: right;">Amount (ZMW)</th>
+                        <th style="text-align: right;">Paid (ZMW)</th>
+                        <th style="text-align: right;">Balance (ZMW)</th>
+                        <th style="text-align: center;">Status</th>
+                    </tr>
+                </thead>
+                <tbody id="nhimaReceivableTableBody">
+                    <tr>
+                        <td colspan="7" style="text-align: center; padding: 30px; color: #94a3b8;">
+                            <i class="fa-solid fa-spinner fa-spin"></i> Loading NHIMA claims...
+                        </td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+        <!-- NHIMA Summary -->
+        <div id="nhimaSummary" style="display: none; padding: 12px 20px; background: #f8fafc; border-top: 1px solid #e8edf3;">
+            <div style="display: flex; gap: 20px; flex-wrap: wrap; align-items: center;">
+                <span><strong>Total Claims:</strong> <span id="nhimaTotalClaims">0</span></span>
+                <span><strong>Total Amount:</strong> <span id="nhimaTotalAmount">ZK0.00</span></span>
+                <span><strong>Total Paid:</strong> <span id="nhimaTotalPaid">ZK0.00</span></span>
+                <span style="font-weight: 700; color: #dc2626;"><strong>Outstanding:</strong> <span id="nhimaOutstandingBalance">ZK0.00</span></span>
+            </div>
+            <div id="nhimaSelectionSummary" style="display: none; margin-top: 10px; padding: 10px; background: #dbeafe; border-radius: 6px;">
+                <div style="display: flex; gap: 20px; flex-wrap: wrap; align-items: center;">
+                    <span>Selected: <strong id="nhimaSelectedCount">0</strong> claims</span>
+                    <span>Total Amount: <strong id="nhimaSelectedTotal">ZK0.00</strong></span>
+                    <span>Outstanding Balance: <strong id="nhimaSelectedBalance">ZK0.00</strong></span>
+                    <button class="btn btn-primary btn-sm" onclick="processNhimaBulkSettlement()" style="background: #2563eb; color: white; border: none; padding: 6px 16px; border-radius: 4px; cursor: pointer;">
+                        <i class="fa-solid fa-file-invoice"></i> Process Selected
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ============================================================ -->
+    <!-- TABLE 2: RETAIL RECEIVABLES (REGULAR/ONLINE/STAFF) -->
+    <!-- ============================================================ -->
+    <div class="card receivable-list-card" style="margin-bottom: 20px; border-left: 4px solid #10b981;">
+        <div class="card-header" style="background: #ecfdf5;">
+            <span><i class="fa-solid fa-user" style="color: #10b981;"></i> Retail Receivables (Regular / Online / Staff)</span>
+            <span class="receivable-count" id="retailCount">0 customers</span>
+        </div>
+        <div class="table-responsive">
+            <table class="table-minimal" id="retailReceivableTable">
+                <thead>
+                    <tr>
+                        <th>Customer</th>
+                        <th>Phone</th>
+                        <th>Client Type</th>
+                        <th style="text-align: right;">Receivable (ZMW)</th>
+                        <th style="text-align: center;">Actions</th>
+                    </tr>
+                </thead>
+                <tbody id="retailReceivableTableBody">
+                    <tr>
+                        <td colspan="5" style="text-align: center; padding: 30px; color: #94a3b8;">
+                            <i class="fa-solid fa-spinner fa-spin"></i> Loading retail customers...
+                        </td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <!-- ============================================================ -->
+    <!-- TABLE 3: WHOLESALE RECEIVABLES -->
+    <!-- ============================================================ -->
+    <div class="card receivable-list-card" style="margin-bottom: 20px; border-left: 4px solid #8b5cf6;">
+        <div class="card-header" style="background: #f5f3ff;">
+            <span><i class="fa-solid fa-building" style="color: #8b5cf6;"></i> Wholesale Receivables</span>
+            <span class="receivable-count" id="wholesaleCount">0 customers</span>
+        </div>
+        <div class="table-responsive">
+            <table class="table-minimal" id="wholesaleReceivableTable">
+                <thead>
+                    <tr>
+                        <th>Customer</th>
+                        <th>Phone</th>
+                        <th>Client Type</th>
+                        <th style="text-align: right;">Receivable (ZMW)</th>
+                        <th style="text-align: center;">Actions</th>
+                    </tr>
+                </thead>
+                <tbody id="wholesaleReceivableTableBody">
+                    <tr>
+                        <td colspan="5" style="text-align: center; padding: 30px; color: #94a3b8;">
+                            <i class="fa-solid fa-spinner fa-spin"></i> Loading wholesale customers...
+                        </td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+<!-- ============================================================ -->
+<!-- NHIMA BULK CLAIMS MODAL (WITH TICK BOXES) -->
+<!-- ============================================================ -->
+<div class="modal" id="nhimaBulkModal">
+    <div class="modal-dialog modal-xl">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h4 id="nhimaBulkModalTitle"><i class="fa-solid fa-file-invoice"></i> NHIMA Bulk Claims</h4>
+                <button class="modal-close" onclick="document.getElementById('nhimaBulkModal').classList.remove('show')">&times;</button>
+            </div>
+            <div class="modal-body" id="nhimaBulkModalBody">
+                <!-- Dynamic content -->
+            </div>
+            <div class="modal-footer">
+                <div style="display:flex;align-items:center;gap:10px;flex:1;flex-wrap:wrap;">
+                    <label style="font-weight:500;font-size:0.85rem;white-space:nowrap;">
+                        <i class="fa-regular fa-calendar"></i> Settlement Date:
+                    </label>
+                    <input type="date" id="nhimaSettlementDate" class="form-control" style="width:180px;">
+                </div>
+                <button class="btn btn-outline" onclick="document.getElementById('nhimaBulkModal').classList.remove('show')">Close</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- ============================================================ -->
+<!-- NHIMA SETTLEMENT UPLOAD MODAL (CSV) -->
+<!-- ============================================================ -->
+<div class="modal" id="nhimaSettlementModal">
+    <div class="modal-dialog modal-md">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h4><i class="fa-solid fa-file-csv"></i> Upload NHIMA Settlement (CSV)</h4>
+                <button class="modal-close" onclick="document.getElementById('nhimaSettlementModal').classList.remove('show')">&times;</button>
+            </div>
+            <div class="modal-body">
+                <form id="nhimaSettlementForm">
+                    <div class="form-group">
+                        <label class="required">CSV File (NHIMA Export)</label>
+                        <input type="file" id="nhimaCsvFile" accept=".csv" required style="padding: 8px; border: 1px solid #e2e8f0; border-radius: 4px; width: 100%;">
+                        <small style="color: #64748b; display: block; margin-top: 4px;">
+                            Expected Columns: <strong>ClaimNumber, NHIMANumber, PatientName, Amount, Status</strong> (ACCEPTED/PARTIAL/REJECTED)
+                        </small>
+                    </div>
+                    <div class="form-group">
+                        <label class="required">Settlement Date</label>
+                        <input type="date" class="form-control" id="nhimaSettlementDateCsv" required>
+                    </div>
+                    <div style="padding: 12px; background: #f0fdf4; border-radius: 6px; border-left: 4px solid #10b981;">
+                        <p style="margin: 0; font-size: 0.85rem; color: #15803d;">
+                            <i class="fa-solid fa-info-circle"></i>
+                            NHIMA settlements are always processed via <strong>Bank Transfer (ZMW)</strong>
+                        </p>
+                    </div>
+                </form>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-outline" onclick="document.getElementById('nhimaSettlementModal').classList.remove('show')">Cancel</button>
+                <button class="btn btn-primary" onclick="processNhimaSettlement()">
+                    <i class="fa-solid fa-upload"></i> Process Settlement
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- ============================================================ -->
+<!-- SIMPLIFIED RETAIL RECEIPT MODAL (WITHOUT INVOICE SELECTION) -->
+<!-- ============================================================ -->
+<div class="modal" id="retailReceiptModal">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h4><i class="fa-solid fa-receipt"></i> Record Retail Receipt</h4>
+                <button class="modal-close" onclick="document.getElementById('retailReceiptModal').classList.remove('show')">&times;</button>
+            </div>
+            <div class="modal-body">
+                <!-- Customer Info -->
+                <div id="retailCustomerInfo" style="display: none; background: #f8fafc; padding: 15px; border-radius: 6px; margin-bottom: 15px;">
+                    <h5 style="margin: 0 0 10px 0; color: #0f172a;">Customer Information</h5>
+                    <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px;">
+                        <div><strong>Name:</strong> <span id="retailCustomerName" style="font-weight: 600;">-</span></div>
+                        <div><strong>Phone:</strong> <span id="retailCustomerPhone">-</span></div>
+                        <div><strong>Type:</strong> <span id="retailCustomerType" style="font-weight: 600; color: #2563eb;">-</span></div>
+                        <div><strong>Receivable:</strong> <span id="retailCustomerReceivable" style="color: #dc2626; font-weight: bold;">ZK0.00</span></div>
+                    </div>
+                </div>
+
+                <!-- ✅ SIMPLIFIED: Just enter amount -->
+                <div style="margin: 15px 0; padding: 15px; background: #f0fdf4; border-radius: 6px; border-left: 4px solid #10b981;">
+                    <p style="margin: 0; font-size: 0.85rem; color: #15803d;">
+                        <i class="fa-solid fa-info-circle"></i>
+                        Enter any amount up to the total receivable. The system will automatically apply it to the oldest invoices first.
+                    </p>
+                </div>
+
+                <div class="form-group">
+                    <label class="required">Amount to Receive (ZMW)</label>
+                    <input type="number" class="form-control" id="retailReceiptAmount" step="0.01" min="0.01" placeholder="Enter amount" required>
+                    <small style="color: #64748b;">Maximum: <span id="retailReceiptMaxAmount">ZK0.00</span></small>
+                </div>
+
+                <!-- Receipt Details -->
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 15px; margin-top: 15px;">
+                    <div class="form-group">
+                        <label class="required">Receipt Date</label>
+                        <input type="date" class="form-control" id="retailReceiptDate" required>
+                    </div>
+                    <div class="form-group">
+                        <label class="required">Payment Method</label>
+                        <select class="form-control" id="retailReceiptMethod" required>
+                            <option value="Cash">Cash (ZMW)</option>
+                            <option value="Bank Transfer">Bank Transfer (ZMW)</option>
+                        </select>
+                    </div>
+                </div>
+
+                <div class="form-group">
+                    <label>Reference Number</label>
+                    <input type="text" class="form-control" id="retailReceiptReference" placeholder="e.g. Bank Ref #">
+                </div>
+
+                <div class="form-group">
+                    <label>Notes</label>
+                    <textarea class="form-control" id="retailReceiptNotes" rows="2" placeholder="Additional notes..."></textarea>
+                </div>
+
+                <!-- Hidden fields -->
+                <input type="hidden" id="retailReceiptCustomerId" value="">
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-outline" onclick="closeRetailReceiptModal()">Cancel</button>
+                <button class="btn btn-primary" onclick="saveRetailReceipt()">
+                    <i class="fa-solid fa-floppy-disk"></i> Record Receipt
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- ============================================================ -->
+<!-- SIMPLIFIED WHOLESALE RECEIPT MODAL (WITHOUT INVOICE SELECTION) -->
+<!-- ============================================================ -->
+<div class="modal" id="wholesaleReceiptModal">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h4><i class="fa-solid fa-receipt"></i> Record Wholesale Receipt</h4>
+                <button class="modal-close" onclick="document.getElementById('wholesaleReceiptModal').classList.remove('show')">&times;</button>
+            </div>
+            <div class="modal-body">
+                <!-- Customer Info -->
+                <div id="wholesaleCustomerInfo" style="display: none; background: #f8fafc; padding: 15px; border-radius: 6px; margin-bottom: 15px;">
+                    <h5 style="margin: 0 0 10px 0; color: #0f172a;">Customer Information</h5>
+                    <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px;">
+                        <div><strong>Name:</strong> <span id="wholesaleCustomerName" style="font-weight: 600;">-</span></div>
+                        <div><strong>Phone:</strong> <span id="wholesaleCustomerPhone">-</span></div>
+                        <div><strong>Type:</strong> <span id="wholesaleCustomerType" style="font-weight: 600; color: #8b5cf6;">-</span></div>
+                        <div><strong>Receivable:</strong> <span id="wholesaleCustomerReceivable" style="color: #dc2626; font-weight: bold;">ZK0.00</span></div>
+                    </div>
+                </div>
+
+                <!-- ✅ SIMPLIFIED: Just enter amount -->
+                <div style="margin: 15px 0; padding: 15px; background: #f0fdf4; border-radius: 6px; border-left: 4px solid #10b981;">
+                    <p style="margin: 0; font-size: 0.85rem; color: #15803d;">
+                        <i class="fa-solid fa-info-circle"></i>
+                        Enter any amount up to the total receivable. The system will automatically apply it to the oldest invoices first.
+                    </p>
+                </div>
+
+                <div class="form-group">
+                    <label class="required">Amount to Receive (ZMW)</label>
+                    <input type="number" class="form-control" id="wholesaleReceiptAmount" step="0.01" min="0.01" placeholder="Enter amount" required>
+                    <small style="color: #64748b;">Maximum: <span id="wholesaleReceiptMaxAmount">ZK0.00</span></small>
+                </div>
+
+                <!-- Receipt Details -->
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 15px; margin-top: 15px;">
+                    <div class="form-group">
+                        <label class="required">Receipt Date</label>
+                        <input type="date" class="form-control" id="wholesaleReceiptDate" required>
+                    </div>
+                    <div class="form-group">
+                        <label class="required">Payment Method</label>
+                        <select class="form-control" id="wholesaleReceiptMethod" required>
+                            <option value="Cash">Cash (ZMW)</option>
+                            <option value="Bank Transfer">Bank Transfer (ZMW)</option>
+                        </select>
+                    </div>
+                </div>
+
+                <div class="form-group">
+                    <label>Reference Number</label>
+                    <input type="text" class="form-control" id="wholesaleReceiptReference" placeholder="e.g. Bank Ref #">
+                </div>
+
+                <div class="form-group">
+                    <label>Notes</label>
+                    <textarea class="form-control" id="wholesaleReceiptNotes" rows="2" placeholder="Additional notes..."></textarea>
+                </div>
+
+                <!-- Hidden fields -->
+                <input type="hidden" id="wholesaleReceiptCustomerId" value="">
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-outline" onclick="closeWholesaleReceiptModal()">Cancel</button>
+                <button class="btn btn-primary" onclick="saveWholesaleReceipt()">
+                    <i class="fa-solid fa-floppy-disk"></i> Record Receipt
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- ============================================================ -->
+<!-- CUSTOMER STATEMENT MODAL -->
+<!-- ============================================================ -->
+<div class="modal" id="statementModal">
+    <div class="modal-dialog modal-xl">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h4><i class="fa-regular fa-file-lines"></i> Customer Statement</h4>
+                <button class="modal-close" onclick="document.getElementById('statementModal').classList.remove('show')">&times;</button>
+            </div>
+            <div class="modal-body" id="statementContent">
+                <!-- Dynamic content -->
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-primary" onclick="printStatement()">
+                    <i class="fa-solid fa-print"></i> Print Statement
+                </button>
+                <button class="btn btn-outline" onclick="document.getElementById('statementModal').classList.remove('show')">Close</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- ============================================================ -->
+<!-- PRINT RECEIPT MODAL -->
+<!-- ============================================================ -->
+<div class="modal" id="printReceiptModal">
+    <div class="modal-dialog" style="max-width: 400px;">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h4><i class="fa-solid fa-print"></i> Print Receipt</h4>
+                <button class="modal-close" onclick="document.getElementById('printReceiptModal').classList.remove('show')">&times;</button>
+            </div>
+            <div class="modal-body" style="text-align: center; padding: 30px;">
+                <div style="margin-bottom: 20px;">
+                    <i class="fa-solid fa-receipt" style="font-size: 3rem; color: #10b981;"></i>
+                </div>
+                <h5 style="margin: 0 0 10px 0; color: #0f172a;">Receipt Recorded Successfully!</h5>
+                <p style="color: #64748b; margin-bottom: 20px;">Would you like to print a receipt for this transaction?</p>
+                <div style="display: flex; gap: 10px; justify-content: center;">
+                    <button class="btn btn-primary" onclick="printReceiptDocument()">
+                        <i class="fa-solid fa-print"></i> Yes, Print
+                    </button>
+                    <button class="btn btn-outline" onclick="document.getElementById('printReceiptModal').classList.remove('show')">No</button>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<style>
+.receivable-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 20px;
+    flex-wrap: wrap;
+    gap: 10px;
+}
+.receivable-header-left {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+.receivable-header-left h3 {
+    margin: 0;
+    font-size: 1.3rem;
+    color: #1e293b;
+}
+.receivable-count {
+    background: #e2e8f0;
+    color: #475569;
+    padding: 2px 10px;
+    border-radius: 12px;
+    font-size: 0.7rem;
+    font-weight: 600;
+}
+
+.receivable-stats {
+    display: grid;
+    grid-template-columns: repeat(5, 1fr);
+    gap: 15px;
+    margin-bottom: 20px;
+}
+@media (max-width: 768px) {
+    .receivable-stats {
+        grid-template-columns: repeat(2, 1fr);
+    }
+}
+.stat-card {
+    background: white;
+    padding: 16px 20px;
+    border-radius: 8px;
+    border: 1px solid #e8edf3;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+}
+.stat-card h4 {
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: #64748b;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin: 0 0 4px 0;
+}
+.stat-card p {
+    font-size: 1.5rem;
+    font-weight: 700;
+    margin: 0;
+    color: #0f172a;
+}
+
+.btn {
+    padding: 8px 16px;
+    border: none;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 0.85rem;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    transition: all 0.2s;
+}
+.btn-primary {
+    background: #2563eb;
+    color: white;
+}
+.btn-primary:hover {
+    background: #1d4ed8;
+}
+.btn-outline {
+    background: transparent;
+    color: #475569;
+    border: 1px solid #cbd5e1;
+}
+.btn-outline:hover {
+    background: #f1f5f9;
+}
+.btn-sm {
+    padding: 4px 12px;
+    font-size: 0.75rem;
+}
+.btn-success {
+    background: #10b981;
+    color: white;
+}
+.btn-success:hover {
+    background: #059669;
+}
+
+.card {
+    background: white;
+    border-radius: 10px;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+    border: 1px solid #e8edf3;
+    overflow: hidden;
+}
+.card-header {
+    padding: 12px 20px;
+    border-bottom: 1px solid #e8edf3;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-weight: 500;
+    color: #475569;
+}
+.table-responsive {
+    overflow-x: auto;
+}
+.table-minimal {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.85rem;
+}
+.table-minimal thead th {
+    background: #f8fafc;
+    color: #475569;
+    font-weight: 600;
+    padding: 10px 12px;
+    text-align: left;
+    border-bottom: 2px solid #e2e8f0;
+}
+.table-minimal tbody td {
+    padding: 10px 12px;
+    border-bottom: 1px solid #f1f5f9;
+    vertical-align: middle;
+}
+.table-minimal tbody tr:hover {
+    background: #f8fafc;
+}
+
+.customer-name-link {
+    color: #2563eb;
+    text-decoration: none;
+    font-weight: 500;
+    cursor: pointer;
+}
+.customer-name-link:hover {
+    text-decoration: underline;
+}
+
+.client-type-badge {
+    padding: 2px 10px;
+    border-radius: 12px;
+    font-size: 0.7rem;
+    font-weight: 600;
+    display: inline-block;
+}
+.client-type-nhima {
+    background: #dbeafe;
+    color: #1d4ed8;
+}
+.client-type-regular {
+    background: #dcfce7;
+    color: #15803d;
+}
+.client-type-online {
+    background: #fef3c7;
+    color: #b45309;
+}
+.client-type-staff {
+    background: #f3e8ff;
+    color: #6b21a5;
+}
+.client-type-internal {
+    background: #e0e7ff;
+    color: #4338ca;
+}
+.client-type-wholesale {
+    background: #ede9fe;
+    color: #7c3aed;
+}
+
+.form-group {
+    margin-bottom: 15px;
+}
+.form-group label {
+    display: block;
+    font-weight: 500;
+    color: #475569;
+    margin-bottom: 5px;
+}
+.form-group label.required::after {
+    content: ' *';
+    color: #dc2626;
+}
+.form-control {
+    width: 100%;
+    padding: 8px 12px;
+    border: 1px solid #e2e8f0;
+    border-radius: 6px;
+    font-size: 0.85rem;
+    background: white;
+    transition: border-color 0.2s;
+}
+.form-control:focus {
+    outline: none;
+    border-color: #2563eb;
+    box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.1);
+}
+
+.modal {
+    display: none;
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: rgba(0,0,0,0.5);
+    z-index: 1000;
+    animation: modalFadeIn 0.25s ease;
+}
+.modal.show {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+@keyframes modalFadeIn {
+    from { opacity: 0; transform: scale(0.95); }
+    to { opacity: 1; transform: scale(1); }
+}
+.modal-dialog {
+    width: 95%;
+    max-width: 900px;
+    max-height: 90vh;
+    display: flex;
+    flex-direction: column;
+}
+.modal-xl {
+    max-width: 1200px;
+}
+.modal-content {
+    background: white;
+    border-radius: 12px;
+    display: flex;
+    flex-direction: column;
+    max-height: 90vh;
+    overflow: hidden;
+}
+.modal-header {
+    padding: 16px 24px;
+    border-bottom: 1px solid #e8edf3;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    flex-shrink: 0;
+}
+.modal-header h4 {
+    margin: 0;
+    color: #1e293b;
+}
+.modal-close {
+    background: none;
+    border: none;
+    font-size: 1.5rem;
+    cursor: pointer;
+    color: #94a3b8;
+    padding: 0 8px;
+}
+.modal-close:hover {
+    color: #475569;
+}
+.modal-body {
+    padding: 20px 24px;
+    overflow-y: auto;
+    flex: 1;
+}
+.modal-footer {
+    padding: 12px 24px;
+    border-top: 1px solid #e8edf3;
+    display: flex;
+    gap: 10px;
+    justify-content: flex-end;
+    flex-shrink: 0;
+    flex-wrap: wrap;
+}
+
+.statement-header {
+    text-align: center;
+    border-bottom: 2px solid #333;
+    padding-bottom: 15px;
+    margin-bottom: 20px;
+}
+.statement-header h2 {
+    margin: 0;
+    color: #0f172a;
+}
+.statement-header p {
+    margin: 3px 0;
+    color: #475569;
+    font-size: 0.9rem;
+}
+.statement-info {
+    background: #f8fafc;
+    padding: 15px;
+    border-radius: 6px;
+    margin-bottom: 20px;
+}
+.statement-info table {
+    width: 100%;
+}
+.statement-info td {
+    padding: 4px 8px;
+}
+.statement-info .label {
+    font-weight: 600;
+    width: 140px;
+    color: #475569;
+}
+.statement-table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 15px 0;
+    font-size: 0.9rem;
+}
+.statement-table th {
+    background: #f1f5f9;
+    padding: 10px;
+    text-align: left;
+    border: 1px solid #e2e8f0;
+}
+.statement-table td {
+    padding: 10px;
+    border: 1px solid #e2e8f0;
+}
+.statement-table .text-right {
+    text-align: right;
+}
+.statement-table .total-row {
+    font-weight: bold;
+    background: #f8fafc;
+}
+.statement-table .credit {
+    color: #15803d;
+}
+.statement-table .debit {
+    color: #dc2626;
+}
+
+/* Close button styling */
+.close-btn {
+    background: none;
+    border: none;
+    font-size: 1.5rem;
+    cursor: pointer;
+    color: #94a3b8;
+    padding: 0 8px;
+}
+.close-btn:hover {
+    color: #475569;
+}
+</style>
+
+<script>
+    document.dispatchEvent(new Event('loadModuleComplete'));
+</script>

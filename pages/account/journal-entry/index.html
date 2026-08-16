@@ -1,0 +1,549 @@
+<!-- ============================================ -->
+<!-- JOURNAL ENTRY MODULE -->
+<!-- ============================================ -->
+
+<div class="module-view-container">
+    <!-- Header -->
+    <div class="journal-header-main">
+        <div class="journal-header-left">
+            <h3><i class="fa-solid fa-feather-pointed"></i> Journal Entry</h3>
+            <span class="journal-count" id="journalCount">0 entries</span>
+        </div>
+        <div class="journal-header-actions">
+            <button class="btn btn-primary" onclick="openNewJournalEntry()">
+                <i class="fa-solid fa-plus"></i> New Entry
+            </button>
+            <button class="btn btn-outline" onclick="refreshJournal()">
+                <i class="fa-solid fa-rotate"></i> Refresh
+            </button>
+        </div>
+    </div>
+
+    <!-- Journal Entry Form -->
+    <div class="card journal-form-card">
+        <div class="card-header">
+            <span><i class="fa-regular fa-pen-to-square"></i> New Journal Entry</span>
+        </div>
+        <div class="card-body">
+            <!-- Journal Header -->
+            <div class="journal-header">
+                <div class="journal-field">
+                    <label class="required">Entry Date</label>
+                    <input type="date" class="form-control" id="journalDate">
+                </div>
+                <div class="journal-field">
+                    <label>Reference</label>
+                    <input type="text" class="form-control" id="journalReference" placeholder="e.g., INV-001, PAY-001">
+                </div>
+                <div class="journal-field" style="grid-column: span 2;">
+                    <label class="required">Description</label>
+                    <input type="text" class="form-control" id="journalDescription" placeholder="Enter description...">
+                </div>
+            </div>
+
+            <!-- Journal Lines -->
+            <div class="journal-lines-section">
+                <div class="journal-lines-header">
+                    <span><i class="fa-regular fa-list"></i> Journal Lines</span>
+                    <span id="journalLineCount">0 lines</span>
+                </div>
+                <div class="table-responsive">
+                    <table class="table-minimal" id="journalLinesTable">
+                        <thead>
+                            <tr>
+                                <th style="width: 30px;">#</th>
+                                <th style="min-width: 200px;">Account *</th>
+                                <th style="min-width: 180px;">Description</th>
+                                <th style="width: 130px; text-align: right;">Debit</th>
+                                <th style="width: 130px; text-align: right;">Credit</th>
+                                <th style="width: 50px; text-align: center;">Action</th>
+                            </tr>
+                        </thead>
+                        <tbody id="journalLinesBody">
+                            <tr>
+                                <td colspan="6" class="text-center text-muted" style="padding: 30px;">
+                                    <i class="fa-regular fa-plus" style="display: block; margin-bottom: 8px; font-size: 1.5rem;"></i>
+                                    Add journal lines below
+                                </td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+                <div style="margin-top: 10px; display: flex; gap: 10px; flex-wrap: wrap;">
+                    <button class="btn btn-sm btn-outline" onclick="addJournalLine()">
+                        <i class="fa-solid fa-plus"></i> Add Line
+                    </button>
+                    <button class="btn btn-sm btn-outline" onclick="addContraEntry()" style="color: #2563eb;">
+                        <i class="fa-solid fa-arrows-left-right"></i> Add Contra Entry
+                    </button>
+                    <span style="font-size: 0.75rem; color: #64748b; display: flex; align-items: center; margin-left: auto;">
+                        <i class="fa-solid fa-info-circle"></i> &nbsp; Total Debit must equal Total Credit
+                    </span>
+                </div>
+            </div>
+
+            <!-- Journal Summary -->
+            <div class="journal-summary">
+                <div class="journal-summary-item">
+                    <span>Total Debit</span>
+                    <strong id="journalTotalDebit" style="color: #dc2626;">$0.00</strong>
+                </div>
+                <div class="journal-summary-item">
+                    <span>Total Credit</span>
+                    <strong id="journalTotalCredit" style="color: #22c55e;">$0.00</strong>
+                </div>
+                <div class="journal-summary-item total">
+                    <span>Difference</span>
+                    <strong id="journalDifference">$0.00</strong>
+                </div>
+            </div>
+
+            <!-- Form Actions -->
+            <div style="display: flex; gap: 10px; justify-content: flex-end; margin-top: 15px; border-top: 1px solid #e2e8f0; padding-top: 15px;">
+                <button class="btn btn-outline" onclick="resetJournalForm()">
+                    <i class="fa-solid fa-rotate-left"></i> Clear
+                </button>
+                <button class="btn btn-primary" onclick="saveJournalEntry()">
+                    <i class="fa-solid fa-floppy-disk"></i> Post Entry
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Recent Journal Entries -->
+    <div class="card">
+        <div class="card-header">
+            <span><i class="fa-regular fa-clock"></i> Recent Entries</span>
+            <span class="entry-count" id="entryCount">0 entries</span>
+        </div>
+        <div class="table-responsive">
+            <table class="table-minimal" id="journalTable">
+                <thead>
+                    <tr>
+                        <th style="width: 100px;">Date</th>
+                        <th style="width: 120px;">Journal #</th>
+                        <th>Description</th>
+                        <th style="width: 120px; text-align: right;">Debit</th>
+                        <th style="width: 120px; text-align: right;">Credit</th>
+                        <th style="width: 100px; text-align: center;">Status</th>
+                        <th style="width: 130px; text-align: center;">Actions</th>
+                    </tr>
+                </thead>
+                <tbody id="journalTableBody">
+                    <tr>
+                        <td colspan="7" style="text-align: center; padding: 40px; color: #94a3b8;">
+                            <i class="fa-solid fa-spinner fa-spin"></i> Loading entries...
+                        </td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+<!-- ============================================================ -->
+<!-- JOURNAL ENTRY MODAL -->
+<!-- ============================================================ -->
+<div class="modal" id="journalModal">
+    <div class="modal-dialog modal-xl">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h4 id="journalModalTitle"><i class="fa-solid fa-feather-pointed"></i> Journal Entry</h4>
+                <button class="modal-close" onclick="closeModal('journalModal')">&times;</button>
+            </div>
+            <div class="modal-body">
+                <input type="hidden" id="editJournalId" value="">
+
+                <!-- Journal Header -->
+                <div class="journal-header">
+                    <div class="journal-field">
+                        <label class="required">Entry Date</label>
+                        <input type="date" class="form-control" id="journalDate">
+                    </div>
+                    <div class="journal-field">
+                        <label>Reference</label>
+                        <input type="text" class="form-control" id="journalReference" placeholder="e.g., INV-001">
+                    </div>
+                    <div class="journal-field" style="grid-column: span 2;">
+                        <label class="required">Description</label>
+                        <input type="text" class="form-control" id="journalDescription" placeholder="Enter description...">
+                    </div>
+                </div>
+
+                <!-- Journal Lines -->
+                <div class="journal-lines-section">
+                    <div class="journal-lines-header">
+                        <span>Journal Lines</span>
+                        <span id="journalLineCount">0 lines</span>
+                    </div>
+                    <div class="table-responsive">
+                        <table class="table-minimal" id="journalLinesTable">
+                            <thead>
+                                <tr>
+                                    <th style="width: 30px;">#</th>
+                                    <th>Account *</th>
+                                    <th style="width: 200px;">Description</th>
+                                    <th style="width: 120px; text-align: right;">Debit</th>
+                                    <th style="width: 120px; text-align: right;">Credit</th>
+                                    <th style="width: 50px; text-align: center;">Action</th>
+                                </tr>
+                            </thead>
+                            <tbody id="journalLinesBody">
+                                <tr>
+                                    <td colspan="6" class="text-center text-muted" style="padding: 30px;">
+                                        <i class="fa-regular fa-plus" style="display: block; margin-bottom: 8px;"></i>
+                                        Add journal lines below
+                                    </td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                    <div style="margin-top: 10px;">
+                        <button class="btn btn-sm btn-outline" onclick="addJournalLine()">
+                            <i class="fa-solid fa-plus"></i> Add Line
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Journal Summary -->
+                <div class="journal-summary">
+                    <div class="journal-summary-item">
+                        <span>Total Debit</span>
+                        <strong id="journalTotalDebit">$0.00</strong>
+                    </div>
+                    <div class="journal-summary-item">
+                        <span>Total Credit</span>
+                        <strong id="journalTotalCredit">$0.00</strong>
+                    </div>
+                    <div class="journal-summary-item total">
+                        <span>Difference</span>
+                        <strong id="journalDifference">$0.00</strong>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-outline" onclick="closeModal('journalModal')">Cancel</button>
+                <button class="btn btn-primary" onclick="saveJournalEntry()">
+                    <i class="fa-solid fa-floppy-disk"></i> Post Entry
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<style>
+.journal-header-main {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 20px;
+    flex-wrap: wrap;
+    gap: 10px;
+}
+.journal-header-left {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+.journal-header-left h3 {
+    margin: 0;
+    font-size: 1.3rem;
+    color: #1e293b;
+}
+.journal-count {
+    background: #e2e8f0;
+    color: #475569;
+    padding: 2px 10px;
+    border-radius: 12px;
+    font-size: 0.7rem;
+    font-weight: 600;
+}
+.journal-header-actions {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+}
+
+.journal-form-card .card-body {
+    padding: 20px;
+}
+
+.journal-header {
+    display: grid;
+    grid-template-columns: 1fr 1fr 2fr;
+    gap: 15px;
+    margin-bottom: 20px;
+}
+@media (max-width: 768px) {
+    .journal-header {
+        grid-template-columns: 1fr;
+    }
+}
+.journal-field {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+.journal-field label {
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: #64748b;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+.journal-field label.required::after {
+    content: ' *';
+    color: #dc2626;
+}
+
+.journal-lines-section {
+    margin: 16px 0;
+}
+.journal-lines-header {
+    display: flex;
+    justify-content: space-between;
+    padding: 8px 0;
+    font-weight: 500;
+    color: #475569;
+}
+
+.journal-summary {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    padding: 16px 0;
+    border-top: 2px solid #e8edf3;
+    margin-top: 8px;
+    gap: 4px;
+}
+.journal-summary-item {
+    display: flex;
+    justify-content: space-between;
+    width: 280px;
+    padding: 4px 0;
+}
+.journal-summary-item.total {
+    font-size: 1.1rem;
+    border-top: 2px solid #e8edf3;
+    padding-top: 8px;
+    margin-top: 4px;
+}
+.journal-summary-item.total strong {
+    color: #2563eb;
+    font-size: 1.2rem;
+}
+.journal-summary-item.total .balanced {
+    color: #22c55e;
+}
+.journal-summary-item.total .unbalanced {
+    color: #dc2626;
+}
+
+.btn {
+    padding: 8px 16px;
+    border: none;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 0.85rem;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    transition: all 0.2s;
+}
+.btn-primary {
+    background: #2563eb;
+    color: white;
+}
+.btn-primary:hover {
+    background: #1d4ed8;
+}
+.btn-outline {
+    background: transparent;
+    color: #475569;
+    border: 1px solid #cbd5e1;
+}
+.btn-outline:hover {
+    background: #f1f5f9;
+}
+.btn-sm {
+    padding: 4px 12px;
+    font-size: 0.75rem;
+}
+
+.card {
+    background: white;
+    border-radius: 10px;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+    border: 1px solid #e8edf3;
+    overflow: hidden;
+}
+.card-header {
+    padding: 12px 20px;
+    border-bottom: 1px solid #e8edf3;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-weight: 500;
+    color: #475569;
+}
+.table-responsive {
+    overflow-x: auto;
+}
+.table-minimal {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.85rem;
+}
+.table-minimal thead th {
+    background: #f8fafc;
+    color: #475569;
+    font-weight: 600;
+    padding: 10px 12px;
+    text-align: left;
+    border-bottom: 2px solid #e2e8f0;
+}
+.table-minimal tbody td {
+    padding: 10px 12px;
+    border-bottom: 1px solid #f1f5f9;
+    vertical-align: middle;
+}
+.table-minimal tbody tr:hover {
+    background: #f8fafc;
+}
+.table-minimal .text-right {
+    text-align: right;
+}
+.table-minimal .text-center {
+    text-align: center;
+}
+
+.status-badge {
+    padding: 3px 12px;
+    border-radius: 12px;
+    font-size: 0.7rem;
+    font-weight: 600;
+    display: inline-block;
+}
+.status-approved { background: #dcfce7; color: #15803d; }
+.status-draft { background: #e2e8f0; color: #475569; }
+
+.action-btn {
+    background: transparent;
+    border: none;
+    cursor: pointer;
+    padding: 4px 8px;
+    border-radius: 4px;
+    color: #94a3b8;
+    transition: all 0.2s;
+    font-size: 0.85rem;
+}
+.action-btn:hover {
+    background: #f1f5f9;
+    color: #2563eb;
+}
+
+.form-control {
+    width: 100%;
+    padding: 8px 12px;
+    border: 1px solid #e2e8f0;
+    border-radius: 6px;
+    font-size: 0.85rem;
+    background: white;
+    transition: border-color 0.2s;
+}
+.form-control:focus {
+    outline: none;
+    border-color: #2563eb;
+    box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.1);
+}
+
+.modal {
+    display: none;
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: rgba(0,0,0,0.5);
+    z-index: 1000;
+    animation: modalFadeIn 0.25s ease;
+}
+.modal.show {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+@keyframes modalFadeIn {
+    from { opacity: 0; transform: scale(0.95); }
+    to { opacity: 1; transform: scale(1); }
+}
+.modal-dialog {
+    width: 95%;
+    max-width: 1200px;
+    max-height: 90vh;
+    display: flex;
+    flex-direction: column;
+}
+.modal-xl {
+    max-width: 1400px;
+}
+.modal-content {
+    background: white;
+    border-radius: 12px;
+    display: flex;
+    flex-direction: column;
+    max-height: 90vh;
+    overflow: hidden;
+}
+.modal-header {
+    padding: 16px 24px;
+    border-bottom: 1px solid #e8edf3;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    flex-shrink: 0;
+}
+.modal-header h4 {
+    margin: 0;
+    color: #1e293b;
+}
+.modal-close {
+    background: none;
+    border: none;
+    font-size: 1.5rem;
+    cursor: pointer;
+    color: #94a3b8;
+    padding: 0 8px;
+}
+.modal-close:hover {
+    color: #475569;
+}
+.modal-body {
+    padding: 20px 24px;
+    overflow-y: auto;
+    flex: 1;
+}
+.modal-footer {
+    padding: 12px 24px;
+    border-top: 1px solid #e8edf3;
+    display: flex;
+    gap: 10px;
+    justify-content: flex-end;
+    flex-shrink: 0;
+    flex-wrap: wrap;
+}
+
+.text-center {
+    text-align: center;
+}
+.text-muted {
+    color: #94a3b8;
+}
+.text-right {
+    text-align: right;
+}
+</style>
+
+<script>
+    document.dispatchEvent(new Event('loadModuleComplete'));
+</script>

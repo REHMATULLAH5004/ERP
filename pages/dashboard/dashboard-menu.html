@@ -1,0 +1,83 @@
+<div class="sidebar-module-title"><i class="fa-solid fa-gauge-high"></i> DASHBOARD</div>
+<p class="helper-text" style="padding: 0 20px; font-size: 0.8rem;">
+    Your quick attendance and leave requests are on this page.
+</p>
+
+<!-- 🔥 CHANGED: QUICK ACTIONS -->
+<!-- Used to shortcut to Request Leave / Request Advance / Exchange Rate
+     -- but those already have their own full cards further down THIS
+     SAME Dashboard page (dashLeaveModal / dashAdvanceModal /
+     dashExchangeRateModal all live in dashboard-view.html), so the
+     sidebar was just duplicating buttons already on screen. Replaced
+     with shortcuts to the three highest-traffic modules instead: Sales,
+     Purchase, Expense -- genuinely different destinations, not visible
+     anywhere else on this page.
+
+     goToTransactionSubModule() is defined once in app.js (a thin,
+     role-checked wrapper around loadSubModule('transaction', ...) --
+     the exact same call the real Transaction sidebar uses). Calling the
+     GLOBAL app.js function (not dashboard-view.js) is what makes plain
+     inline onclick safe here: app.js is loaded once in the root
+     index.html and never torn down, unlike the sidebar (this file) and
+     the main view, which load via two INDEPENDENT fetches in
+     loadModule() with no ordering guarantee between them.
+
+     Keyboard shortcuts (S / P / E, no modifier needed) do the same
+     thing from anywhere in the app -- also wired once in app.js. See
+     the comment there for why bare keys are safe (nothing else in this
+     app uses an unmodified letter as a shortcut) and why they're
+     skipped while typing in a field. -->
+<div style="padding: 0 20px; margin-top: 20px;">
+    <div style="font-size:0.7rem; font-weight:700; color:#94a3b8; letter-spacing:0.5px; text-transform:uppercase; margin-bottom:8px;">Quick Actions</div>
+    <button class="btn btn-primary btn-sm" style="width:100%; margin-bottom:8px; display:flex; justify-content:space-between; align-items:center;"
+        onclick="goToTransactionSubModule('retail')" title="Keyboard shortcut: S">
+        <span><i class="fa-solid fa-cart-shopping"></i> Sales</span>
+        <span style="opacity:0.7; font-size:0.7rem; border:1px solid rgba(255,255,255,0.5); border-radius:4px; padding:1px 5px;">S</span>
+    </button>
+    <button class="btn btn-primary btn-sm" style="width:100%; margin-bottom:8px; display:flex; justify-content:space-between; align-items:center;"
+        onclick="goToTransactionSubModule('purchase')" title="Keyboard shortcut: P">
+        <span><i class="fa-solid fa-truck-ramp-box"></i> Purchase</span>
+        <span style="opacity:0.7; font-size:0.7rem; border:1px solid rgba(255,255,255,0.5); border-radius:4px; padding:1px 5px;">P</span>
+    </button>
+    <button class="btn btn-primary btn-sm" style="width:100%; margin-bottom:8px; display:flex; justify-content:space-between; align-items:center;"
+        onclick="goToTransactionSubModule('expense')" title="Keyboard shortcut: E">
+        <span><i class="fa-solid fa-money-bill-wave"></i> Expense</span>
+        <span style="opacity:0.7; font-size:0.7rem; border:1px solid rgba(255,255,255,0.5); border-radius:4px; padding:1px 5px;">E</span>
+    </button>
+</div>
+
+<!-- 🔥 ADDED: TODAY AT A GLANCE -->
+<!-- Populated by loadSidebarStats() in dashboard-view.js -- left as "--"
+     here since this file's own <script> tags (if any) would never run
+     anyway (browsers don't execute scripts inserted via innerHTML, same
+     reason app.js's loadModule() injects view.js as a real <script>
+     element instead of relying on markup). -->
+<div style="padding: 0 20px; margin-top: 24px;">
+    <div style="font-size:0.7rem; font-weight:700; color:#94a3b8; letter-spacing:0.5px; text-transform:uppercase; margin-bottom:8px;">Today at a Glance</div>
+    <div style="background:#f8fafc; border-radius:8px; padding:12px; margin-bottom:8px; display:flex; justify-content:space-between; align-items:center;">
+        <span style="font-size:0.8rem; color:#64748b;">Sales Today</span>
+        <span style="font-weight:700; color:#0f172a;" id="dashSidebarTodaySales">--</span>
+    </div>
+    <div id="dashSidebarApprovalsRow" style="background:#f8fafc; border-radius:8px; padding:12px; display:none; justify-content:space-between; align-items:center;">
+        <span style="font-size:0.8rem; color:#64748b;">Pending Approvals</span>
+        <span style="font-weight:700; color:#dc2626;" id="dashSidebarPendingApprovals">--</span>
+    </div>
+</div>
+
+<!-- 🔥 ADDED: NOTICE BOARD -->
+<!-- Populated by loadSidebarNotices() in dashboard-view.js. The "+ Post"
+     button is shown/hidden by role from that same function -- kept
+     display:none here by default so a non-Admin never sees it flash
+     before the role check runs. -->
+<div style="padding: 0 20px; margin-top: 24px; margin-bottom: 20px;">
+    <div style="display:flex; justify-content:space-between; align-items:center;">
+        <div style="font-size:0.7rem; font-weight:700; color:#94a3b8; letter-spacing:0.5px; text-transform:uppercase;">Notice Board</div>
+        <button id="dashSidebarPostNoticeBtn" style="display:none; background:none; border:none; color:#2563eb; cursor:pointer; font-size:0.8rem; font-weight:600;"
+            onclick="const m=document.getElementById('dashPostNoticeModal'); if(m) m.style.display='flex';">
+            <i class="fa-solid fa-plus"></i> Post
+        </button>
+    </div>
+    <div id="dashSidebarNotices" style="margin-top:8px;">
+        <p class="helper-text" style="font-size:0.75rem; padding:8px 0;"><i class="fa-solid fa-spinner fa-spin"></i> Loading...</p>
+    </div>
+</div>

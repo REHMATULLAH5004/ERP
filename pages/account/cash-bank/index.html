@@ -1,0 +1,304 @@
+<!-- ============================================ -->
+<!-- CASH & BANK MANAGEMENT MODULE (TRANSFER ONLY) -->
+<!-- ============================================ -->
+
+<div class="module-view-container">
+    <!-- Header -->
+    <div class="cash-header">
+        <div class="cash-header-left">
+            <h3><i class="fa-solid fa-building-columns"></i> Cash & Bank Management</h3>
+            <span class="cash-count" id="transactionCount">0 transactions</span>
+        </div>
+        <div class="cash-header-actions">
+            <button class="btn btn-primary" onclick="openNewTransfer()">
+                <i class="fa-solid fa-arrows-left-right"></i> New Transfer
+            </button>
+            <!-- 🔥 ADDED: Set Opening Balance -->
+            <button class="btn btn-outline" onclick="openOpeningBalanceModal()">
+                <i class="fa-solid fa-coins"></i> Set Opening Balance
+            </button>
+            <button class="btn btn-outline" onclick="refreshCashData()">
+                <i class="fa-solid fa-rotate"></i> Refresh
+            </button>
+        </div>
+    </div>
+
+    <!-- Account Balance Cards (Based on Real GL) -->
+    <div class="cash-balances">
+        <div class="balance-card" style="border-left: 4px solid #10b981;">
+            <div class="balance-icon">
+                <i class="fa-solid fa-coins"></i>
+            </div>
+            <div class="balance-info">
+                <span class="balance-label">Cash in Hand (ZMW)</span>
+                <span class="balance-amount" id="cashBalance">ZK 0.00</span>
+                <span class="balance-sub" id="cashCount">0 transactions</span>
+            </div>
+        </div>
+        <div class="balance-card" style="border-left: 4px solid #2563eb;">
+            <div class="balance-icon">
+                <i class="fa-solid fa-dollar-sign"></i>
+            </div>
+            <div class="balance-info">
+                <span class="balance-label">Bank Account (USD)</span>
+                <span class="balance-amount" id="usdBalance">$ 0.00</span>
+                <span class="balance-sub" id="usdCount">0 transactions</span>
+            </div>
+        </div>
+        <div class="balance-card" style="border-left: 4px solid #f59e0b;">
+            <div class="balance-icon">
+                <i class="fa-solid fa-k"></i>
+            </div>
+            <div class="balance-info">
+                <span class="balance-label">Bank Account (ZMW)</span>
+                <span class="balance-amount" id="zmwBalance">ZK 0.00</span>
+                <span class="balance-sub" id="zmwCount">0 transactions</span>
+            </div>
+        </div>
+    </div>
+
+    <!-- Exchange Rate Info -->
+    <div class="exchange-rate-bar">
+        <div style="display: flex; gap: 20px; flex-wrap: wrap; align-items: center;">
+            <span style="font-weight: 600; color: #475569;">
+                <i class="fa-solid fa-arrows-left-right"></i> Exchange Rates:
+            </span>
+            <span style="background: #f1f5f9; padding: 4px 12px; border-radius: 4px; font-size: 0.85rem;">
+                USD → ZMW: <strong id="usdToZmwRate">25.00</strong>
+            </span>
+            <span style="background: #f1f5f9; padding: 4px 12px; border-radius: 4px; font-size: 0.85rem;">
+                ZMW → USD: <strong id="zmwToUsdRate">0.0400</strong>
+            </span>
+            <button class="btn btn-sm btn-outline" onclick="editExchangeRate()" style="font-size: 0.7rem;">
+                <i class="fa-solid fa-pen"></i> Update Rate
+            </button>
+        </div>
+    </div>
+
+    <!-- Filters -->
+    <div class="cash-filters">
+        <div class="filter-group">
+            <select class="form-control" id="accountFilter">
+                <option value="all">All Accounts</option>
+                <option value="1111">Cash in Hand (ZMW)</option>
+                <option value="1120">Bank - USD</option>
+                <option value="1121">Bank - ZMW</option>
+            </select>
+            <input type="date" class="form-control" id="startDate" style="min-width: 140px;">
+            <input type="date" class="form-control" id="endDate" style="min-width: 140px;">
+            <button class="btn btn-sm btn-primary" onclick="applyFilters()">
+                <i class="fa-solid fa-filter"></i> Apply
+            </button>
+        </div>
+    </div>
+
+    <!-- Transaction List (Pulls directly from the GL) -->
+    <div class="card cash-list-card">
+        <div class="card-header">
+            <span><i class="fa-regular fa-clock"></i> Transaction History (GL)</span>
+            <span class="cash-count" id="transactionListCount">0 transactions</span>
+        </div>
+        <div class="table-responsive">
+            <table class="table-minimal" id="transactionTable">
+                <thead>
+                    <tr>
+                        <th style="padding-left: 20px;">Date</th>
+                        <th>Account</th>
+                        <th>Description</th>
+                        <th>Reference</th>
+                        <th style="text-align: right;">Debit</th>
+                        <th style="text-align: right;">Credit</th>
+                        <th style="text-align: right;">Balance</th>
+                    </tr>
+                </thead>
+                <tbody id="transactionTableBody">
+                    <tr>
+                        <td colspan="7" style="text-align: center; padding: 40px; color: #94a3b8;">
+                            <i class="fa-solid fa-spinner fa-spin"></i> Loading GL transactions...
+                        </td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+<!-- ============================================================ -->
+<!-- NEW TRANSFER MODAL -->
+<!-- ============================================================ -->
+<div class="modal" id="transferModal">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h4><i class="fa-solid fa-arrows-left-right"></i> Internal Transfer</h4>
+                <button class="modal-close" onclick="closeModal('transferModal')">&times;</button>
+            </div>
+            <div class="modal-body">
+                <form id="transferForm">
+                    <input type="hidden" id="editTransferId" value="">
+
+                    <!-- From Account -->
+                    <div class="form-group">
+                        <label class="required">Transfer From</label>
+                        <select class="form-control" id="fromAccount" required>
+                            <option value="">Select Source Account</option>
+                            <option value="1111">💰 Cash in Hand (ZMW)</option>
+                            <option value="1120">💵 Bank - USD</option>
+                            <option value="1121">🏦 Bank - ZMW</option>
+                        </select>
+                    </div>
+
+                    <!-- To Account -->
+                    <div class="form-group">
+                        <label class="required">Transfer To</label>
+                        <select class="form-control" id="toAccount" required>
+                            <option value="">Select Destination Account</option>
+                            <option value="1111">💰 Cash in Hand (ZMW)</option>
+                            <option value="1120">💵 Bank - USD</option>
+                            <option value="1121">🏦 Bank - ZMW</option>
+                        </select>
+                    </div>
+
+                    <!-- Amount -->
+                    <div class="form-group">
+                        <label class="required">Amount <span style="font-weight:400; color:#94a3b8;">(in the source account's currency)</span></label>
+                        <div style="display: flex; gap: 10px; align-items: center;">
+                            <input type="number" class="form-control" id="txAmount" step="0.01" min="0.01" required placeholder="0.00" style="flex: 1;">
+                            <span id="txCurrencySymbol" style="font-weight: 600; color: #2563eb; min-width: 30px;">ZK</span>
+                        </div>
+                    </div>
+
+                    <!-- Exchange Rate -->
+                    <div class="form-group" id="exchangeRateGroup" style="display: none;">
+                        <label>Exchange Rate</label>
+                        <div style="display: flex; gap: 10px; align-items: center;">
+                            <input type="number" class="form-control" id="txExchangeRate" step="0.0001" min="0.0001" placeholder="Enter rate" style="flex: 1;">
+                            <span id="txExchangeRateLabel" style="font-size: 0.8rem; color: #64748b;">(ZMW per USD)</span>
+                        </div>
+                        <small style="color: #64748b;">Required when transferring between USD and ZMW accounts. Always entered as how many ZMW equal 1 USD -- applied automatically in whichever direction you're actually transferring.</small>
+                    </div>
+
+                    <!-- Converted Amount Display -->
+                    <div id="convertedAmountDisplay" style="display: none; background: #f8fafc; padding: 8px 12px; border-radius: 6px; margin-top: 5px;">
+                        <span style="font-size: 0.85rem; color: #475569;">
+                            Converted Amount: <strong id="convertedAmountText">ZK 0.00</strong>
+                        </span>
+                    </div>
+
+                    <!-- Description -->
+                    <div class="form-group">
+                        <label class="required">Description</label>
+                        <input type="text" class="form-control" id="txDescription" required placeholder="e.g. Cash to Bank transfer">
+                    </div>
+
+                    <!-- Reference -->
+                    <div class="form-group">
+                        <label>Reference Number</label>
+                        <input type="text" class="form-control" id="txReference" placeholder="e.g. TRANS-001">
+                    </div>
+
+                    <!-- Date -->
+                    <div class="form-group">
+                        <label class="required">Transaction Date</label>
+                        <input type="date" class="form-control" id="txDate" required>
+                    </div>
+                </form>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-outline" onclick="closeModal('transferModal')">Cancel</button>
+                <button class="btn btn-primary" onclick="saveTransfer()">
+                    <i class="fa-solid fa-floppy-disk"></i> Save Transfer
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- ============================================================ -->
+<!-- EXCHANGE RATE MODAL -->
+<!-- ============================================================ -->
+<div class="modal" id="exchangeRateModal">
+    <div class="modal-dialog modal-md">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h4><i class="fa-solid fa-arrows-left-right"></i> Update Exchange Rate</h4>
+                <button class="modal-close" onclick="closeModal('exchangeRateModal')">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="form-group">
+                    <label>Exchange Rate (ZMW per USD)</label>
+                    <input type="number" class="form-control" id="editZmwPerUsd" step="0.0001" min="0.0001" value="25.00">
+                    <small style="color: #64748b;">1 USD = ? ZMW. The reverse rate is worked out automatically -- no need to enter it separately.</small>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-outline" onclick="closeModal('exchangeRateModal')">Cancel</button>
+                <button class="btn btn-primary" onclick="saveExchangeRate()">
+                    <i class="fa-solid fa-floppy-disk"></i> Save Rate
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Styles (Identical to your previous) -->
+<style>
+.cash-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; flex-wrap: wrap; gap: 10px; }
+.cash-header-left { display: flex; align-items: center; gap: 12px; }
+.cash-header-left h3 { margin: 0; font-size: 1.3rem; color: #1e293b; }
+.cash-count { background: #e2e8f0; color: #475569; padding: 2px 10px; border-radius: 12px; font-size: 0.7rem; font-weight: 600; }
+.cash-header-actions { display: flex; gap: 10px; flex-wrap: wrap; }
+
+.cash-balances { display: grid; grid-template-columns: repeat(3, 1fr); gap: 15px; margin-bottom: 15px; }
+@media (max-width: 768px) { .cash-balances { grid-template-columns: 1fr; } }
+.balance-card { background: white; padding: 18px 22px; border-radius: 10px; border: 1px solid #e8edf3; box-shadow: 0 1px 3px rgba(0,0,0,0.08); display: flex; align-items: center; gap: 16px; transition: transform 0.2s; }
+.balance-card:hover { transform: translateY(-2px); box-shadow: 0 4px 12px rgba(0,0,0,0.1); }
+.balance-icon { width: 48px; height: 48px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 1.3rem; background: #f1f5f9; color: #475569; flex-shrink: 0; }
+.balance-card:nth-child(1) .balance-icon { background: #dcfce7; color: #059669; }
+.balance-card:nth-child(2) .balance-icon { background: #dbeafe; color: #2563eb; }
+.balance-card:nth-child(3) .balance-icon { background: #fef3c7; color: #b45309; }
+.balance-info { flex: 1; }
+.balance-label { font-size: 0.75rem; font-weight: 600; color: #64748b; text-transform: uppercase; letter-spacing: 0.5px; display: block; }
+.balance-amount { font-size: 1.5rem; font-weight: 700; color: #0f172a; display: block; }
+.balance-sub { font-size: 0.7rem; color: #94a3b8; }
+
+.exchange-rate-bar { background: #f8fafc; padding: 10px 16px; border-radius: 8px; border: 1px solid #e2e8f0; margin-bottom: 16px; }
+.cash-filters { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; gap: 10px; flex-wrap: wrap; }
+.filter-group { display: flex; gap: 10px; flex-wrap: wrap; flex: 1; }
+
+.btn { padding: 8px 16px; border: none; border-radius: 6px; cursor: pointer; font-size: 0.85rem; display: inline-flex; align-items: center; gap: 8px; transition: all 0.2s; }
+.btn-primary { background: #2563eb; color: white; } .btn-primary:hover { background: #1d4ed8; }
+.btn-outline { background: transparent; color: #475569; border: 1px solid #cbd5e1; } .btn-outline:hover { background: #f1f5f9; }
+.btn-sm { padding: 6px 12px; font-size: 0.75rem; }
+
+.card { background: white; border-radius: 10px; box-shadow: 0 1px 3px rgba(0,0,0,0.08); border: 1px solid #e8edf3; overflow: hidden; }
+.card-header { padding: 12px 20px; border-bottom: 1px solid #e8edf3; display: flex; justify-content: space-between; align-items: center; font-weight: 500; color: #475569; }
+.table-responsive { overflow-x: auto; }
+.table-minimal { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+.table-minimal thead th { background: #f8fafc; color: #475569; font-weight: 600; padding: 10px 12px; text-align: left; border-bottom: 2px solid #e2e8f0; }
+.table-minimal tbody td { padding: 10px 12px; border-bottom: 1px solid #f1f5f9; vertical-align: middle; }
+.table-minimal tbody tr:hover { background: #f8fafc; }
+
+.form-group { margin-bottom: 15px; }
+.form-group label { display: block; font-weight: 500; color: #475569; margin-bottom: 5px; }
+.form-group label.required::after { content: ' *'; color: #dc2626; }
+.form-control { width: 100%; padding: 8px 12px; border: 1px solid #e2e8f0; border-radius: 6px; font-size: 0.85rem; background: white; transition: border-color 0.2s; }
+.form-control:focus { outline: none; border-color: #2563eb; box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.1); }
+
+.modal { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); z-index: 1000; animation: modalFadeIn 0.25s ease; }
+.modal.show { display: flex; align-items: center; justify-content: center; }
+@keyframes modalFadeIn { from { opacity: 0; transform: scale(0.95); } to { opacity: 1; transform: scale(1); } }
+.modal-dialog { width: 95%; max-width: 700px; max-height: 90vh; display: flex; flex-direction: column; }
+.modal-lg { max-width: 900px; } .modal-md { max-width: 600px; }
+.modal-content { background: white; border-radius: 12px; display: flex; flex-direction: column; max-height: 90vh; overflow: hidden; }
+.modal-header { padding: 16px 24px; border-bottom: 1px solid #e8edf3; display: flex; justify-content: space-between; align-items: center; flex-shrink: 0; }
+.modal-header h4 { margin: 0; color: #1e293b; }
+.modal-close { background: none; border: none; font-size: 1.5rem; cursor: pointer; color: #94a3b8; padding: 0 8px; }
+.modal-close:hover { color: #475569; }
+.modal-body { padding: 20px 24px; overflow-y: auto; flex: 1; }
+.modal-footer { padding: 12px 24px; border-top: 1px solid #e8edf3; display: flex; gap: 10px; justify-content: flex-end; flex-shrink: 0; flex-wrap: wrap; }
+</style>
+
+<script>
+    document.dispatchEvent(new Event('loadModuleComplete'));
+</script>

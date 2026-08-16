@@ -1,0 +1,1286 @@
+<!-- ============================================ -->
+<!-- PURCHASE MODULE - CLEAN VERSION -->
+<!-- ============================================ -->
+
+<div class="module-view-container">
+    <!-- Header -->
+    <div class="purchase-header">
+        <div class="purchase-header-left">
+            <h3><i class="fa-solid fa-cart-shopping"></i> Purchase Management</h3>
+            <span class="purchase-count" id="poCount">0 orders</span>
+        </div>
+        <div class="purchase-header-actions">
+            <button class="btn btn-primary" onclick="openNewPurchaseOrder()">
+                <i class="fa-solid fa-plus"></i> New Purchase Order
+            </button>
+            <button class="btn btn-outline" onclick="openReorderReport()">
+                <i class="fa-solid fa-clipboard-list"></i> Reorder Report
+            </button>
+            <button class="btn btn-outline" onclick="refreshPurchaseList()">
+                <i class="fa-solid fa-rotate"></i> Refresh
+            </button>
+        </div>
+    </div>
+
+    <!-- Stats Cards -->
+    <div class="purchase-stats">
+        <div class="stat-card" style="border-left: 4px solid #2563eb;">
+            <h4>Total Orders</h4>
+            <p id="totalOrders">0</p>
+        </div>
+        <div class="stat-card" style="border-left: 4px solid #f59e0b;">
+            <h4>Pending Approval</h4>
+            <p id="pendingOrders">0</p>
+        </div>
+        <div class="stat-card" style="border-left: 4px solid #ef4444;">
+            <h4>Overdue</h4>
+            <p id="overdueOrders">0</p>
+        </div>
+        <div class="stat-card" style="border-left: 4px solid #10b981;">
+            <h4>Goods Received</h4>
+            <p id="receivedOrders">0</p>
+        </div>
+        <div class="stat-card" style="border-left: 4px solid #8b5cf6;">
+            <h4>Partially Received</h4>
+            <p id="partialOrders">0</p>
+        </div>
+        <div class="stat-card" style="border-left: 4px solid #64748b;">
+            <h4>Cancelled</h4>
+            <p id="cancelledOrders">0</p>
+        </div>
+    </div>
+
+    <!-- Alerts Bar -->
+    <div id="overdueAlert" style="display: none; background: #fef2f2; border: 1px solid #fecaca; border-radius: 8px; padding: 12px 20px; margin-bottom: 16px;">
+        <div style="display: flex; align-items: center; gap: 10px; flex-wrap: wrap;">
+            <i class="fa-solid fa-triangle-exclamation" style="color: #dc2626; font-size: 1.2rem;"></i>
+            <span style="font-weight: 600; color: #dc2626;">⚠️ Overdue Purchase Orders:</span>
+            <span id="overdueList" style="color: #991b1b; flex: 1;"></span>
+            <button onclick="refreshPurchaseList()" style="background: none; border: none; color: #2563eb; cursor: pointer; font-weight: 500;">
+                <i class="fa-solid fa-rotate"></i> Refresh
+            </button>
+        </div>
+    </div>
+
+    <!-- Filter Bar -->
+    <div class="purchase-filters">
+        <div class="filter-group">
+            <input type="text" class="form-control" id="searchPurchase" placeholder="Search PO #, Supplier..." style="min-width: 200px;">
+            <select class="form-control" id="statusFilter">
+                <option value="">All Status</option>
+                <option value="Draft">Draft</option>
+                <option value="Pending Approval">Pending Approval</option>
+                <option value="Approved">Approved</option>
+                <option value="Partially Received">Partially Received</option>
+                <option value="Goods Received">Goods Received</option>
+                <option value="Closed">Closed</option>
+                <option value="Cancelled">Cancelled</option>
+            </select>
+            <select class="form-control" id="supplierFilter">
+                <option value="">All Suppliers</option>
+            </select>
+            <select class="form-control" id="overdueFilter">
+                <option value="all">All</option>
+                <option value="overdue">Overdue Only</option>
+                <option value="upcoming">Upcoming (7 days)</option>
+            </select>
+        </div>
+    </div>
+
+    <!-- Purchase Order List -->
+    <div class="card purchase-list-card">
+        <div class="card-header">
+            <span><i class="fa-regular fa-file-lines"></i> Purchase Orders</span>
+            <span class="po-count" id="poCountDisplay">0 orders</span>
+        </div>
+        <div class="table-responsive">
+            <table class="table-minimal" id="purchaseTable">
+                <thead>
+                    <tr>
+                        <th style="padding-left: 20px;">PO #</th>
+                        <th>Supplier</th>
+                        <th>Expected Date</th>
+                        <th>Status</th>
+                        <th style="text-align: right; padding-right: 20px;">Total</th>
+                        <th style="text-align: center;">Actions</th>
+                    </tr>
+                </thead>
+                <tbody id="purchaseTableBody">
+                    <tr>
+                        <td colspan="6" style="text-align: center; padding: 40px; color: #94a3b8;">
+                            <i class="fa-solid fa-spinner fa-spin"></i> Loading orders...
+                        </td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+<!-- ============================================================ -->
+<!-- MODALS -->
+<!-- ============================================================ -->
+
+<!-- NEW PURCHASE ORDER MODAL -->
+<div class="modal" id="poModal">
+    <div class="modal-dialog modal-xl">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h4 id="poModalTitle"><i class="fa-solid fa-file-invoice"></i> Purchase Order</h4>
+                <button class="modal-close" onclick="closeModal('poModal')">&times;</button>
+            </div>
+            <div class="modal-body">
+                <input type="hidden" id="editPOId" value="">
+
+                <!-- PO Header -->
+                <div class="po-header-grid">
+                    <div class="po-field">
+                        <label>Supplier *</label>
+                        <div style="display:flex;gap:6px;">
+                            <select class="form-control" id="poSupplier" required style="flex:1;">
+                                <option value="">Select Supplier</option>
+                            </select>
+                            <button type="button" data-open-add-supplier data-target-select="poSupplier" title="Add Supplier"
+                                style="background:#2563eb;color:white;border:none;width:36px;border-radius:6px;cursor:pointer;flex-shrink:0;">+</button>
+                        </div>
+                    </div>
+                    <div class="po-field">
+                        <label>Currency</label>
+                        <select class="form-control" id="poCurrency" onchange="updateExchangeRate()">
+                            <option value="USD">USD ($)</option>
+                            <option value="ZMW">ZMW (ZK)</option>
+                        </select>
+                    </div>
+                    <div class="po-field">
+                        <label>Exchange Rate</label>
+                        <input type="number" class="form-control" id="poExchangeRate" step="0.0001" value="1.00" onchange="updateExchangeRate()">
+                    </div>
+                    <div class="po-field">
+                        <label>Expected Delivery Date *</label>
+                        <input type="date" class="form-control" id="poDeliveryDate" required>
+                    </div>
+                </div>
+
+                <!-- Search & Add Items -->
+                <div class="po-add-items">
+                    <div class="search-input-group">
+                        <input type="text" class="form-control" placeholder="Search by Product Name..." id="poProductSearch" autocomplete="off">
+                        <button class="btn btn-primary" onclick="searchProducts()">
+                            <i class="fa-solid fa-search"></i> Search
+                        </button>
+                    </div>
+                    <div class="search-results" id="poSearchResults" style="display: none;"></div>
+                </div>
+
+                <!-- PO Lines Table -->
+                <div class="po-lines-section">
+                    <div class="po-lines-header">
+                        <span>Order Lines</span>
+                        <span id="poLineCount">0 items</span>
+                    </div>
+                    <div class="table-responsive">
+                        <table class="table-minimal" id="poLinesTable">
+                            <thead>
+                                <tr>
+                                    <th style="width: 30px;">#</th>
+                                    <th>Product</th>
+                                    <th style="width: 80px;">Pack Size</th>
+                                    <th style="width: 80px;">Qty (Packs)</th>
+                                    <th style="width: 80px;">Total Qty</th>
+                                    <th style="width: 120px;">Purchase Rate</th>
+                                    <th style="width: 120px; text-align: right;">Total</th>
+                                    <th style="width: 50px; text-align: center;">Action</th>
+                                </tr>
+                            </thead>
+                            <tbody id="poLinesBody">
+                                <tr><td colspan="8" class="text-center text-muted" style="padding: 30px;">
+                                    <i class="fa-regular fa-plus" style="display: block; margin-bottom: 8px;"></i>
+                                    Add products using the search above
+                                </td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <!-- PO Summary -->
+                <div class="po-summary">
+                    <div class="po-summary-item">
+                        <span>Total Items</span>
+                        <strong id="poTotalItems">0</strong>
+                    </div>
+                    <div class="po-summary-item total">
+                        <span>Grand Total</span>
+                        <strong id="poGrandTotal">$0.00</strong>
+                    </div>
+                    <div class="po-summary-item" id="poZMWDisplay" style="display: none;">
+                        <span>ZMW Equivalent</span>
+                        <strong id="poZMWTotal">ZK 0.00</strong>
+                    </div>
+                </div>
+
+                <!-- Notes -->
+                <div class="po-notes">
+                    <label>Notes</label>
+                    <textarea class="form-control" id="poNotes" rows="2" placeholder="Additional notes..."></textarea>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-outline" onclick="savePODraft()">
+                    <i class="fa-regular fa-floppy-disk"></i> Save Draft
+                </button>
+                <button class="btn btn-warning" onclick="submitPOForApproval()">
+                    <i class="fa-regular fa-paper-plane"></i> Submit for Approval
+                </button>
+                <button class="btn btn-success" onclick="approvePO()">
+                    <i class="fa-regular fa-circle-check"></i> Approve
+                </button>
+                <button class="btn btn-danger" id="cancelPOBtn" onclick="openCancelPOFromModal()" style="display: none;">
+                    <i class="fa-solid fa-ban"></i> Cancel PO
+                </button>
+                <button class="btn btn-primary" onclick="printPO()">
+                    <i class="fa-solid fa-print"></i> Print
+                </button>
+                <button class="btn btn-outline" onclick="closeModal('poModal')">Close</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- GOODS RECEIPT NOTE (GRN) MODAL - WITHOUT CANCELLATION -->
+<div class="modal" id="grnModal">
+    <div class="modal-dialog modal-xl">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h4><i class="fa-solid fa-boxes"></i> Goods Receipt Note</h4>
+                <button class="modal-close" onclick="closeModal('grnModal')">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="grn-info">
+                    <div class="grn-info-grid">
+                        <div class="grn-field">
+                            <label>PO Reference</label>
+                            <span id="grnPOReference" class="grn-value">-</span>
+                        </div>
+                        <div class="grn-field">
+                            <label>Supplier</label>
+                            <span id="grnSupplier" class="grn-value">-</span>
+                        </div>
+                        <div class="grn-field">
+                            <label>Entry Date</label>
+                            <input type="date" class="form-control" id="grnEntryDate">
+                        </div>
+                        <div class="grn-field">
+                            <label>Invoice Number *</label>
+                            <input type="text" class="form-control" id="grnInvoiceNumber" placeholder="INV-2026-001" required>
+                        </div>
+                        <div class="grn-field">
+                            <label>Invoice Date</label>
+                            <input type="date" class="form-control" id="grnInvoiceDate">
+                        </div>
+                        <div class="grn-field">
+                            <label>Payment Type *</label>
+                            <select class="form-control" id="grnPaymentType">
+                                <option value="Cash">Cash</option>
+                                <option value="Credit">Credit</option>
+                            </select>
+                        </div>
+                    </div>
+                    
+                    <!-- Currency Display -->
+                    <div class="grn-info-grid" style="margin-top: 12px; border-top: 1px solid #e2e8f0; padding-top: 12px;">
+                        <div class="grn-field">
+                            <label>Currency</label>
+                            <span id="grnCurrencyDisplay" class="grn-value" style="font-weight: 600; color: #2563eb;">USD</span>
+                        </div>
+                        <div class="grn-field">
+                            <label>Exchange Rate</label>
+                            <span id="grnExchangeRateDisplay" class="grn-value">1.0000</span>
+                        </div>
+                    </div>
+
+                    <!-- Remaining Info -->
+                    <div class="grn-info-grid" style="margin-top: 12px; border-top: 1px solid #e2e8f0; padding-top: 12px; background: #fef3c7; border-radius: 4px; padding: 8px 12px;">
+                        <div class="grn-field" style="grid-column: 1 / -1;">
+                            <label style="color: #b45309;">⚠️ Remaining to Receive</label>
+                            <span id="grnRemainingInfo" class="grn-value" style="font-weight: 600; color: #b45309;">Loading...</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Quick Actions -->
+                <div style="display: flex; gap: 10px; margin-bottom: 12px; flex-wrap: wrap;">
+                    <button class="btn btn-sm btn-success" onclick="receiveAllItems()">
+                        <i class="fa-solid fa-check-double"></i> Receive All Items
+                    </button>
+                    <button class="btn btn-sm btn-outline" onclick="clearReceivedItems()">
+                        <i class="fa-solid fa-rotate-right"></i> Clear All Received
+                    </button>
+                    <span style="font-size: 0.8rem; color: #64748b; display: flex; align-items: center;">
+                        <i class="fa-solid fa-info-circle"></i> &nbsp; Receive items and enter batch details
+                    </span>
+                </div>
+
+                <!-- GRN Lines - NO CANCELLATION COLUMN -->
+                <div class="grn-lines-section">
+                    <div class="grn-lines-header">
+                        <span>Received Items</span>
+                        <span id="grnLineCount">0 items</span>
+                    </div>
+                    <div class="table-responsive">
+                        <table class="table-minimal" id="grnLinesTable">
+                            <thead>
+                                <tr>
+                                    <th style="width: 30px;">#</th>
+                                    <th>Product</th>
+                                    <th style="width: 50px;">Pack</th>
+                                    <th style="width: 60px;">Ordered</th>
+                                    <th style="width: 70px;">Received</th>
+                                    <th style="width: 70px;">Remaining</th>
+                                    <th style="width: 90px;">Purchase Rate</th>
+                                    <th style="width: 130px;">Batch Number *</th>
+                                    <th style="width: 110px;">Expiry Date *</th>
+                                    <th style="width: 60px; text-align: center;">Receive</th>
+                                </tr>
+                            </thead>
+                            <tbody id="grnLinesBody">
+                                <tr><td colspan="10" class="text-center text-muted" style="padding: 30px;">
+                                    <i class="fa-regular fa-box" style="display: block; margin-bottom: 8px;"></i>
+                                    No items to receive
+                                </td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <!-- Freight & Insurance -->
+                <div class="grn-extras">
+                    <div class="grn-extras-grid">
+                        <div class="grn-field">
+                            <label>Freight</label>
+                            <input type="number" class="form-control" id="grnFreight" step="0.01" value="0" onchange="updateGRNTotal()">
+                        </div>
+                        <div class="grn-field">
+                            <label>Insurance</label>
+                            <input type="number" class="form-control" id="grnInsurance" step="0.01" value="0" onchange="updateGRNTotal()">
+                        </div>
+                    </div>
+                </div>
+
+                <!-- GRN Summary -->
+                <div class="grn-summary">
+                    <div class="grn-summary-item">
+                        <span>Subtotal</span>
+                        <strong id="grnSubtotal">$0.00</strong>
+                    </div>
+                    <div class="grn-summary-item">
+                        <span>Freight</span>
+                        <strong id="grnFreightDisplay">$0.00</strong>
+                    </div>
+                    <div class="grn-summary-item">
+                        <span>Insurance</span>
+                        <strong id="grnInsuranceDisplay">$0.00</strong>
+                    </div>
+                    <div class="grn-summary-item total">
+                        <span>GRN Total</span>
+                        <strong id="grnGrandTotal">$0.00</strong>
+                    </div>
+                    <div class="grn-summary-item">
+                        <span>Invoice Total</span>
+                        <input type="number" class="form-control" id="grnInvoiceTotal" step="0.01" placeholder="Enter invoice total" onchange="validateInvoice()">
+                    </div>
+                    <div class="grn-summary-item" id="grnVarianceDisplay" style="display: none;">
+                        <span>Variance</span>
+                        <strong id="grnVariance" style="color: #22c55e;">$0.00</strong>
+                    </div>
+                </div>
+
+                <div class="grn-notes">
+                    <label>Notes</label>
+                    <textarea class="form-control" id="grnNotes" rows="2" placeholder="Additional notes..."></textarea>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-primary" onclick="postGRN()">
+                    <i class="fa-solid fa-check-circle"></i> Post GRN
+                </button>
+                <button class="btn btn-outline" onclick="printGRN()">
+                    <i class="fa-solid fa-print"></i> Print
+                </button>
+                <button class="btn btn-outline" onclick="closeModal('grnModal')">Close</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- VIEW PO DETAILS MODAL -->
+<div class="modal" id="viewPOModal">
+    <div class="modal-dialog modal-xl">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h4><i class="fa-regular fa-eye"></i> Purchase Order Details</h4>
+                <button class="modal-close" onclick="closeModal('viewPOModal')">&times;</button>
+            </div>
+            <div class="modal-body" id="viewPOContent">
+                <!-- Dynamic content -->
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-primary" onclick="printPOFromView()">
+                    <i class="fa-solid fa-print"></i> Print PO
+                </button>
+                <button class="btn btn-outline" onclick="closeModal('viewPOModal')">Close</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- GRN HISTORY MODAL -->
+<div class="modal" id="grnHistoryModal">
+    <div class="modal-dialog modal-xl">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h4><i class="fa-solid fa-clock-rotate-left"></i> GRN History</h4>
+                <button class="modal-close" onclick="closeModal('grnHistoryModal')">&times;</button>
+            </div>
+            <div class="modal-body" id="grnHistoryContent">
+                <!-- Dynamic content -->
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-outline" onclick="closeModal('grnHistoryModal')">Close</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- REORDER REPORT MODAL -->
+<div class="modal" id="reorderModal">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h4><i class="fa-solid fa-clipboard-list"></i> Reorder Report</h4>
+                <button class="modal-close" onclick="closeModal('reorderModal')">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="reorder-filters" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+                    <select class="form-control" id="reorderSupplier">
+                        <option value="">All Suppliers</option>
+                    </select>
+                    <button type="button" data-open-add-supplier data-target-select="reorderSupplier" title="Add Supplier"
+                        style="background:#2563eb;color:white;border:none;width:32px;height:32px;border-radius:6px;cursor:pointer;">+</button>
+                    <select class="form-control" id="reorderCategory">
+                        <option value="">All Categories</option>
+                    </select>
+                    <button type="button" data-quick-add-lookup="categories" data-quick-add-target="reorderCategory" title="Add Category"
+                        style="background:#2563eb;color:white;border:none;width:32px;height:32px;border-radius:6px;cursor:pointer;">+</button>
+                    <button class="btn btn-primary" onclick="generateReorderReport()">
+                        <i class="fa-solid fa-arrows-rotate"></i> Generate
+                    </button>
+                </div>
+                <div class="table-responsive">
+                    <table class="table-minimal" id="reorderTable">
+                        <thead>
+                            <tr>
+                                <th style="width: 30px;"><input type="checkbox" id="selectAllReorder" onchange="toggleAllReorderItems()"></th>
+                                <th>Product</th>
+                                <th>Generic</th>
+                                <th>Current Stock</th>
+                                <th>Min Level</th>
+                                <th>Supplier</th>
+                                <th>Reorder Qty</th>
+                            </tr>
+                        </thead>
+                        <tbody id="reorderTableBody">
+                            <tr><td colspan="7" style="text-align: center; padding: 40px; color: #94a3b8;">
+                                <i class="fa-solid fa-spinner fa-spin"></i> Loading reorder items...
+                            </td></tr>
+                        </tbody>
+                    </table>
+                </div>
+                <div class="reorder-actions">
+                    <button class="btn btn-primary" onclick="addSelectedToPO()">
+                        <i class="fa-solid fa-cart-plus"></i> Add Selected to PO
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- CONFIRM CANCEL FULL PO MODAL -->
+<div class="modal" id="cancelPOModal" style="z-index: 2000;">
+    <div class="modal-dialog modal-md">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h4><i class="fa-solid fa-triangle-exclamation" style="color: #ef4444;"></i> Cancel Purchase Order</h4>
+                <button class="modal-close" onclick="closeModal('cancelPOModal')">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div style="text-align: center; padding: 20px 0;">
+                    <i class="fa-solid fa-ban" style="font-size: 3rem; color: #ef4444; margin-bottom: 15px;"></i>
+                    <h4 style="color: #0f172a; margin: 0 0 10px 0;">Are you sure you want to cancel this PO?</h4>
+                    <p style="color: #64748b; margin-bottom: 15px;">This action cannot be undone.</p>
+                    <div style="background: #f8fafc; padding: 12px; border-radius: 6px; text-align: left;">
+                        <p style="margin: 0; font-size: 0.9rem;"><strong>PO Number:</strong> <span id="cancelPONumber">-</span></p>
+                        <p style="margin: 5px 0 0 0; font-size: 0.9rem;"><strong>Supplier:</strong> <span id="cancelPOSupplier">-</span></p>
+                        <p style="margin: 5px 0 0 0; font-size: 0.9rem;"><strong>Already Received:</strong> <span id="cancelAlreadyReceived">0</span></p>
+                    </div>
+                    <div style="margin-top: 15px;">
+                        <label style="display: block; font-size: 0.85rem; color: #475569; margin-bottom: 5px;">Cancellation Reason</label>
+                        <select class="form-control" id="cancelReason">
+                            <option value="Supplier cannot deliver">Supplier cannot deliver</option>
+                            <option value="Order no longer needed">Order no longer needed</option>
+                            <option value="Better pricing found">Better pricing found</option>
+                            <option value="Quality issues">Quality issues</option>
+                            <option value="Delayed delivery">Delayed delivery</option>
+                            <option value="Other">Other</option>
+                        </select>
+                        <input type="text" class="form-control" id="cancelReasonOther" placeholder="Please specify other reason..." style="display: none; margin-top: 5px;">
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-outline" onclick="closeModal('cancelPOModal')">Go Back</button>
+                <button class="btn btn-danger" onclick="confirmCancelPO()">
+                    <i class="fa-solid fa-ban"></i> Yes, Cancel PO
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- CONFIRM CANCEL REMAINING PO MODAL -->
+<div class="modal" id="cancelRemainingModal" style="z-index: 2000;">
+    <div class="modal-dialog modal-md">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h4><i class="fa-solid fa-triangle-exclamation" style="color: #f59e0b;"></i> Cancel Remaining Items</h4>
+                <button class="modal-close" onclick="closeModal('cancelRemainingModal')">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div style="text-align: center; padding: 20px 0;">
+                    <i class="fa-solid fa-ban" style="font-size: 3rem; color: #f59e0b; margin-bottom: 15px;"></i>
+                    <h4 style="color: #0f172a; margin: 0 0 10px 0;">Cancel Remaining Quantity?</h4>
+                    <p style="color: #64748b; margin-bottom: 15px;">This will cancel only the remaining quantity. Received items will be kept.</p>
+                    
+                    <div style="background: #f8fafc; padding: 12px; border-radius: 6px; text-align: left;">
+                        <p style="margin: 0; font-size: 0.9rem;"><strong>PO Number:</strong> <span id="cancelRemainingPONumber">-</span></p>
+                        <p style="margin: 5px 0 0 0; font-size: 0.9rem;"><strong>Supplier:</strong> <span id="cancelRemainingPOSupplier">-</span></p>
+                        <p style="margin: 5px 0 0 0; font-size: 0.9rem;"><strong>Total Ordered:</strong> <span id="cancelRemainingTotalQty">0</span></p>
+                        <p style="margin: 5px 0 0 0; font-size: 0.9rem;"><strong>Already Received:</strong> <span id="cancelRemainingReceivedQty">0</span></p>
+                        <p style="margin: 5px 0 0 0; font-size: 0.9rem;"><strong>Already Cancelled:</strong> <span id="cancelRemainingCancelledQty">0</span></p>
+                        <p style="margin: 5px 0 0 0; font-size: 0.9rem; font-weight: 600; color: #dc2626;">
+                            <strong>Remaining to Cancel:</strong> <span id="cancelRemainingQty">0</span>
+                        </p>
+                    </div>
+                    
+                    <div style="margin-top: 15px;">
+                        <label style="display: block; font-size: 0.85rem; color: #475569; margin-bottom: 5px;">
+                            Cancellation Reason <span style="color: #dc2626;">*</span>
+                        </label>
+                        <select class="form-control" id="cancelRemainingReason">
+                            <option value="">Select Reason...</option>
+                            <option value="Supplier cannot deliver remaining stock">Supplier cannot deliver remaining stock</option>
+                            <option value="Order no longer needed">Order no longer needed</option>
+                            <option value="Better pricing found">Better pricing found</option>
+                            <option value="Quality issues">Quality issues</option>
+                            <option value="Delayed delivery">Delayed delivery</option>
+                            <option value="Customer cancelled order">Customer cancelled order</option>
+                            <option value="Other">Other</option>
+                        </select>
+                        <input type="text" class="form-control" id="cancelRemainingReasonOther" 
+                            placeholder="Please specify other reason..." style="display: none; margin-top: 5px;">
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-outline" onclick="closeModal('cancelRemainingModal')">Go Back</button>
+                <button class="btn btn-danger" onclick="confirmCancelRemainingPO()">
+                    <i class="fa-solid fa-ban"></i> Yes, Cancel Remaining
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- ============================================================ -->
+<!-- STYLES -->
+<!-- ============================================================ -->
+
+<style>
+    /* ============================================ */
+    /* PURCHASE MODULE STYLES */
+    /* ============================================ */
+
+    .purchase-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 20px;
+        flex-wrap: wrap;
+        gap: 10px;
+    }
+    .purchase-header-left {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+    }
+    .purchase-header-left h3 {
+        margin: 0;
+        font-size: 1.3rem;
+        color: #1e293b;
+    }
+    .purchase-count {
+        background: #e2e8f0;
+        color: #475569;
+        padding: 2px 10px;
+        border-radius: 12px;
+        font-size: 0.7rem;
+        font-weight: 600;
+    }
+    .purchase-header-actions {
+        display: flex;
+        gap: 10px;
+        flex-wrap: wrap;
+    }
+
+    .purchase-stats {
+        display: grid;
+        grid-template-columns: repeat(6, 1fr);
+        gap: 12px;
+        margin-bottom: 20px;
+    }
+    @media (max-width: 1024px) {
+        .purchase-stats {
+            grid-template-columns: repeat(3, 1fr);
+        }
+    }
+    @media (max-width: 600px) {
+        .purchase-stats {
+            grid-template-columns: repeat(2, 1fr);
+        }
+    }
+    .stat-card {
+        background: white;
+        padding: 12px 16px;
+        border-radius: 8px;
+        border: 1px solid #e8edf3;
+        box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+    }
+    .stat-card h4 {
+        font-size: 0.65rem;
+        font-weight: 600;
+        color: #64748b;
+        text-transform: uppercase;
+        letter-spacing: 0.3px;
+        margin: 0 0 2px 0;
+    }
+    .stat-card p {
+        font-size: 1.2rem;
+        font-weight: 700;
+        margin: 0;
+        color: #0f172a;
+    }
+
+    .purchase-filters {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 16px;
+        gap: 10px;
+        flex-wrap: wrap;
+    }
+    .filter-group {
+        display: flex;
+        gap: 10px;
+        flex-wrap: wrap;
+        flex: 1;
+    }
+
+    .btn {
+        padding: 8px 16px;
+        border: none;
+        border-radius: 6px;
+        cursor: pointer;
+        font-size: 0.85rem;
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        transition: all 0.2s;
+        text-decoration: none;
+    }
+    .btn-primary {
+        background: #2563eb;
+        color: white;
+    }
+    .btn-primary:hover {
+        background: #1d4ed8;
+    }
+    .btn-outline {
+        background: transparent;
+        color: #475569;
+        border: 1px solid #cbd5e1;
+    }
+    .btn-outline:hover {
+        background: #f1f5f9;
+    }
+    .btn-success {
+        background: #22c55e;
+        color: white;
+    }
+    .btn-success:hover {
+        background: #16a34a;
+    }
+    .btn-warning {
+        background: #f59e0b;
+        color: white;
+    }
+    .btn-warning:hover {
+        background: #d97706;
+    }
+    .btn-danger {
+        background: #ef4444;
+        color: white;
+    }
+    .btn-danger:hover {
+        background: #dc2626;
+    }
+    .btn-sm {
+        padding: 4px 12px;
+        font-size: 0.75rem;
+    }
+
+    .form-control {
+        padding: 8px 12px;
+        border: 1px solid #e2e8f0;
+        border-radius: 6px;
+        font-size: 0.85rem;
+        background: white;
+        min-width: 150px;
+        transition: border-color 0.2s;
+    }
+    .form-control:focus {
+        outline: none;
+        border-color: #2563eb;
+        box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.1);
+    }
+
+    .card {
+        background: white;
+        border-radius: 10px;
+        box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+        border: 1px solid #e8edf3;
+        overflow: hidden;
+    }
+    .card-header {
+        padding: 12px 20px;
+        border-bottom: 1px solid #e8edf3;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        font-weight: 500;
+        color: #475569;
+    }
+    .po-count {
+        font-size: 0.8rem;
+        color: #94a3b8;
+        font-weight: 400;
+    }
+    .table-responsive {
+        overflow-x: auto;
+    }
+    .table-minimal {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 0.85rem;
+    }
+    .table-minimal thead th {
+        background: #f8fafc;
+        color: #475569;
+        font-weight: 600;
+        padding: 10px 12px;
+        text-align: left;
+        border-bottom: 2px solid #e2e8f0;
+    }
+    .table-minimal tbody td {
+        padding: 10px 12px;
+        border-bottom: 1px solid #f1f5f9;
+        vertical-align: middle;
+    }
+    .table-minimal tbody tr:hover {
+        background: #f8fafc;
+    }
+    .table-minimal .text-right {
+        text-align: right;
+    }
+    .table-minimal .text-center {
+        text-align: center;
+    }
+
+    .status-badge {
+        padding: 3px 12px;
+        border-radius: 12px;
+        font-size: 0.7rem;
+        font-weight: 600;
+        display: inline-block;
+    }
+    .status-draft { background: #e2e8f0; color: #475569; }
+    .status-pending-approval { background: #fef3c7; color: #b45309; }
+    .status-approved { background: #dbeafe; color: #1d4ed8; }
+    .status-partially-received { background: #fef3c7; color: #b45309; }
+    .status-goods-received { background: #dcfce7; color: #15803d; }
+    .status-closed { background: #e2e8f0; color: #64748b; }
+    .status-cancelled { background: #fee2e2; color: #dc2626; }
+
+    .action-buttons {
+        display: flex;
+        gap: 5px;
+        justify-content: center;
+        flex-wrap: wrap;
+    }
+    .action-btn {
+        background: transparent;
+        border: none;
+        cursor: pointer;
+        padding: 4px 8px;
+        border-radius: 4px;
+        color: #94a3b8;
+        transition: all 0.2s;
+        font-size: 0.85rem;
+    }
+    .action-btn:hover {
+        background: #f1f5f9;
+        color: #2563eb;
+    }
+    .action-btn.grn:hover {
+        color: #22c55e;
+    }
+    .action-btn.danger:hover {
+        color: #ef4444;
+    }
+    .action-btn.cancel-remaining:hover {
+        color: #f59e0b;
+    }
+
+    .modal {
+        display: none;
+        position: fixed;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        background: rgba(0,0,0,0.5);
+        z-index: 1000;
+        animation: modalFadeIn 0.25s ease;
+    }
+    .modal.show {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+    }
+    @keyframes modalFadeIn {
+        from { opacity: 0; transform: scale(0.95); }
+        to { opacity: 1; transform: scale(1); }
+    }
+    .modal-dialog {
+        width: 95%;
+        max-width: 1200px;
+        max-height: 90vh;
+        display: flex;
+        flex-direction: column;
+    }
+    .modal-xl {
+        max-width: 1400px;
+    }
+    .modal-lg {
+        max-width: 900px;
+    }
+    .modal-md {
+        max-width: 600px;
+    }
+    .modal-content {
+        background: white;
+        border-radius: 12px;
+        display: flex;
+        flex-direction: column;
+        max-height: 90vh;
+        overflow: hidden;
+    }
+    .modal-header {
+        padding: 16px 24px;
+        border-bottom: 1px solid #e8edf3;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        flex-shrink: 0;
+    }
+    .modal-header h4 {
+        margin: 0;
+        color: #1e293b;
+    }
+    .modal-close {
+        background: none;
+        border: none;
+        font-size: 1.5rem;
+        cursor: pointer;
+        color: #94a3b8;
+        padding: 0 8px;
+    }
+    .modal-close:hover {
+        color: #475569;
+    }
+    .modal-body {
+        padding: 20px 24px;
+        overflow-y: auto;
+        flex: 1;
+    }
+    .modal-footer {
+        padding: 12px 24px;
+        border-top: 1px solid #e8edf3;
+        display: flex;
+        gap: 10px;
+        justify-content: flex-end;
+        flex-shrink: 0;
+        flex-wrap: wrap;
+    }
+
+    .po-header-grid {
+        display: grid;
+        grid-template-columns: 2fr 1fr 1fr 1fr;
+        gap: 12px;
+        margin-bottom: 16px;
+    }
+    @media (max-width: 768px) {
+        .po-header-grid {
+            grid-template-columns: 1fr;
+        }
+    }
+    .po-field {
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+    }
+    .po-field label {
+        font-size: 0.75rem;
+        font-weight: 600;
+        color: #64748b;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+    }
+
+    .po-add-items {
+        margin: 16px 0;
+        position: relative;
+    }
+    .search-input-group {
+        display: flex;
+        gap: 10px;
+    }
+    .search-input-group .form-control {
+        flex: 1;
+    }
+    .search-results {
+        position: absolute;
+        top: 100%;
+        left: 0;
+        right: 0;
+        background: white;
+        border: 1px solid #e2e8f0;
+        border-radius: 6px;
+        box-shadow: 0 10px 25px rgba(0,0,0,0.1);
+        max-height: 200px;
+        overflow-y: auto;
+        z-index: 10;
+    }
+    .search-results .result-item {
+        padding: 8px 12px;
+        cursor: pointer;
+        display: flex;
+        justify-content: space-between;
+        border-bottom: 1px solid #f1f5f9;
+    }
+    .search-results .result-item:hover {
+        background: #f1f5f9;
+    }
+
+    .po-lines-section {
+        margin: 16px 0;
+    }
+    .po-lines-header {
+        display: flex;
+        justify-content: space-between;
+        padding: 8px 0;
+        font-weight: 500;
+        color: #475569;
+    }
+
+    .po-summary {
+        display: flex;
+        flex-direction: column;
+        align-items: flex-end;
+        padding: 16px 0;
+        border-top: 2px solid #e8edf3;
+        margin-top: 8px;
+        gap: 4px;
+    }
+    .po-summary-item {
+        display: flex;
+        justify-content: space-between;
+        width: 280px;
+        padding: 4px 0;
+    }
+    .po-summary-item.total {
+        font-size: 1.1rem;
+        border-top: 2px solid #e8edf3;
+        padding-top: 8px;
+        margin-top: 4px;
+    }
+    .po-summary-item.total strong {
+        color: #2563eb;
+        font-size: 1.2rem;
+    }
+
+    .po-notes {
+        margin-top: 12px;
+    }
+    .po-notes textarea {
+        width: 100%;
+        padding: 8px 12px;
+        border: 1px solid #e2e8f0;
+        border-radius: 6px;
+        font-family: inherit;
+        resize: vertical;
+    }
+
+    .grn-info {
+        background: #f8fafc;
+        border-radius: 8px;
+        padding: 16px;
+        margin-bottom: 16px;
+    }
+    .grn-info-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+        gap: 12px;
+    }
+    .grn-field {
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+    }
+    .grn-field label {
+        font-size: 0.7rem;
+        font-weight: 600;
+        color: #64748b;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+    }
+    .grn-value {
+        font-weight: 500;
+        color: #1e293b;
+        padding: 4px 0;
+    }
+
+    .grn-lines-section {
+        margin: 16px 0;
+    }
+    .grn-lines-header {
+        display: flex;
+        justify-content: space-between;
+        padding: 8px 0;
+        font-weight: 500;
+        color: #475569;
+    }
+
+    .grn-extras {
+        margin: 12px 0;
+    }
+    .grn-extras-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+        gap: 12px;
+    }
+
+    .grn-summary {
+        display: flex;
+        flex-direction: column;
+        align-items: flex-end;
+        padding: 16px 0;
+        border-top: 2px solid #e8edf3;
+        margin-top: 8px;
+        gap: 4px;
+    }
+    .grn-summary-item {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        width: 320px;
+        padding: 4px 0;
+        gap: 20px;
+    }
+    .grn-summary-item.total {
+        font-size: 1.1rem;
+        border-top: 2px solid #e8edf3;
+        padding-top: 8px;
+        margin-top: 4px;
+    }
+    .grn-summary-item.total strong {
+        color: #2563eb;
+        font-size: 1.2rem;
+    }
+    .grn-summary-item .form-control {
+        width: 150px;
+    }
+
+    .grn-notes {
+        margin-top: 12px;
+    }
+    .grn-notes textarea {
+        width: 100%;
+        padding: 8px 12px;
+        border: 1px solid #e2e8f0;
+        border-radius: 6px;
+        font-family: inherit;
+        resize: vertical;
+    }
+
+    .reorder-filters {
+        display: flex;
+        gap: 12px;
+        margin-bottom: 16px;
+        flex-wrap: wrap;
+    }
+    .reorder-filters .form-control {
+        min-width: 180px;
+    }
+    .reorder-actions {
+        margin-top: 16px;
+        display: flex;
+        gap: 12px;
+    }
+
+    .view-po-details .detail-row {
+        display: flex;
+        padding: 8px 0;
+        border-bottom: 1px solid #f1f5f9;
+    }
+    .view-po-details .detail-row .label {
+        font-weight: 600;
+        width: 160px;
+        color: #475569;
+        flex-shrink: 0;
+    }
+    .view-po-details .detail-row .value {
+        flex: 1;
+    }
+
+    .text-center {
+        text-align: center;
+    }
+    .text-muted {
+        color: #94a3b8;
+    }
+    .text-right {
+        text-align: right;
+    }
+
+    .grn-history-item {
+        border: 1px solid #e2e8f0;
+        border-radius: 8px;
+        padding: 16px;
+        margin-bottom: 12px;
+        background: #f8fafc;
+    }
+    .grn-history-item .grn-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 10px;
+    }
+    .grn-history-item .grn-header .grn-number {
+        font-weight: 600;
+        font-size: 1rem;
+    }
+    .grn-history-item .grn-header .grn-date {
+        color: #64748b;
+        font-size: 0.85rem;
+    }
+    .grn-history-item .grn-details {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+        gap: 8px;
+        font-size: 0.85rem;
+    }
+    .grn-history-item .grn-details .label {
+        color: #64748b;
+    }
+
+    #overdueAlert {
+        animation: pulseAlert 2s infinite;
+    }
+    @keyframes pulseAlert {
+        0%, 100% { opacity: 1; }
+        50% { opacity: 0.8; }
+    }
+
+    .grn-cancel-badge {
+        background: #fef2f2;
+        color: #dc2626;
+        padding: 2px 8px;
+        border-radius: 4px;
+        font-size: 0.6rem;
+        font-weight: 600;
+    }
+    .grn-received-badge {
+        background: #f0fdf4;
+        color: #059669;
+        padding: 2px 8px;
+        border-radius: 4px;
+        font-size: 0.6rem;
+        font-weight: 600;
+    }
+    .grn-row-cancelled {
+        background: #fef2f2;
+        opacity: 0.7;
+    }
+    .grn-row-received {
+        background: #f0fdf4;
+    }
+    .grn-row-partial {
+        background: #fffbeb;
+    }
+
+    /* ============================================ */
+    /* Z-INDEX OVERRIDES */
+    /* ============================================ */
+    
+    /* Ensure cancel modals appear on top of other modals */
+    #cancelPOModal {
+        z-index: 2000 !important;
+    }
+    #cancelRemainingModal {
+        z-index: 2000 !important;
+    }
+
+    /* Ensure PO modal is below cancel modal */
+    #poModal {
+        z-index: 1000;
+    }
+
+    /* Ensure GRN modal is below cancel modal */
+    #grnModal {
+        z-index: 1000;
+    }
+
+    /* Ensure view PO modal is below cancel modal */
+    #viewPOModal {
+        z-index: 1000;
+    }
+
+    /* Ensure reorder modal is below cancel modal */
+    #reorderModal {
+        z-index: 1000;
+    }
+</style>
+
+<script>
+    document.dispatchEvent(new Event('loadModuleComplete'));
+</script>

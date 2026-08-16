@@ -1,0 +1,32 @@
+<div class="module-view-container">
+    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
+        <h3 style="margin: 0;">Pricing</h3>
+        <span style="font-size: 0.9rem; color: #64748b;">
+            <i class="fa-solid fa-info-circle"></i> Prices calculated from the latest batch cost
+        </span>
+    </div>
+
+    <div class="card" style="padding: 0; overflow: hidden;">
+        <table class="table-minimal striped" id="pricingTable">
+            <thead>
+                <tr>
+                    <th style="padding-left: 20px;">Product Name</th>
+                    <th>Pack Size</th>
+                    <th style="text-align: right;">Retail Sale Price (K)</th>
+                    <th style="padding-right: 20px; text-align: right;">Wholesale Sale Price (K)</th>
+                </tr>
+            </thead>
+            <tbody id="pricingTableBody">
+                <tr>
+                    <td colspan="4" style="text-align: center; padding: 30px; color: #94a3b8;">
+                        <i class="fa-solid fa-spinner fa-spin"></i> Loading pricing data...
+                    </td>
+                </tr>
+            </tbody>
+        </table>
+    </div>
+</div>
+
+<script>
+    document.dispatchEvent(new Event('loadModuleComplete'));
+</script>

@@ -1,0 +1,174 @@
+<!-- ============================================ -->
+<!-- INVENTORY REPORT MODULE -->
+<!-- ============================================ -->
+
+<div class="module-view-container">
+    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:20px; flex-wrap:wrap; gap:10px;">
+        <h3 style="margin:0;"><i class="fa-solid fa-warehouse"></i> Inventory Report</h3>
+        <div style="display:flex; gap:10px; flex-wrap:wrap;">
+            <button class="btn btn-outline" onclick="refreshInventoryReport()">
+                <i class="fa-solid fa-rotate"></i> Refresh
+            </button>
+            <button class="btn btn-primary" onclick="exportInventoryReportToExcel()">
+                <i class="fa-solid fa-file-excel"></i> Download Excel
+            </button>
+        </div>
+    </div>
+
+    <p style="color:#64748b; font-size:0.85rem; margin-top:-15px; margin-bottom:20px;">
+        Live batch-level stock, valued at cost. Filter by category, expiry status, or search a specific product/batch -- the Excel download exports exactly what's currently filtered.
+    </p>
+
+    <!-- Stats Cards (always reflect ALL active stock, independent of the filters below -- same convention as Expense's stat cards) -->
+    <div class="invrep-stats">
+        <div class="invrep-stat-card" style="border-left: 4px solid #2563eb;">
+            <h4>Total Stock Value</h4>
+            <p id="invrepStatValue">ZK 0.00</p>
+        </div>
+        <div class="invrep-stat-card" style="border-left: 4px solid #64748b;">
+            <h4>Batches Shown</h4>
+            <p id="invrepStatBatches">0</p>
+        </div>
+        <div class="invrep-stat-card" style="border-left: 4px solid #f59e0b;">
+            <h4>Expiring in 30 Days</h4>
+            <p id="invrepStatExpiring">0</p>
+        </div>
+        <div class="invrep-stat-card" style="border-left: 4px solid #dc2626;">
+            <h4>Expired</h4>
+            <p id="invrepStatExpired">0</p>
+        </div>
+    </div>
+
+    <!-- Filters -->
+    <div class="invrep-filters">
+        <input type="text" class="form-control" id="invrepSearch" placeholder="Search product or batch number..." style="min-width: 220px;">
+        <select class="form-control" id="invrepCategoryFilter" style="min-width: 160px;">
+            <option value="all">All Categories</option>
+        </select>
+        <select class="form-control" id="invrepExpiryFilter" style="min-width: 180px;">
+            <option value="all">All Expiry Statuses</option>
+            <option value="expired">Expired</option>
+            <option value="30">Expiring in 30 Days</option>
+            <option value="90">Expiring in 90 Days</option>
+            <option value="ok">Not Expiring Soon</option>
+        </select>
+        <button class="btn btn-sm btn-primary" onclick="applyInventoryReportFilters()">
+            <i class="fa-solid fa-filter"></i> Apply
+        </button>
+        <label class="invrep-checkbox-label">
+            <input type="checkbox" id="invrepIncludeZeroStock">
+            Include out-of-stock batches (0 qty)
+        </label>
+    </div>
+
+    <!-- Batch Table -->
+    <div class="card">
+        <div class="card-header" style="padding:12px 20px; border-bottom:1px solid #e8edf3; display:flex; justify-content:space-between; align-items:center; font-weight:500; color:#475569;">
+            <span><i class="fa-solid fa-boxes-stacked"></i> Batch-Level Stock</span>
+            <span class="category-badge" id="invrepListCount">0 batches</span>
+        </div>
+        <div class="table-responsive">
+            <table class="table-minimal" id="invrepTable">
+                <thead>
+                    <tr>
+                        <th style="padding-left: 20px;">Product</th>
+                        <th>Category</th>
+                        <th>Batch #</th>
+                        <th>Expiry Date</th>
+                        <th class="text-center">Status</th>
+                        <th class="text-right">Qty in Stock</th>
+                        <th class="text-right">Cost Price</th>
+                        <th class="text-right" style="padding-right: 20px;">Stock Value</th>
+                    </tr>
+                </thead>
+                <tbody id="invrepTableBody">
+                    <tr>
+                        <td colspan="8" class="text-center" style="padding: 40px; color: #94a3b8;">
+                            <i class="fa-solid fa-spinner fa-spin"></i> Loading inventory...
+                        </td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+<style>
+.invrep-stats {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 15px;
+    margin-bottom: 20px;
+}
+@media (max-width: 768px) {
+    .invrep-stats {
+        grid-template-columns: repeat(2, 1fr);
+    }
+}
+.invrep-stat-card {
+    background: white;
+    padding: 16px 20px;
+    border-radius: 8px;
+    border: 1px solid #e8edf3;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+}
+.invrep-stat-card h4 {
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: #64748b;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin: 0 0 4px 0;
+}
+.invrep-stat-card p {
+    font-size: 1.5rem;
+    font-weight: 700;
+    margin: 0;
+    color: #1e293b;
+}
+
+.invrep-filters {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+    align-items: center;
+    margin-bottom: 16px;
+}
+.invrep-filters .form-control {
+    padding: 8px 12px;
+    border: 1px solid #e2e8f0;
+    border-radius: 6px;
+    font-size: 0.85rem;
+    background: white;
+}
+.invrep-filters .form-control:focus {
+    outline: none;
+    border-color: #2563eb;
+    box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.1);
+}
+.invrep-checkbox-label {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 0.8rem;
+    color: #475569;
+    cursor: pointer;
+    user-select: none;
+    white-space: nowrap;
+}
+.invrep-checkbox-label input[type="checkbox"] {
+    cursor: pointer;
+}
+
+.invrep-status-badge {
+    padding: 2px 10px;
+    border-radius: 10px;
+    font-size: 0.7rem;
+    font-weight: 600;
+    display: inline-block;
+}
+.invrep-status-expired { background: #fee2e2; color: #dc2626; }
+.invrep-status-expiring { background: #fef3c7; color: #b45309; }
+.invrep-status-watch { background: #dbeafe; color: #1d4ed8; }
+.invrep-status-ok { background: #d1fae5; color: #065f46; }
+</style>

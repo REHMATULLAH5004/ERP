@@ -1,0 +1,132 @@
+<div class="module-view-container">
+    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
+        <h3 style="margin: 0;">Suppliers</h3>
+        <button id="addSupplierBtn" style="background: #2563eb; color: white; border: none; padding: 10px 20px; border-radius: 6px; cursor: pointer;">
+            <i class="fa-solid fa-truck"></i> Add Supplier
+        </button>
+    </div>
+
+    <div class="card" style="padding: 0;">
+        <table class="table-minimal" id="supplierTable">
+            <thead>
+                <tr>
+                    <th style="padding-left: 20px;">Supplier</th>
+                    <th>Contact Person</th>
+                    <th>Phone</th>
+                    <th>Email</th>
+                    <!-- 🔥 FIX: Opening Balance (USD/ZMW) columns removed --
+                         a static snapshot that goes stale/zero as it's paid
+                         down, so showing it in this list implied a "current"
+                         balance it doesn't represent. Still captured in the
+                         Add/Edit modal below for initial payable setup. -->
+                    <th style="text-align: right;">Total Stock Amount (K)</th>
+                    <th style="padding-right: 20px; text-align: right;">Actions</th>
+                </tr>
+            </thead>
+            <tbody id="supplierTableBody">
+                <tr>
+                    <td colspan="6" style="text-align: center; padding: 30px; color: #94a3b8;">
+                        <i class="fa-solid fa-spinner fa-spin"></i> Loading suppliers...
+                    </td>
+                </tr>
+            </tbody>
+        </table>
+    </div>
+</div>
+
+<!-- ============================================ -->
+<!-- ADD / EDIT SUPPLIER MODAL -->
+<!-- ============================================ -->
+<div id="supplierModal" style="display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(15, 23, 42, 0.6); backdrop-filter: blur(4px); z-index: 1000; justify-content: center; align-items: center;">
+    <div style="background: white; padding: 30px; border-radius: 12px; width: 90%; max-width: 550px; box-shadow: 0 20px 50px rgba(0,0,0,0.5);">
+        
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; border-bottom: 1px solid #e2e8f0; padding-bottom: 15px;">
+            <h3 id="supplierModalTitle" style="margin: 0;"><i class="fa-solid fa-truck" style="color: #2563eb;"></i> Add New Supplier</h3>
+            <button id="closeSupplierModalBtn" style="background: none; border: none; font-size: 1.5rem; cursor: pointer; color: #64748b;">&times;</button>
+        </div>
+
+        <form id="supplierForm">
+            <input type="hidden" id="editSupplierId" value="">
+
+            <div style="margin-bottom: 15px;">
+                <label style="display: block; font-weight: 500; color: #475569; margin-bottom: 5px;">Supplier Name *</label>
+                <input type="text" id="supplierName" required style="width: 100%; padding: 10px; border: 1px solid #e2e8f0; border-radius: 6px;">
+            </div>
+
+            <div style="margin-bottom: 15px;">
+                <label style="display: block; font-weight: 500; color: #475569; margin-bottom: 5px;">Contact Person</label>
+                <input type="text" id="contactPerson" style="width: 100%; padding: 10px; border: 1px solid #e2e8f0; border-radius: 6px;">
+            </div>
+
+            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 15px;">
+                <div style="margin-bottom: 15px;">
+                    <label style="display: block; font-weight: 500; color: #475569; margin-bottom: 5px;">Phone</label>
+                    <input type="text" id="supplierPhone" style="width: 100%; padding: 10px; border: 1px solid #e2e8f0; border-radius: 6px;">
+                </div>
+                <div style="margin-bottom: 15px;">
+                    <label style="display: block; font-weight: 500; color: #475569; margin-bottom: 5px;">Email</label>
+                    <input type="email" id="supplierEmail" style="width: 100%; padding: 10px; border: 1px solid #e2e8f0; border-radius: 6px;">
+                </div>
+            </div>
+
+            <!-- Opening Balance Fields -->
+            <!-- 🔥 KEPT: still needed here as one-time initial-payable
+                 entry when onboarding a supplier with pre-existing debt --
+                 Purchase/Payment modules read these fields. Only removed
+                 from the LIST view above, since that display implied a
+                 live balance rather than a one-time starting point. -->
+            <div style="border-top: 1px solid #e2e8f0; padding-top: 15px; margin-top: 5px;">
+                <h4 style="margin: 0 0 10px 0; color: #0f172a; font-size: 0.95rem;">
+                    <i class="fa-solid fa-coins" style="color: #f59e0b;"></i> Opening Balance
+                </h4>
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 15px;">
+                    <div style="margin-bottom: 10px;">
+                        <label style="display: block; font-weight: 500; color: #475569; margin-bottom: 5px;">Balance (USD)</label>
+                        <input type="number" id="openingBalanceUsd" step="0.01" value="0" style="width: 100%; padding: 10px; border: 1px solid #e2e8f0; border-radius: 6px;">
+                    </div>
+                    <div style="margin-bottom: 10px;">
+                        <label style="display: block; font-weight: 500; color: #475569; margin-bottom: 5px;">Balance (ZMW)</label>
+                        <input type="number" id="openingBalanceZmw" step="0.01" value="0" style="width: 100%; padding: 10px; border: 1px solid #e2e8f0; border-radius: 6px;">
+                    </div>
+                </div>
+            </div>
+
+            <div style="display: flex; gap: 10px; justify-content: flex-end; margin-top: 15px; border-top: 1px solid #e2e8f0; padding-top: 20px;">
+                <button type="button" id="cancelSupplierBtn" style="background: white; border: 1px solid #e2e8f0; padding: 10px 25px; border-radius: 6px; cursor: pointer;">Cancel</button>
+                <button type="submit" id="saveSupplierBtn" style="background: #2563eb; color: white; border: none; padding: 10px 25px; border-radius: 6px; cursor: pointer;">
+                    <i class="fa-solid fa-floppy-disk"></i> Save Supplier
+                </button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<!-- ============================================ -->
+<!-- 🔥 ADDED: SUPPLIER STOCK DETAIL MODAL -->
+<!-- Opens when clicking "Total Stock Amount" -- shows every item from -->
+<!-- that supplier with current qty and stock value. -->
+<!-- ============================================ -->
+<div id="supplierStockModal" style="display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(15, 23, 42, 0.6); backdrop-filter: blur(4px); z-index: 1000; justify-content: center; align-items: center;">
+    <div style="background: white; padding: 30px; border-radius: 12px; width: 90%; max-width: 600px; max-height: 80vh; overflow-y: auto; box-shadow: 0 20px 50px rgba(0,0,0,0.5);">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; border-bottom: 1px solid #e2e8f0; padding-bottom: 15px;">
+            <h3 id="supplierStockTitle" style="margin: 0;"><i class="fa-solid fa-boxes-stacked" style="color: #2563eb;"></i> Stock on Hand</h3>
+            <button id="closeSupplierStockBtn" style="background: none; border: none; font-size: 1.5rem; cursor: pointer; color: #64748b;">&times;</button>
+        </div>
+        <table class="table-minimal" style="width: 100%;">
+            <thead>
+                <tr>
+                    <th style="padding-left: 20px; text-align: left;">Item</th>
+                    <th style="text-align: right;">Qty</th>
+                    <th style="text-align: right; padding-right: 20px;">Stock Value (K)</th>
+                </tr>
+            </thead>
+            <tbody id="supplierStockContent">
+                <tr><td colspan="3" style="text-align: center; padding: 30px; color: #94a3b8;">Loading...</td></tr>
+            </tbody>
+        </table>
+    </div>
+</div>
+
+<script>
+    document.dispatchEvent(new Event('loadModuleComplete'));
+</script>

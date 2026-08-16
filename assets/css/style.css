@@ -1,0 +1,260 @@
+/* ============================================
+   BASE / RESET
+   ============================================ */
+   * { box-sizing: border-box; }
+   body {
+       margin: 0;
+       font-family: 'Segoe UI', Arial, sans-serif;
+       background: #f1f5f9;
+       color: #0f172a;
+       display: flex;
+       flex-direction: column;
+       height: 100vh;
+       overflow: hidden;
+   }
+   
+   /* ============================================
+      TOP NAVIGATION BAR
+      ============================================ */
+   .top-navbar {
+       display: flex;
+       justify-content: space-between;
+       align-items: center;
+       background: #0f172a;
+       color: white;
+       padding: 0 20px;
+       height: 56px;
+       flex-shrink: 0;
+   }
+   .nav-left { display: flex; align-items: center; gap: 30px; }
+   .logo { font-size: 1.1rem; font-weight: 700; display: flex; align-items: center; gap: 8px; }
+   .logo i { color: #3b82f6; }
+   .top-menu { display: flex; gap: 4px; }
+   .top-link {
+       color: #cbd5e1;
+       text-decoration: none;
+       padding: 8px 14px;
+       border-radius: 6px;
+       font-size: 0.85rem;
+       font-weight: 500;
+       transition: all 0.15s;
+   }
+   .top-link:hover { background: rgba(255,255,255,0.08); color: white; }
+   .top-link.active { background: #2563eb; color: white; }
+   
+   .nav-right { display: flex; align-items: center; gap: 20px; }
+   .user-profile { font-size: 0.85rem; color: #e2e8f0; display: flex; align-items: center; gap: 6px; }
+   .logout-btn {
+       color: #fca5a5;
+       text-decoration: none;
+       font-size: 0.85rem;
+       display: flex;
+       align-items: center;
+       gap: 6px;
+   }
+   .logout-btn:hover { color: #fecaca; }
+   
+   /* ============================================
+      MAIN LAYOUT
+      ============================================ */
+   .main-layout {
+       display: flex;
+       flex: 1;
+       overflow: hidden;
+   }
+   .sidebar {
+       width: 220px;
+       background: white;
+       border-right: 1px solid #e2e8f0;
+       overflow-y: auto;
+       flex-shrink: 0;
+       padding: 16px 0;
+   }
+   .sidebar-menu-item {
+       display: block;
+       padding: 10px 20px;
+       color: #475569;
+       text-decoration: none;
+       font-size: 0.85rem;
+       cursor: pointer;
+       border-left: 3px solid transparent;
+   }
+   .sidebar-menu-item:hover { background: #f8fafc; color: #2563eb; }
+   .sidebar-menu-item.active { background: #eff6ff; color: #2563eb; border-left-color: #2563eb; font-weight: 500; }
+   
+   .workspace {
+       flex: 1;
+       display: flex;
+       flex-direction: column;
+       overflow-y: auto;
+       background: #f8fafc;
+   }
+   
+   /* 🔥 FIX: "expand to fullscreen" toggle used by the Retail, Wholesale,
+      Donation and Write-off screens. Their toggle buttons previously tried
+      to set a data-layout-mode attribute on a #appRoot element that never
+      existed anywhere in the DOM, so the button did nothing. This class is
+      now toggled on <body> instead (which always exists), and simply hides
+      the sidebar so .workspace (flex: 1) expands to fill the freed space. */
+   body.layout-fullscreen #sidebar-container {
+       display: none;
+   }
+   .workspace-header {
+       display: flex;
+       justify-content: space-between;
+       align-items: center;
+       padding: 16px 24px;
+       background: white;
+       border-bottom: 1px solid #e2e8f0;
+       flex-shrink: 0;
+   }
+   .page-title { margin: 0; font-size: 1.2rem; color: #0f172a; }
+   .content-box { padding: 24px; flex: 1; }
+   .helper-text { color: #94a3b8; font-size: 0.9rem; }
+   
+   .module-view-container { max-width: 1400px; }
+   
+   /* ============================================
+      CARDS (used across every module)
+      ============================================ */
+   .card {
+       background: white;
+       border-radius: 10px;
+       box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+       border: 1px solid #e8edf3;
+       overflow: hidden;
+   }
+   
+   /* ============================================
+      SHARED MODAL SYSTEM (used by Stock Movement,
+      Fixed Assets, Accounts Payable, Attendance, etc.)
+      ============================================ */
+   .modal {
+       display: none;
+       position: fixed;
+       top: 0; left: 0; width: 100%; height: 100%;
+       background: rgba(0,0,0,0.5);
+       z-index: 1000;
+       animation: modalFadeIn 0.25s ease;
+   }
+   .modal.show { display: flex; align-items: center; justify-content: center; }
+   @keyframes modalFadeIn {
+       from { opacity: 0; transform: scale(0.95); }
+       to { opacity: 1; transform: scale(1); }
+   }
+   .modal-dialog { width: 95%; max-width: 700px; max-height: 90vh; display: flex; flex-direction: column; }
+   .modal-lg { max-width: 900px; }
+   .modal-md { max-width: 600px; }
+   .modal-xl { max-width: 1200px; }
+   .modal-content {
+       background: white;
+       border-radius: 12px;
+       display: flex;
+       flex-direction: column;
+       max-height: 90vh;
+       overflow: hidden;
+       padding: 24px;
+   }
+   .modal-close { background: none; border: none; font-size: 1.5rem; cursor: pointer; color: #94a3b8; padding: 0 8px; }
+   .modal-close:hover { color: #475569; }
+   .modal-footer {
+       padding-top: 12px; margin-top: 12px;
+       border-top: 1px solid #e8edf3;
+       display: flex; gap: 10px; justify-content: flex-end; flex-wrap: wrap;
+   }
+   
+   /* --- Restored from the original file: modal/form styling used by
+          Chart of Accounts / Journal Entry (and reused everywhere else) --- */
+   .modal-header {
+       display: flex; justify-content: space-between; align-items: center;
+       margin-bottom: 20px; border-bottom: 1px solid #e2e8f0; padding-bottom: 15px;
+   }
+   .modal-header h3 { margin: 0; }
+   .modal-body { padding: 0; }
+   .form-actions {
+       margin-top: 20px; display: flex; gap: 10px; justify-content: flex-end;
+       border-top: 1px solid #e2e8f0; padding-top: 20px;
+   }
+   
+   .form-group { margin-bottom: 15px; }
+   .form-group label { display: block; font-weight: 500; color: #475569; margin-bottom: 3px; font-size: 0.85rem; }
+   .form-control {
+       width: 100%; padding: 8px 12px; border: 1px solid #e2e8f0; border-radius: 4px;
+       font-size: 0.9rem; transition: border-color 0.2s;
+   }
+   .form-control:focus { outline: none; border-color: #2563eb; box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.1); }
+   .form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 15px; }
+   textarea.form-control { resize: vertical; min-height: 60px; }
+   
+   /* ============================================
+      BUTTONS
+      ============================================ */
+   .btn {
+       padding: 8px 16px; border: none; border-radius: 4px; cursor: pointer;
+       font-size: 0.85rem; font-weight: 500; transition: all 0.2s;
+       display: inline-flex; align-items: center; gap: 6px;
+   }
+   .btn-primary { background: #2563eb; color: white; }
+   .btn-primary:hover { background: #1d4ed8; }
+   .btn-secondary { background: #f1f5f9; color: #475569; }
+   .btn-secondary:hover { background: #e2e8f0; }
+   .btn-success { background: #059669; color: white; }
+   .btn-success:hover { background: #047857; }
+   .btn-danger { background: #dc2626; color: white; }
+   .btn-danger:hover { background: #b91c1c; }
+   .btn-outline { background: transparent; border: 1px solid #e2e8f0; color: #475569; }
+   .btn-outline:hover { background: #f8fafc; }
+   .btn-sm { padding: 4px 10px; font-size: 0.75rem; }
+   
+   /* ============================================
+      TABLES
+      ============================================ */
+   .table-responsive { overflow-x: auto; }
+   .table-minimal { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+   .table-minimal th, .table-minimal thead th {
+       background: #f8fafc; padding: 8px 12px; text-align: left;
+       border-bottom: 2px solid #e2e8f0; font-weight: 600; color: #475569;
+   }
+   .table-minimal td, .table-minimal tbody td {
+       padding: 8px 12px; border-bottom: 1px solid #e2e8f0;
+   }
+   .table-minimal tr:hover, .table-minimal tbody tr:hover { background: #f8fafc; }
+   .table-minimal .text-right { text-align: right; }
+   .table-minimal .text-center { text-align: center; }
+   .clickable-header { cursor: pointer; user-select: none; }
+   .clickable-header:hover { color: #2563eb; }
+   
+   /* ============================================
+      BADGES
+      ============================================ */
+   .type-badge { padding: 2px 10px; border-radius: 10px; font-size: 0.7rem; font-weight: 500; }
+   .type-asset { background: #dbeafe; color: #1d4ed8; }
+   .type-liability { background: #fce7f3; color: #be185d; }
+   .type-equity { background: #d1fae5; color: #065f46; }
+   .type-revenue { background: #dbeafe; color: #2563eb; }
+   .type-expense { background: #fee2e2; color: #dc2626; }
+   
+   .category-current { background: #dbeafe; color: #1d4ed8; padding: 2px 10px; border-radius: 10px; font-size: 0.7rem; }
+   .category-fixed { background: #d1fae5; color: #065f46; padding: 2px 10px; border-radius: 10px; font-size: 0.7rem; }
+   .category-badge { background: #f1f5f9; color: #475569; padding: 2px 10px; border-radius: 10px; font-size: 0.7rem; }
+   
+   .status-badge { padding: 2px 10px; border-radius: 10px; font-size: 0.7rem; font-weight: 500; }
+   .status-approved { background: #d1fae5; color: #065f46; }
+   .status-draft { background: #fee2e2; color: #dc2626; }
+   .status-pending { background: #fef3c7; color: #b45309; }
+   .status-partial { background: #dbeafe; color: #1d4ed8; }
+   .status-paid { background: #dcfce7; color: #15803d; }
+   .status-overdue { background: #fee2e2; color: #dc2626; }
+   
+   .journal-summary-item { padding: 4px 12px; border-radius: 4px; background: white; border: 1px solid #e2e8f0; }
+   .journal-summary-item.balanced { border-color: #22c55e; background: #f0fdf4; }
+   .journal-summary-item.unbalanced { border-color: #dc2626; background: #fef2f2; }
+   
+   /* ============================================
+      UTILITY
+      ============================================ */
+   .text-center { text-align: center; }
+   .text-muted { color: #94a3b8; }
+   .mt-10 { margin-top: 10px; }
+   .mb-10 { margin-bottom: 10px; }
+   .gap-10 { gap: 10px; }

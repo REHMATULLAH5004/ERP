@@ -1,0 +1,23 @@
+<div class="module-view-container" style="max-width: 500px; margin: 0 auto; text-align: center;">
+    <h3 style="margin-bottom: 5px;"><i class="fa-solid fa-qrcode"></i> Clock-In Station</h3>
+    <p style="color:#64748b; font-size:0.85rem; margin-top:0; margin-bottom:20px;">
+        Leave this screen running at the pharmacy. Employees scan this code with their own phone to clock in or out.
+    </p>
+
+    <div class="card" style="padding:30px;">
+        <div id="qrCodeContainer" style="display:flex; justify-content:center; margin-bottom:16px; min-height:280px; align-items:center;">
+            <img id="qrImage" style="width:280px; height:280px;" alt="QR code">
+        </div>
+        <div style="font-size:0.85rem; color:#64748b;">
+            Code refreshes in <span id="qrCountdown" style="font-weight:700; color:#2563eb;">30</span>s
+        </div>
+    </div>
+
+    <p style="color:#94a3b8; font-size:0.75rem; margin-top:16px;">
+        <i class="fa-solid fa-shield-halved"></i> Each code is only valid for a short window -- a photo of an old code won't work.
+    </p>
+</div>
+
+<script>
+    document.dispatchEvent(new Event('loadModuleComplete'));
+</script>

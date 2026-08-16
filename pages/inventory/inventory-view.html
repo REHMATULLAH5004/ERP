@@ -1,0 +1,72 @@
+<div class="module-view-container">
+    <h3 style="margin: 0 0 20px 0;"><i class="fa-solid fa-chart-line"></i> Inventory Overview</h3>
+
+    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 20px;">
+
+        <!-- 1. Most Expensive Stock -->
+        <div class="card" style="padding: 0;">
+            <div style="padding: 12px 20px; border-bottom: 1px solid #e8edf3; display:flex; justify-content:space-between; align-items:center;">
+                <strong><i class="fa-solid fa-sack-dollar" style="color:#f59e0b;"></i> Most Expensive Stock</strong>
+                <select id="expensiveCriteria" style="font-size:0.75rem; padding:4px 8px; border:1px solid #e2e8f0; border-radius:4px;">
+                    <option value="totalValue">By Total Inventory Value</option>
+                    <option value="perPack">By Cost Per Pack</option>
+                </select>
+            </div>
+            <table class="table-minimal" style="width:100%;">
+                <thead><tr><th style="padding-left:20px;">Item</th><th style="text-align:right;padding-right:20px;">Value</th></tr></thead>
+                <tbody id="expensiveStockBody"><tr><td colspan="2" style="text-align:center;padding:20px;color:#94a3b8;">Loading...</td></tr></tbody>
+            </table>
+        </div>
+
+        <!-- 2. Fast Moving -->
+        <div class="card" style="padding: 0;">
+            <div style="padding: 12px 20px; border-bottom: 1px solid #e8edf3; display:flex; justify-content:space-between; align-items:center;">
+                <strong><i class="fa-solid fa-bolt" style="color:#22c55e;"></i> Fast Moving Items</strong>
+                <select id="fastMovingCriteria" style="font-size:0.75rem; padding:4px 8px; border:1px solid #e2e8f0; border-radius:4px;">
+                    <option value="qty">By Quantity Sold</option>
+                    <option value="frequency">By Number of Sales</option>
+                </select>
+            </div>
+            <table class="table-minimal" style="width:100%;">
+                <thead><tr><th style="padding-left:20px;">Item</th><th style="text-align:right;padding-right:20px;">Sold</th></tr></thead>
+                <tbody id="fastMovingBody"><tr><td colspan="2" style="text-align:center;padding:20px;color:#94a3b8;">Loading...</td></tr></tbody>
+            </table>
+        </div>
+
+        <!-- 3. Slow Moving -->
+        <div class="card" style="padding: 0;">
+            <div style="padding: 12px 20px; border-bottom: 1px solid #e8edf3;">
+                <strong><i class="fa-solid fa-turtle" style="color:#64748b;"></i> Slow Moving Items</strong>
+                <span style="font-size:0.75rem;color:#94a3b8;margin-left:8px;">(in stock, lowest sales activity)</span>
+            </div>
+            <table class="table-minimal" style="width:100%;">
+                <thead><tr><th style="padding-left:20px;">Item</th><th style="text-align:right;">Sold</th><th style="text-align:right;padding-right:20px;">In Stock</th></tr></thead>
+                <tbody id="slowMovingBody"><tr><td colspan="3" style="text-align:center;padding:20px;color:#94a3b8;">Loading...</td></tr></tbody>
+            </table>
+        </div>
+
+        <!-- 4. Near Expiry -->
+        <div class="card" style="padding: 0;">
+            <div style="padding: 12px 20px; border-bottom: 1px solid #e8edf3;">
+                <strong><i class="fa-solid fa-hourglass-half" style="color:#dc2626;"></i> Near Expiry</strong>
+                <span style="font-size:0.75rem;color:#94a3b8;margin-left:8px;">(within 90 days)</span>
+            </div>
+            <table class="table-minimal" style="width:100%;">
+                <thead><tr><th style="padding-left:20px;">Item</th><th>Batch</th><th style="text-align:right;">Qty</th><th style="text-align:right;padding-right:20px;">Days Left</th></tr></thead>
+                <tbody id="nearExpiryBody"><tr><td colspan="4" style="text-align:center;padding:20px;color:#94a3b8;">Loading...</td></tr></tbody>
+            </table>
+        </div>
+
+    </div>
+
+    <!-- 5. Below Minimum Order Qty (full width) -->
+    <div class="card" style="padding: 0;">
+        <div style="padding: 12px 20px; border-bottom: 1px solid #e8edf3;">
+            <strong><i class="fa-solid fa-triangle-exclamation" style="color:#f59e0b;"></i> Below Minimum Order Qty</strong>
+        </div>
+        <table class="table-minimal" style="width:100%;">
+            <thead><tr><th style="padding-left:20px;">Item</th><th style="text-align:right;">Current Stock</th><th style="text-align:right;padding-right:20px;">Minimum Order Qty</th></tr></thead>
+            <tbody id="belowMinBody"><tr><td colspan="3" style="text-align:center;padding:20px;color:#94a3b8;">Loading...</td></tr></tbody>
+        </table>
+    </div>
+</div>

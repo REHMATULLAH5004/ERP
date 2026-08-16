@@ -1,0 +1,235 @@
+<div class="module-view-container">
+    <h3 style="margin: 0 0 4px 0;"><i class="fa-solid fa-chart-pie"></i> Reports Overview</h3>
+    <p style="color:#64748b; font-size:0.85rem; margin-top:0; margin-bottom:20px;">
+        A quick look before you dive into a specific report from the sidebar.
+    </p>
+
+    <!-- KPI Row -->
+    <div class="repov-kpis">
+        <div class="repov-kpi-card" style="border-left: 4px solid #2563eb;">
+            <h4>Today's Sales</h4>
+            <p id="repOvStatTodaySales">--</p>
+        </div>
+        <div class="repov-kpi-card" style="border-left: 4px solid #059669;">
+            <h4>This Month's Sales</h4>
+            <p id="repOvStatMonthSales">--</p>
+        </div>
+        <div class="repov-kpi-card" style="border-left: 4px solid #f59e0b;">
+            <h4>Pending Payables</h4>
+            <p id="repOvStatPayables">--</p>
+        </div>
+        <div class="repov-kpi-card" style="border-left: 4px solid #dc2626;">
+            <h4>Expiring / Expired Stock</h4>
+            <p id="repOvStatExpiring">--</p>
+        </div>
+    </div>
+
+    <!-- Charts Row -->
+    <div class="repov-charts">
+        <div class="card repov-chart-card">
+            <div class="repov-chart-header">
+                <div>
+                    <strong>Sales Trend</strong>
+                    <span class="repov-chart-subtitle">Last 14 days &middot; Retail &amp; Wholesale</span>
+                </div>
+                <button class="repov-table-toggle" id="repOvTrendTableToggle" onclick="toggleReportOverviewTable('trend')">
+                    <i class="fa-solid fa-table"></i> View as table
+                </button>
+            </div>
+            <div id="repOvTrendChartWrap">
+                <div id="repOvTrendChart" class="repov-chart-svg-wrap"></div>
+                <div id="repOvTrendTable" class="repov-chart-table-wrap" style="display:none;"></div>
+            </div>
+        </div>
+
+        <div class="card repov-chart-card">
+            <div class="repov-chart-header">
+                <div>
+                    <strong>Sales By Type</strong>
+                    <span class="repov-chart-subtitle">Last 30 days &middot; Retail &amp; Wholesale</span>
+                </div>
+                <button class="repov-table-toggle" id="repOvTypeTableToggle" onclick="toggleReportOverviewTable('type')">
+                    <i class="fa-solid fa-table"></i> View as table
+                </button>
+            </div>
+            <div id="repOvTypeChartWrap">
+                <div id="repOvTypeChart" class="repov-chart-svg-wrap"></div>
+                <div id="repOvTypeTable" class="repov-chart-table-wrap" style="display:none;"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Quick Links -->
+    <div class="repov-quicklinks">
+        <div class="repov-quicklink-card" onclick="loadSubModule('report', 'daily-report')">
+            <i class="fa-solid fa-file-invoice"></i>
+            <div>
+                <strong>Daily Report</strong>
+                <span>Opening/closing per account for one day</span>
+            </div>
+        </div>
+        <div class="repov-quicklink-card" onclick="loadSubModule('report', 'sales-report')">
+            <i class="fa-solid fa-chart-line"></i>
+            <div>
+                <strong>Sales Report</strong>
+                <span>Date range, item-wise, customer-wise</span>
+            </div>
+        </div>
+        <div class="repov-quicklink-card" onclick="loadSubModule('report', 'purchase-report')">
+            <i class="fa-solid fa-truck-ramp-box"></i>
+            <div>
+                <strong>Purchase Report</strong>
+                <span>Supplier-wise, item-wise, cash vs credit</span>
+            </div>
+        </div>
+        <div class="repov-quicklink-card" onclick="loadSubModule('report', 'inventory-report')">
+            <i class="fa-solid fa-warehouse"></i>
+            <div>
+                <strong>Inventory Report</strong>
+                <span>Batch-level stock, filters, Excel export</span>
+            </div>
+        </div>
+    </div>
+</div>
+
+<style>
+.repov-kpis {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 15px;
+    margin-bottom: 20px;
+}
+@media (max-width: 900px) {
+    .repov-kpis { grid-template-columns: repeat(2, 1fr); }
+}
+.repov-kpi-card {
+    background: white;
+    padding: 16px 20px;
+    border-radius: 8px;
+    border: 1px solid #e8edf3;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+}
+.repov-kpi-card h4 {
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: #64748b;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin: 0 0 6px 0;
+}
+.repov-kpi-card p {
+    font-size: 1.4rem;
+    font-weight: 700;
+    margin: 0;
+    color: #1e293b;
+}
+
+.repov-charts {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 20px;
+    margin-bottom: 20px;
+}
+@media (max-width: 900px) {
+    .repov-charts { grid-template-columns: 1fr; }
+}
+.repov-chart-card { padding: 16px 20px 20px; }
+.repov-chart-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    margin-bottom: 8px;
+}
+.repov-chart-header strong { font-size: 0.9rem; color: #1e293b; }
+.repov-chart-subtitle {
+    display: block;
+    font-size: 0.72rem;
+    color: #94a3b8;
+    margin-top: 2px;
+}
+.repov-table-toggle {
+    background: none;
+    border: 1px solid #e2e8f0;
+    color: #64748b;
+    border-radius: 6px;
+    padding: 4px 10px;
+    font-size: 0.72rem;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    white-space: nowrap;
+}
+.repov-table-toggle:hover { background: #f8fafc; color: #2563eb; border-color: #2563eb; }
+.repov-chart-svg-wrap svg { width: 100%; height: auto; display: block; overflow: visible; }
+.repov-chart-empty { text-align: center; padding: 40px 10px; color: #94a3b8; font-size: 0.85rem; }
+
+/* -- chart marks (kept as classes rather than inline so they read like
+   normal CSS, but every color value here matches the app's existing
+   design tokens -- #2563eb primary, #94a3b8/#e2e8f0 recessive grays --
+   nothing new was introduced) -- */
+.repov-line-path { fill: none; stroke: #2563eb; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.repov-area-fill { fill: #2563eb; opacity: 0.08; }
+.repov-grid-line { stroke: #e2e8f0; stroke-width: 1; }
+.repov-axis-label { fill: #94a3b8; font-size: 9px; font-family: inherit; }
+.repov-end-dot-ring { fill: #ffffff; }
+.repov-end-dot { fill: #2563eb; }
+.repov-value-label { fill: #475569; font-size: 10px; font-weight: 600; font-family: inherit; }
+.repov-crosshair-line { stroke: #cbd5e1; stroke-width: 1; }
+.repov-crosshair-dot { fill: #2563eb; stroke: #ffffff; stroke-width: 2; }
+.repov-hit-rect { fill: transparent; cursor: pointer; }
+.repov-bar { fill: #2563eb; transition: fill 0.1s; }
+.repov-bar:hover, .repov-bar.repov-bar-hover { fill: #1d4ed8; }
+.repov-bar-hit { fill: transparent; cursor: pointer; }
+.repov-bar-label { fill: #1e293b; font-size: 11px; font-family: inherit; }
+.repov-bar-value { fill: #475569; font-size: 11px; font-weight: 600; font-family: inherit; }
+
+.repov-tooltip {
+    position: absolute;
+    pointer-events: none;
+    background: #0f172a;
+    color: #ffffff;
+    padding: 6px 10px;
+    border-radius: 6px;
+    font-size: 0.75rem;
+    line-height: 1.4;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.2);
+    z-index: 20;
+    white-space: nowrap;
+    opacity: 0;
+    transition: opacity 0.1s;
+}
+.repov-tooltip.show { opacity: 1; }
+.repov-tooltip .repov-tooltip-value { font-weight: 700; }
+.repov-tooltip .repov-tooltip-label { color: #cbd5e1; }
+.repov-chart-svg-wrap { position: relative; }
+
+.repov-quicklinks {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 15px;
+}
+@media (max-width: 900px) {
+    .repov-quicklinks { grid-template-columns: repeat(2, 1fr); }
+}
+.repov-quicklink-card {
+    background: white;
+    border: 1px solid #e8edf3;
+    border-radius: 8px;
+    padding: 16px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    cursor: pointer;
+    transition: all 0.15s;
+}
+.repov-quicklink-card:hover { border-color: #2563eb; box-shadow: 0 2px 8px rgba(37,99,235,0.12); transform: translateY(-1px); }
+.repov-quicklink-card i { font-size: 1.3rem; color: #2563eb; flex-shrink: 0; width: 24px; text-align: center; }
+.repov-quicklink-card strong { display: block; font-size: 0.85rem; color: #1e293b; margin-bottom: 2px; }
+.repov-quicklink-card span { display: block; font-size: 0.72rem; color: #94a3b8; }
+
+.repov-table-simple { width: 100%; border-collapse: collapse; font-size: 0.8rem; }
+.repov-table-simple th { text-align: left; padding: 6px 8px; color: #64748b; border-bottom: 1px solid #e2e8f0; font-weight: 600; }
+.repov-table-simple td { padding: 6px 8px; border-bottom: 1px solid #f1f5f9; }
+.repov-table-simple td.repov-num, .repov-table-simple th.repov-num { text-align: right; }
+</style>

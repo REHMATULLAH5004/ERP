@@ -1,0 +1,683 @@
+<div class="module-view-container">
+    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
+        <h3 style="margin: 0;">Product Master</h3>
+        <div style="display: flex; gap: 10px;">
+            <button id="csvUploadBtn" style="background: #059669; color: white; border: none; padding: 10px 20px; border-radius: 6px; cursor: pointer;">
+                <i class="fa-solid fa-upload"></i> Import CSV
+            </button>
+            <button id="addProductBtn" style="background: #2563eb; color: white; border: none; padding: 10px 20px; border-radius: 6px; cursor: pointer;">
+                <i class="fa-solid fa-box-open"></i> Add Product
+            </button>
+        </div>
+    </div>
+    
+    <div style="display: flex; gap: 15px; margin-bottom: 20px;">
+        <input type="text" id="searchProduct" placeholder="Search by name, sku, or barcode..." style="flex: 1; padding: 10px; border: 1px solid #e2e8f0; border-radius: 6px;">
+        <select id="filterCategory" style="padding: 10px; border: 1px solid #e2e8f0; border-radius: 6px; background: white;">
+            <option value="">All Categories</option>
+        </select>
+    </div>
+
+    <div class="card" style="padding: 0; overflow: hidden;">
+        <table class="table-minimal striped" id="productTable">
+            <thead>
+                <tr>
+                    <th style="padding-left: 20px;">Product Name</th>
+                    <th>Generic Name</th>
+                    <th>Category</th>
+                    <th>Sub-Category</th>
+                    <th>Pack Size</th>
+                    <th style="text-align: right;">Min Order Qty</th>
+                    <th style="text-align: right;">Total Stock</th>
+                    <th style="padding-right: 20px; text-align: right;">Edit</th>
+                </tr>
+            </thead>
+            <tbody id="productTableBody">
+                <tr>
+                    <td colspan="8" style="text-align: center; padding: 30px; color: #94a3b8;">
+                        <i class="fa-solid fa-spinner fa-spin"></i> Loading products...
+                    </td>
+                </tr>
+            </tbody>
+        </table>
+    </div>
+</div>
+
+<!-- ============================================ -->
+<!-- ADD / EDIT PRODUCT MODAL (All CSS included) -->
+<!-- ============================================ -->
+<style>
+    /* MODAL OVERLAY */
+    #addProductModal, #csvUploadModal {
+        position: fixed;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        background: rgba(15, 23, 42, 0.6);
+        backdrop-filter: blur(4px);
+        z-index: 1000;
+        display: none;
+        justify-content: center;
+        align-items: center;
+    }
+    #addProductModal > div, #csvUploadModal > div {
+        background: white;
+        padding: 30px;
+        border-radius: 12px;
+        width: 90%;
+        max-width: 900px;
+        max-height: 90vh;
+        overflow-y: auto;
+        box-shadow: 0 20px 50px rgba(0,0,0,0.5);
+    }
+    #csvUploadModal > div {
+        max-width: 600px;
+    }
+
+    /* MODAL HEADER */
+    .modal-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 20px;
+        border-bottom: 1px solid #e2e8f0;
+        padding-bottom: 15px;
+    }
+    .modal-header h3 { margin: 0; }
+    .modal-close-btn {
+        background: none; border: none; font-size: 1.5rem; cursor: pointer; color: #64748b;
+    }
+
+    /* FORM GRID */
+    .form-grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 15px; }
+    .form-grid-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 15px; }
+    .form-group { margin-bottom: 15px; }
+    .form-group label { display: block; font-weight: 500; color: #475569; margin-bottom: 5px; }
+    .form-group input, .form-group select {
+        width: 100%; padding: 10px; border: 1px solid #e2e8f0; border-radius: 6px; background: white;
+    }
+    .form-group input:read-only { background: #f1f5f9; color: #64748b; }
+
+    /* QUICK ADD */
+    .quick-add-wrapper { display: flex; gap: 5px; }
+    .quick-add-wrapper select { flex: 1; }
+    .quick-add-btn {
+        background: #2563eb; color: white; border: none; padding: 0 15px; border-radius: 6px; cursor: pointer;
+    }
+
+    /* PRICE CONFIG */
+    .price-config { margin-top: 20px; border-top: 1px solid #e2e8f0; padding-top: 20px; }
+    .price-config h4 { margin: 0 0 15px 0; color: #0f172a; }
+    .price-card { background: #f8fafc; padding: 15px; border-radius: 6px; }
+
+    /* BATCH SECTION */
+    .batch-section { margin-top: 20px; border-top: 1px solid #e2e8f0; padding-top: 20px; }
+    .batch-details { display: none; margin-top: 15px; background: #f8fafc; padding: 15px; border-radius: 6px; }
+
+    /* MODAL FOOTER */
+    .modal-footer {
+        margin-top: 25px; display: flex; justify-content: flex-end; gap: 10px;
+        border-top: 1px solid #e2e8f0; padding-top: 20px;
+    }
+    .btn-cancel { background: white; border: 1px solid #e2e8f0; padding: 10px 25px; border-radius: 6px; cursor: pointer; }
+    .btn-save { background: #2563eb; color: white; border: none; padding: 10px 25px; border-radius: 6px; cursor: pointer; }
+    .btn-save:disabled { background: #93c5fd; cursor: not-allowed; }
+
+    /* QUICK ADD OVERLAY */
+    #quickAddOverlay {
+        position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+        background: rgba(0,0,0,0.5); display: flex; justify-content: center; align-items: center; z-index: 2000;
+    }
+    #quickAddOverlay > div { background: white; padding: 25px; border-radius: 10px; width: 400px; position: relative; }
+
+    /* TOAST */
+    #customToast {
+        position: fixed; top: 20px; right: 20px;
+        padding: 16px 24px; border-radius: 8px; color: white; font-weight: 500; z-index: 9999;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.15); animation: slideIn 0.3s ease;
+    }
+    #customToast.success { background: #059669; }
+    #customToast.error { background: #dc2626; }
+    @keyframes slideIn { from { transform: translateX(100%); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
+    @keyframes slideOut { from { transform: translateX(0); opacity: 1; } to { transform: translateX(100%); opacity: 0; } }
+
+    /* STRIPED TABLE STYLING */
+    .striped tbody tr:nth-child(odd) { background-color: #f8fafc; }
+    .striped tbody tr:nth-child(even) { background-color: #ffffff; }
+    .striped tbody tr:hover { background-color: #e2e8f0; transition: 0.2s; }
+
+    /* CONFIRM MODAL STYLES */
+    #customConfirmModal {
+        position: fixed;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        background: rgba(15, 23, 42, 0.6);
+        backdrop-filter: blur(4px);
+        z-index: 9999;
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        animation: modalFadeIn 0.25s ease;
+    }
+    #customConfirmModal > div {
+        background: white;
+        padding: 30px;
+        border-radius: 12px;
+        width: 90%;
+        max-width: 420px;
+        box-shadow: 0 20px 50px rgba(0,0,0,0.5);
+        text-align: center;
+    }
+    #customConfirmModal .icon {
+        margin-bottom: 16px;
+    }
+    #customConfirmModal .icon i {
+        font-size: 3rem;
+        color: #22c55e;
+    }
+    #customConfirmModal h3 {
+        margin: 0 0 8px 0;
+        color: #0f172a;
+        font-size: 1.2rem;
+    }
+    #customConfirmModal p {
+        color: #64748b;
+        margin-bottom: 20px;
+    }
+    #customConfirmModal .btn-group {
+        display: flex;
+        gap: 10px;
+        justify-content: center;
+    }
+    #customConfirmModal .btn-ok {
+        background: #2563eb;
+        color: white;
+        border: none;
+        padding: 10px 30px;
+        border-radius: 6px;
+        cursor: pointer;
+        font-size: 0.9rem;
+    }
+    #customConfirmModal .btn-ok:hover {
+        background: #1d4ed8;
+    }
+    #customConfirmModal .btn-cancel {
+        background: #f1f5f9;
+        border: 1px solid #e2e8f0;
+        padding: 10px 30px;
+        border-radius: 6px;
+        cursor: pointer;
+        font-size: 0.9rem;
+        color: #475569;
+    }
+    #customConfirmModal .btn-cancel:hover {
+        background: #e2e8f0;
+    }
+
+    /* CSV UPLOAD MODAL SPECIFIC STYLES */
+    .csv-upload-zone {
+        border: 2px dashed #e2e8f0;
+        border-radius: 8px;
+        padding: 40px 20px;
+        text-align: center;
+        cursor: pointer;
+        transition: all 0.3s ease;
+        margin-bottom: 15px;
+    }
+    .csv-upload-zone:hover {
+        border-color: #2563eb;
+        background: #f8fafc;
+    }
+    .csv-upload-zone i {
+        font-size: 3rem;
+        color: #2563eb;
+        margin-bottom: 10px;
+    }
+    .csv-upload-zone p {
+        color: #64748b;
+        margin: 5px 0;
+    }
+    .csv-upload-zone .file-name {
+        color: #2563eb;
+        font-weight: 500;
+    }
+
+    .csv-progress-container {
+        margin-top: 20px;
+        display: none;
+    }
+    .csv-progress-bar {
+        width: 100%;
+        height: 8px;
+        background: #e2e8f0;
+        border-radius: 4px;
+        overflow: hidden;
+    }
+    .csv-progress-bar-fill {
+        height: 100%;
+        background: linear-gradient(90deg, #2563eb, #3b82f6);
+        transition: width 0.3s ease;
+        width: 0%;
+    }
+    .csv-progress-text {
+        text-align: center;
+        margin-top: 8px;
+        font-size: 0.9rem;
+        color: #64748b;
+    }
+
+    .csv-status-container {
+        margin-top: 20px;
+        padding: 15px;
+        border-radius: 6px;
+        background: #f8fafc;
+        display: none;
+        max-height: 200px;
+        overflow-y: auto;
+    }
+    .csv-status-container.success {
+        background: #f0fdf4;
+        border: 1px solid #bbf7d0;
+    }
+    .csv-status-container.error {
+        background: #fef2f2;
+        border: 1px solid #fecaca;
+    }
+    .csv-status-text {
+        white-space: pre-wrap;
+        font-size: 0.85rem;
+        color: #475569;
+        margin: 0;
+        line-height: 1.6;
+    }
+</style>
+
+<!-- ============================================ -->
+<!-- ADD PRODUCT MODAL -->
+<!-- ============================================ -->
+<div id="addProductModal">
+    <div>
+        <div class="modal-header">
+            <h3 id="modalTitle">Add New Product</h3>
+            <button id="closeModalBtn" class="modal-close-btn">&times;</button>
+        </div>
+
+        <form id="addProductForm">
+            <input type="hidden" id="editProductId" value="">
+
+            <!-- SKU & Product Name -->
+            <div class="form-grid-2">
+                <div class="form-group">
+                    <label>SKU (Auto)</label>
+                    <input type="text" id="sku" readonly>
+                </div>
+                <div class="form-group">
+                    <label>Product Name *</label>
+                    <input type="text" id="productName" required>
+                </div>
+            </div>
+
+            <!-- Generic Name & Dosage Forms -->
+            <div class="form-grid-2">
+                <div class="form-group">
+                    <label>Generic Name</label>
+                    <div class="quick-add-wrapper">
+                        <select id="genericName">
+                            <option value="">Select Generic Name</option>
+                        </select>
+                        <button type="button" class="quick-add-btn" onclick="openQuickAdd('generic')">+</button>
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label>Dosage Form</label>
+                    <div class="quick-add-wrapper">
+                        <select id="dosageForm">
+                            <option value="">Select Dosage Form</option>
+                        </select>
+                        <button type="button" class="quick-add-btn" onclick="openQuickAdd('dosage')">+</button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Category & Sub-Category -->
+            <div class="form-grid-2">
+                <div class="form-group">
+                    <label>Category *</label>
+                    <div class="quick-add-wrapper">
+                        <select id="category" required>
+                            <option value="">Select Category</option>
+                        </select>
+                        <button type="button" class="quick-add-btn" onclick="openQuickAdd('category')">+</button>
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label>Sub-Category</label>
+                    <div class="quick-add-wrapper">
+                        <select id="subCategory">
+                            <option value="">Select Sub-Category</option>
+                        </select>
+                        <button type="button" class="quick-add-btn" onclick="openQuickAdd('subcategory')">+</button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Brand & Supplier -->
+            <div class="form-grid-2">
+                <div class="form-group">
+                    <label>Brand</label>
+                    <div class="quick-add-wrapper">
+                        <select id="brand">
+                            <option value="">Select Brand</option>
+                        </select>
+                        <button type="button" class="quick-add-btn" onclick="openQuickAdd('brand')">+</button>
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label>Supplier</label>
+                    <div class="quick-add-wrapper">
+                        <select id="supplier">
+                            <option value="">Select Supplier</option>
+                        </select>
+                        <button type="button" class="quick-add-btn" onclick="openQuickAdd('supplier')">+</button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Tax, Pack Size & Min Order Qty -->
+            <div class="form-grid-3">
+                <div class="form-group">
+                    <label>Tax (%)</label>
+                    <input type="number" id="tax" value="0" step="0.01">
+                </div>
+                <div class="form-group">
+                    <label>Pack Size *</label>
+                    <input type="number" id="packSize" required placeholder="e.g. 30" min="1">
+                </div>
+                <div class="form-group">
+                    <label>Min Order Qty *</label>
+                    <input type="number" id="minOrderQty" required placeholder="e.g. 10" min="1" value="1">
+                </div>
+            </div>
+
+            <!-- Sale Price Brackets -->
+            <div class="price-config">
+                <h4>Sale Price Configuration</h4>
+                
+                <div class="form-grid-3">
+                    <div class="price-card">
+                        <label>Wholesale Internal (% of Cost)</label>
+                        <input type="number" id="wholesaleInternalPercent" value="0" step="0.01" style="width: 100%; padding: 8px; border: 1px solid #e2e8f0; border-radius: 4px; margin-top: 5px;">
+                    </div>
+                    <div class="price-card">
+                        <label>Wholesale Regular (% of Cost)</label>
+                        <input type="number" id="wholesaleRegularPercent" value="0" step="0.01" style="width: 100%; padding: 8px; border: 1px solid #e2e8f0; border-radius: 4px; margin-top: 5px;">
+                    </div>
+                    <div class="price-card">
+                        <label>Retail Online (% of Cost)</label>
+                        <input type="number" id="retailOnlinePercent" value="0" step="0.01" style="width: 100%; padding: 8px; border: 1px solid #e2e8f0; border-radius: 4px; margin-top: 5px;">
+                    </div>
+                </div>
+                <div class="form-grid-3" style="margin-top: 15px;">
+                    <div class="price-card">
+                        <label>Retail Regular (% of Cost)</label>
+                        <input type="number" id="retailRegularPercent" value="0" step="0.01" style="width: 100%; padding: 8px; border: 1px solid #e2e8f0; border-radius: 4px; margin-top: 5px;">
+                    </div>
+                    <div class="price-card">
+                        <label>Retail Staff (% of Cost)</label>
+                        <input type="number" id="retailStaffPercent" value="0" step="0.01" style="width: 100%; padding: 8px; border: 1px solid #e2e8f0; border-radius: 4px; margin-top: 5px;">
+                    </div>
+                    <div class="price-card" style="background: #e0f2fe; border: 1px solid #bae6fd;">
+                        <label style="color: #0369a1;">NHIMA (Fixed Price K)</label>
+                        <input type="number" id="nhimaPrice" step="0.01" required style="width: 100%; padding: 8px; border: 1px solid #bae6fd; border-radius: 4px; margin-top: 5px; background: white;">
+                    </div>
+                </div>
+            </div>
+
+            <!-- Opening Quantity & Batch Info -->
+            <div class="batch-section">
+                <h4>Opening Quantity & Batch Info</h4>
+                <div class="form-group">
+                    <label>Opening Qty</label>
+                    <input type="number" id="openingQty" value="0" min="0">
+                </div>
+                
+                <div id="batchDetailsSection" class="batch-details">
+                    
+                    <!-- Currency Converter with Cost Price Input -->
+                    <div style="margin-bottom: 20px; padding-bottom: 15px; border-bottom: 1px dashed #e2e8f0;">
+                        <h5 style="margin: 0 0 12px 0; color: #0f172a;">Batch Cost & Currency</h5>
+                        <div class="form-grid-3">
+                            <div class="form-group" style="margin-bottom: 0;">
+                                <label>Cost Price *</label>
+                                <input type="number" id="openingCostPrice" step="0.01" placeholder="Enter cost" style="width: 100%; padding: 8px; border: 1px solid #e2e8f0; border-radius: 4px;">
+                            </div>
+                            <div class="form-group" style="margin-bottom: 0;">
+                                <label>Currency</label>
+                                <select id="batchCurrency" style="width: 100%; padding: 8px; border: 1px solid #e2e8f0; border-radius: 4px; background: white;">
+                                    <option value="ZMW">ZMW (Kwacha)</option>
+                                    <option value="USD">USD (Dollar)</option>
+                                </select>
+                            </div>
+                            <div class="form-group" style="margin-bottom: 0;">
+                                <label>Exchange Rate</label>
+                                <input type="number" id="batchExchangeRate" step="0.01" placeholder="e.g. 25.50" style="width: 100%; padding: 8px; border: 1px solid #e2e8f0; border-radius: 4px;">
+                            </div>
+                        </div>
+                        <div style="margin-top: 8px; font-size: 0.9rem; color: #64748b; text-align: right;">
+                            <span>Final Cost in ZMW: </span>
+                            <span id="costZMWDisplay" style="font-weight: bold; color: #0f172a;">0.00</span>
+                        </div>
+                    </div>
+
+                    <!-- Batch Details -->
+                    <div class="form-grid-3">
+                        <div class="form-group">
+                            <label>Batch Number *</label>
+                            <input type="text" id="openingBatchNo" placeholder="e.g. B-2026-001">
+                        </div>
+                        <div class="form-group">
+                            <label>Expiry Date *</label>
+                            <input type="date" id="openingExpiry">
+                        </div>
+                        <div class="form-group">
+                            <label>Cost Price (K) *</label>
+                            <input type="number" id="openingCostPriceFinal" step="0.01" placeholder="Final Cost" readonly style="width: 100%; padding: 8px; border: 1px solid #e2e8f0; border-radius: 4px; background: #f1f5f9;">
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="modal-footer">
+                <button type="button" id="cancelModalBtn" class="btn-cancel">Cancel</button>
+                <button type="submit" id="saveProductBtn" class="btn-save">
+                    <i class="fa-solid fa-floppy-disk"></i> Save Product
+                </button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<!-- ============================================ -->
+<!-- CSV UPLOAD MODAL -->
+<!-- ============================================ -->
+<div id="csvUploadModal">
+    <div>
+        <div class="modal-header">
+            <h3><i class="fa-solid fa-upload" style="color: #059669;"></i> Bulk Import Products</h3>
+            <button id="csvCloseModalBtn" class="modal-close-btn">&times;</button>
+        </div>
+
+        <form id="csvUploadForm">
+            <p style="color: #64748b; margin-bottom: 15px; font-size: 0.95rem;">
+                <i class="fa-regular fa-circle-info" style="color: #2563eb;"></i> 
+                Upload a CSV file with your product data. All required fields will be automatically processed.
+                <br><strong style="color: #dc2626;">Required columns:</strong> product_name, cost_price
+            </p>
+
+            <div class="csv-upload-zone" id="csvDropZone">
+                <i class="fa-solid fa-cloud-arrow-up"></i>
+                <p><strong>Click to select CSV file</strong></p>
+                <p style="font-size: 0.85rem; color: #94a3b8;">or drag and drop</p>
+                <p id="csvFileName" class="file-name" style="display: none;"></p>
+                <input type="file" id="csvFileInput" accept=".csv" style="display: none;" required>
+            </div>
+
+            <div style="margin-top: 15px; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;">
+                <div>
+                    <button type="button" onclick="downloadCSVTemplate()" style="background: #3b82f6; color: white; border: none; padding: 8px 16px; border-radius: 6px; cursor: pointer; font-size: 0.85rem;">
+                        <i class="fa-solid fa-download"></i> Download Template
+                    </button>
+                </div>
+                <div style="font-size: 0.85rem; color: #94a3b8;">
+                    <i class="fa-regular fa-circle-info"></i> Max 1000 rows
+                </div>
+            </div>
+
+            <!-- Progress Bar -->
+            <div id="csvProgressContainer" class="csv-progress-container">
+                <div class="csv-progress-bar">
+                    <div id="csvProgressBar" class="csv-progress-bar-fill"></div>
+                </div>
+                <div id="csvProgressText" class="csv-progress-text">0%</div>
+            </div>
+
+            <!-- Status Container -->
+            <div id="csvStatusContainer" class="csv-status-container">
+                <pre id="csvStatusText" class="csv-status-text"></pre>
+            </div>
+
+            <div class="modal-footer">
+                <button type="button" id="csvCancelModalBtn" class="btn-cancel">Cancel</button>
+                <button type="submit" id="csvUploadBtn" class="btn-save" style="background: #059669;">
+                    <i class="fa-solid fa-upload"></i> Import Products
+                </button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<script>
+    // ============================================
+    // CSV DROP ZONE FUNCTIONALITY
+    // ============================================
+    document.addEventListener('DOMContentLoaded', function() {
+        const dropZone = document.getElementById('csvDropZone');
+        const fileInput = document.getElementById('csvFileInput');
+        const fileNameDisplay = document.getElementById('csvFileName');
+
+        if (dropZone && fileInput) {
+            dropZone.addEventListener('click', () => fileInput.click());
+
+            dropZone.addEventListener('dragover', (e) => {
+                e.preventDefault();
+                dropZone.style.borderColor = '#2563eb';
+                dropZone.style.background = '#f8fafc';
+            });
+
+            dropZone.addEventListener('dragleave', (e) => {
+                e.preventDefault();
+                dropZone.style.borderColor = '#e2e8f0';
+                dropZone.style.background = 'transparent';
+            });
+
+            dropZone.addEventListener('drop', (e) => {
+                e.preventDefault();
+                dropZone.style.borderColor = '#e2e8f0';
+                dropZone.style.background = 'transparent';
+
+                if (e.dataTransfer.files.length > 0) {
+                    fileInput.files = e.dataTransfer.files;
+                    const file = e.dataTransfer.files[0];
+                    fileNameDisplay.textContent = '📄 ' + file.name;
+                    fileNameDisplay.style.display = 'block';
+                    showToast('File selected: ' + file.name, 'success');
+                }
+            });
+
+            fileInput.addEventListener('change', function() {
+                if (this.files.length > 0) {
+                    const file = this.files[0];
+                    fileNameDisplay.textContent = '📄 ' + file.name;
+                    fileNameDisplay.style.display = 'block';
+                    showToast('File selected: ' + file.name, 'success');
+                } else {
+                    fileNameDisplay.style.display = 'none';
+                }
+            });
+        }
+    });
+
+    // ============================================
+    // DOWNLOAD CSV TEMPLATE
+    // ============================================
+    window.downloadCSVTemplate = function() {
+        const headers = [
+            'product_name',
+            'sku',
+            'generic_name',
+            'category',
+            'sub_category',
+            'dosage_form',
+            'brand',
+            'supplier',
+            'tax_percent',
+            'conversion_rate',
+            'min_order_qty',
+            'nhima_price_fixed',
+            'wholesale_internal_percent',
+            'wholesale_regular_percent',
+            'retail_online_percent',
+            'retail_regular_percent',
+            'retail_staff_percent',
+            'opening_qty',
+            'batch_number',
+            'expiry_date',
+            'cost_price',
+            'currency'
+        ];
+
+        const sampleRow = [
+            'Paracetamol 500mg',
+            'PRD-0001',
+            'Paracetamol',
+            'Pharmaceuticals',
+            'Pain Relief',
+            'Tablet',
+            'BrandX',
+            'SupplierCo',
+            '16',
+            '30',
+            '10',
+            '75.00',
+            '25',
+            '30',
+            '35',
+            '40',
+            '20',
+            '100',
+            'B-2026-001',
+            '2027-12-31',
+            '50.00',
+            'ZMW'
+        ];
+
+        let csv = headers.join(',') + '\n';
+        csv += sampleRow.join(',') + '\n';
+
+        const blob = new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8;' });
+        const link = document.createElement('a');
+        link.href = URL.createObjectURL(blob);
+        link.download = 'product_import_template.csv';
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        URL.revokeObjectURL(link.href);
+
+        showToast('Template downloaded successfully!', 'success');
+    };
+
+    document.dispatchEvent(new Event('loadModuleComplete'));
+</script>

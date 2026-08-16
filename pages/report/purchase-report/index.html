@@ -1,0 +1,230 @@
+<!-- ============================================ -->
+<!-- PURCHASE REPORT MODULE -->
+<!-- ============================================ -->
+<!-- Replaces the old single-date "Daily Purchase Report" (pages/report/
+     daily-purchase, never linked in the sidebar) -- same upgrade as the
+     Sales Report got: a date RANGE instead of one day, filters instead of
+     always showing everything, and Supplier-Wise / Item-Wise breakdowns
+     with click-through to the underlying GRNs, on top of the original
+     Cash vs Credit x Currency summary. -->
+
+     <div class="module-view-container">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:20px; flex-wrap:wrap; gap:10px;">
+            <h3 style="margin:0;"><i class="fa-solid fa-truck-ramp-box"></i> Purchase Report</h3>
+            <div style="display:flex; gap:10px; align-items:center;">
+                <button class="btn btn-outline" onclick="printPurchaseReport()">
+                    <i class="fa-solid fa-print"></i> Print / Save PDF
+                </button>
+                <button class="btn btn-primary" onclick="exportPurchaseReportToExcel()">
+                    <i class="fa-solid fa-file-excel"></i> Download Excel
+                </button>
+            </div>
+        </div>
+    
+        <p style="color:#64748b; font-size:0.85rem; margin-top:-15px; margin-bottom:20px;">
+            Pick a date range and, optionally, a supplier/currency/payment type, then choose how you want it broken down below. ZMW and USD are always kept separate -- never added together.
+        </p>
+    
+        <!-- Filters -->
+        <div class="purchrep-filters">
+            <div class="purchrep-filter-group">
+                <label>From</label>
+                <input type="date" class="form-control" id="purchRepFromDate">
+            </div>
+            <div class="purchrep-filter-group">
+                <label>To</label>
+                <input type="date" class="form-control" id="purchRepToDate">
+            </div>
+            <div class="purchrep-filter-group">
+                <label>Supplier</label>
+                <select class="form-control" id="purchRepSupplierFilter">
+                    <option value="all">All Suppliers</option>
+                </select>
+            </div>
+            <div class="purchrep-filter-group">
+                <label>Currency</label>
+                <select class="form-control" id="purchRepCurrencyFilter">
+                    <option value="all">ZMW &amp; USD</option>
+                    <option value="ZMW">ZMW Purchase</option>
+                    <option value="USD">USD Purchase</option>
+                </select>
+            </div>
+            <div class="purchrep-filter-group">
+                <label>Payment Type</label>
+                <select class="form-control" id="purchRepPaymentFilter">
+                    <option value="all">Cash &amp; Credit</option>
+                    <option value="CASH">Cash Purchase</option>
+                    <option value="CREDIT">Credit Purchase</option>
+                </select>
+            </div>
+            <button class="btn btn-primary" onclick="loadPurchaseReport()" style="align-self: flex-end;">
+                <i class="fa-solid fa-rotate"></i> Generate
+            </button>
+        </div>
+    
+        <!-- View Tabs -->
+        <div class="purchrep-tabs">
+            <button class="purchrep-tab active" id="purchRepTabBreakdown" onclick="switchPurchaseReportView('breakdown')">
+                <i class="fa-solid fa-table-cells"></i> Payment Breakdown
+            </button>
+            <button class="purchrep-tab" id="purchRepTabSupplier" onclick="switchPurchaseReportView('supplier')">
+                <i class="fa-solid fa-truck-field"></i> Supplier-Wise Purchase
+            </button>
+            <button class="purchrep-tab" id="purchRepTabItem" onclick="switchPurchaseReportView('item')">
+                <i class="fa-solid fa-pills"></i> Item-Wise Purchase
+            </button>
+        </div>
+    
+        <!-- Payment Breakdown View -->
+        <div id="purchRepBreakdownView">
+            <p style="color:#64748b; font-size:0.8rem; margin-top:0; margin-bottom:12px;">
+                Cash Purchase = paid immediately (no supplier payable was created for that GRN). Credit Purchase = a supplier_payables row exists for that GRN -- still owed.
+            </p>
+            <div class="card" style="padding:0;">
+                <table class="table-minimal" id="purchRepBreakdownTable" style="width:100%;">
+                    <thead>
+                        <tr>
+                            <th style="padding-left:20px;">Payment Type</th>
+                            <th style="text-align:right;">ZMW Amount</th>
+                            <th style="text-align:right;">USD Amount</th>
+                            <th style="text-align:right; padding-right:20px;">GRNs</th>
+                        </tr>
+                    </thead>
+                    <tbody id="purchRepBreakdownBody">
+                        <tr><td colspan="4" style="text-align:center;padding:30px;color:#94a3b8;">Pick a date range and click Generate.</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    
+        <!-- Supplier-Wise View -->
+        <div id="purchRepSupplierView" style="display:none;">
+            <p style="color:#64748b; font-size:0.8rem; margin-top:0; margin-bottom:12px;">
+                Every supplier purchased from in the selected range. Click a supplier to see the actual GRNs.
+            </p>
+            <div class="card" style="padding:0;">
+                <table class="table-minimal" id="purchRepSupplierTable" style="width:100%;">
+                    <thead>
+                        <tr>
+                            <th style="padding-left:20px;">Supplier</th>
+                            <th class="clickable-header" style="text-align:right;" onclick="sortPurchaseReportSuppliers('grnCount')">GRNs <i class="fa-solid fa-sort"></i></th>
+                            <th class="clickable-header" style="text-align:right;" onclick="sortPurchaseReportSuppliers('zmwTotal')">ZMW Total <i class="fa-solid fa-sort"></i></th>
+                            <th class="clickable-header" style="text-align:right; padding-right:20px;" onclick="sortPurchaseReportSuppliers('usdTotal')">USD Total <i class="fa-solid fa-sort"></i></th>
+                        </tr>
+                    </thead>
+                    <tbody id="purchRepSupplierBody">
+                        <tr><td colspan="4" style="text-align:center;padding:30px;color:#94a3b8;">Pick a date range and click Generate.</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    
+        <!-- Item-Wise View -->
+        <div id="purchRepItemView" style="display:none;">
+            <p style="color:#64748b; font-size:0.8rem; margin-top:0; margin-bottom:12px;">
+                Every product received in the selected range, aggregated across all matching GRNs. Click a product to see the GRNs it came in on.
+            </p>
+            <div class="card" style="padding:0;">
+                <table class="table-minimal" id="purchRepItemTable" style="width:100%;">
+                    <thead>
+                        <tr>
+                            <th style="padding-left:20px;">Product</th>
+                            <th class="clickable-header" style="text-align:right;" onclick="sortPurchaseReportItems('qty')">Qty Received <i class="fa-solid fa-sort"></i></th>
+                            <th class="clickable-header" style="text-align:right;" onclick="sortPurchaseReportItems('grnCount')">GRNs <i class="fa-solid fa-sort"></i></th>
+                            <th class="clickable-header" style="text-align:right;" onclick="sortPurchaseReportItems('zmwSpend')">ZMW Spend <i class="fa-solid fa-sort"></i></th>
+                            <th class="clickable-header" style="text-align:right; padding-right:20px;" onclick="sortPurchaseReportItems('usdSpend')">USD Spend <i class="fa-solid fa-sort"></i></th>
+                        </tr>
+                    </thead>
+                    <tbody id="purchRepItemBody">
+                        <tr><td colspan="5" style="text-align:center;padding:30px;color:#94a3b8;">Pick a date range and click Generate.</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Drill-Down Modal -- shows the actual GRNs behind whichever
+         supplier/item row was clicked. -->
+    <div class="modal" id="purchRepDrillModal">
+        <div class="modal-dialog modal-xl">
+            <div class="modal-content purchrep-drill-content">
+                <div class="modal-header">
+                    <h4 id="purchRepDrillTitle"><i class="fa-solid fa-receipt"></i> GRNs</h4>
+                    <button class="modal-close" onclick="closePurchaseReportDrillModal()">&times;</button>
+                </div>
+                <div class="modal-body purchrep-drill-body">
+                    <div class="table-responsive" id="purchRepDrillTableContainer"></div>
+                </div>
+                <div class="modal-footer">
+                    <button class="btn btn-outline" onclick="closePurchaseReportDrillModal()">Close</button>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <style>
+    .purchrep-filters {
+        display: flex;
+        gap: 14px;
+        flex-wrap: wrap;
+        align-items: flex-end;
+        margin-bottom: 18px;
+    }
+    .purchrep-filter-group {
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+    }
+    .purchrep-filter-group label {
+        font-size: 0.7rem;
+        font-weight: 600;
+        color: #64748b;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+    }
+    .purchrep-filters .form-control {
+        padding: 8px 12px;
+        border: 1px solid #e2e8f0;
+        border-radius: 6px;
+        font-size: 0.85rem;
+        background: white;
+    }
+    .purchrep-filters .form-control:focus {
+        outline: none;
+        border-color: #2563eb;
+        box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.1);
+    }
+    
+    .purchrep-tabs {
+        display: flex;
+        gap: 6px;
+        margin-bottom: 16px;
+        border-bottom: 1px solid #e2e8f0;
+    }
+    .purchrep-tab {
+        background: none;
+        border: none;
+        border-bottom: 2px solid transparent;
+        padding: 10px 16px;
+        font-size: 0.85rem;
+        font-weight: 500;
+        color: #64748b;
+        cursor: pointer;
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        transition: all 0.15s;
+    }
+    .purchrep-tab:hover { color: #2563eb; }
+    .purchrep-tab.active { color: #2563eb; border-bottom-color: #2563eb; }
+    
+    .purchrep-clickable-row { cursor: pointer; }
+    .purchrep-clickable-row:hover td:first-child { color: #2563eb; text-decoration: underline; }
+    
+    /* Same fix as the Sales Report's drill modal: the shared .modal-content
+       caps at max-height:90vh with overflow:hidden and never gives
+       .modal-body its own scroll, so a long GRN list would get clipped at
+       the modal's edge instead of scrolling. Scoped to this modal only. */
+    .purchrep-drill-content { max-height: 85vh; }
+    .purchrep-drill-body { flex: 1; overflow-y: auto; min-height: 0; }
+    </style>

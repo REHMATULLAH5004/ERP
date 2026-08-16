@@ -1,0 +1,24 @@
+<div class="module-view-container">
+    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:20px; flex-wrap:wrap; gap:10px;">
+        <h3 style="margin:0;"><i class="fa-solid fa-file-invoice"></i> Daily Report</h3>
+        <div style="display:flex; gap:10px; align-items:center;">
+            <input type="date" id="unifiedReportDatePicker" style="padding:7px 12px; border:1px solid #e2e8f0; border-radius:6px;">
+            <button class="btn btn-primary" onclick="loadUnifiedReport()">
+                <i class="fa-solid fa-rotate"></i> Generate
+            </button>
+            <button class="btn btn-outline" onclick="printUnifiedReport()">
+                <i class="fa-solid fa-print"></i> Print / Save PDF
+            </button>
+        </div>
+    </div>
+
+    <p style="color:#64748b; font-size:0.85rem; margin-top:-15px; margin-bottom:20px;">
+        One report, everything for the day. Every account shows Opening + Inward - Outward = Closing, with each Inward/Outward broken down by exactly where it came from.
+    </p>
+
+    <div id="unifiedReportContent">
+        <div style="text-align:center; padding:40px; color:#94a3b8;">
+            Pick a date and click Generate.
+        </div>
+    </div>
+</div>

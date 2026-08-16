@@ -1,0 +1,612 @@
+<div class="module-view-container">
+    <!-- Header -->
+    <div class="payment-header">
+        <div class="payment-header-left">
+            <h3><i class="fa-solid fa-credit-card"></i> Payments</h3>
+            <span class="payment-count" id="paymentCount">0 suppliers</span>
+        </div>
+        <div class="payment-header-actions">
+            <button class="btn btn-primary" onclick="openRecordPayment()">
+                <i class="fa-solid fa-plus"></i> Record Payment
+            </button>
+            <button class="btn btn-outline" onclick="refreshPaymentList()">
+                <i class="fa-solid fa-rotate"></i> Refresh
+            </button>
+        </div>
+    </div>
+
+    <!-- Stats Cards -->
+    <div class="payment-stats">
+        <div class="stat-card" style="border-left: 4px solid #2563eb;">
+            <h4>Suppliers with Due</h4>
+            <p id="totalDueSuppliers">0</p>
+        </div>
+        <div class="stat-card" style="border-left: 4px solid #f59e0b;">
+            <h4>Total Due (USD)</h4>
+            <p id="totalDueUsd">$0.00</p>
+        </div>
+        <div class="stat-card" style="border-left: 4px solid #10b981;">
+            <h4>Total Due (ZMW)</h4>
+            <p id="totalDueZmw">ZK0.00</p>
+        </div>
+        <div class="stat-card" style="border-left: 4px solid #8b5cf6;">
+            <h4>Total Paid (Today)</h4>
+            <p id="totalPaidToday">$0.00</p>
+        </div>
+    </div>
+
+    <!-- Filters -->
+    <div class="payment-filters">
+        <div class="filter-group">
+            <input type="text" class="form-control" id="searchPayment" placeholder="Search supplier..." style="min-width: 200px;">
+        </div>
+    </div>
+
+    <!-- Supplier Payment List -->
+    <div class="card payment-list-card">
+        <div class="card-header">
+            <span><i class="fa-regular fa-building"></i> Suppliers with Due</span>
+            <span class="payment-count" id="paymentListCount">0 suppliers</span>
+        </div>
+        <div class="table-responsive">
+            <table class="table-minimal" id="paymentTable">
+                <thead>
+                    <tr>
+                        <th style="padding-left: 20px;">Supplier</th>
+                        <th>Phone</th>
+                        <th style="text-align: right;">Due (USD)</th>
+                        <th style="text-align: right;">Due (ZMW)</th>
+                        <th style="padding-right: 20px; text-align: center;">Actions</th>
+                    </tr>
+                </thead>
+                <tbody id="paymentTableBody">
+                    <tr>
+                        <td colspan="5" style="text-align: center; padding: 40px; color: #94a3b8;">
+                            <i class="fa-solid fa-spinner fa-spin"></i> Loading suppliers...
+                        </td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+<!-- ============================================================ -->
+<!-- RECORD PAYMENT MODAL -->
+<!-- ============================================================ -->
+<div class="modal" id="paymentModal">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h4><i class="fa-solid fa-credit-card"></i> Record Payment</h4>
+                <button class="modal-close" onclick="closeModal('paymentModal')">&times;</button>
+            </div>
+            <div class="modal-body">
+                <form id="paymentForm">
+                    <input type="hidden" id="editPaymentId" value="">
+
+                    <!-- Supplier Selection -->
+                    <div class="form-group">
+                        <label class="required">Supplier</label>
+                        <select class="form-control" id="paymentSupplier" required>
+                            <option value="">Select Supplier</option>
+                        </select>
+                    </div>
+
+                    <!-- Settling -->
+                    <div class="form-group">
+                        <label class="required">Settling</label>
+                        <select class="form-control" id="paymentCurrency" required>
+                            <option value="USD">USD Invoices</option>
+                            <option value="ZMW">ZMW Invoices</option>
+                        </select>
+                        <!-- 🔥 FIX: this used to hardcode "paid via ZMW cash" here, which
+                             stopped being true the moment a "pay directly in USD" method
+                             exists. Wording is now generic/currency-neutral so it stays
+                             correct regardless of which Payment Method is picked below. -->
+                        <small style="color: #64748b;">USD and ZMW invoices are settled completely separately and never mixed in one payment.</small>
+                    </div>
+
+                    <!-- Exchange Rate (required only when settling USD invoices with ZMW cash -- not shown at all when paying directly from the USD bank account, since no conversion is needed then) -->
+                    <div id="exchangeRateGroup" style="display: none;">
+                        <div class="form-group">
+                            <label class="required">Exchange Rate (USD to ZMW)</label>
+                            <input type="number" class="form-control" id="paymentExchangeRate" step="0.0001" value="25.00" placeholder="Enter exchange rate" required>
+                            <!-- 🔥 ADDED: defaults from the Dashboard's shared exchange rate
+                                 (assets/js/shared-exchange-rate.js) instead of a hardcoded
+                                 25.00 -- still editable here if this specific payment
+                                 genuinely needs a different rate. -->
+                            <small style="color: #64748b;">You're paying ZMW cash against a USD-denominated invoice. Defaults to today's rate set on the Dashboard -- adjust here only if this payment needs a different one.</small>
+                        </div>
+                    </div>
+
+                    <!-- Due Invoices -->
+                    <div id="invoiceListContainer">
+                        <h5 style="margin: 15px 0 10px 0; color: #0f172a;">Due Invoices</h5>
+                        <div id="invoiceList" style="max-height: 300px; overflow-y: auto; border: 1px solid #e2e8f0; border-radius: 6px; padding: 10px;">
+                            <p style="text-align: center; color: #94a3b8; padding: 20px;">Select a supplier to view due invoices</p>
+                        </div>
+                    </div>
+
+                    <!-- Payment Summary -->
+                    <div id="paymentSummary" style="display: none; background: #f8fafc; padding: 15px; border-radius: 6px; margin-top: 15px;">
+                        <h5 style="margin: 0 0 10px 0; color: #0f172a;">Payment Summary</h5>
+                        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px;">
+                            <div><strong>Total Selected:</strong> <span id="selectedTotal">$0.00</span></div>
+                            <!-- 🔥 FIX: label/placeholder used to hardcode "(ZMW)" -- now
+                                 rewritten by updatePaymentSummary() to match whatever
+                                 currency is actually being paid out (ZMW cash/bank, or USD
+                                 bank when paying directly). -->
+                            <div><strong id="paymentAmountLabel">Amount to Pay (ZMW):</strong> <input type="number" class="form-control" id="paymentAmount" step="0.01" min="0.01" placeholder="Enter ZMW amount" style="width: 150px; display: inline-block;"></div>
+                        </div>
+                        <!-- 🔥 ADDED: explicit, live partial-payment indicator. Entering
+                             less than the full selected total has always been recorded
+                             correctly (status: 'partial', remaining balance carried
+                             forward) -- this just makes that outcome visible BEFORE you
+                             hit Record Payment, instead of it being an invisible side
+                             effect of typing a smaller number. -->
+                        <div id="paymentBalanceNote" style="margin-top: 10px; font-size: 0.82rem;"></div>
+                    </div>
+
+                    <!-- Payment Details -->
+                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 15px; margin-top: 15px;">
+                        <div class="form-group">
+                            <label class="required">Payment Date</label>
+                            <input type="date" class="form-control" id="paymentDate" required>
+                        </div>
+                        <div class="form-group">
+                            <label class="required">Payment Method</label>
+                            <select class="form-control" id="paymentMethod" required>
+                                <option value="Cash">Cash in Hand (ZMW)</option>
+                                <option value="Bank Transfer">Bank Account (ZMW)</option>
+                                <!-- 🔥 ADDED: pay a USD invoice directly out of the USD bank
+                                     account, no ZMW conversion at all. Only ever shown while
+                                     Settling = USD Invoices -- toggled in loadInvoicesForSupplier(). -->
+                                <option value="Bank Transfer USD" id="usdBankPaymentOption" style="display:none;">Bank Account (USD) -- pay directly, no conversion</option>
+                            </select>
+                        </div>
+                    </div>
+
+                    <div class="form-group">
+                        <label>Reference Number</label>
+                        <input type="text" class="form-control" id="paymentReference" placeholder="e.g. Bank Ref #, Cheque #">
+                    </div>
+
+                    <div class="form-group">
+                        <label>Notes</label>
+                        <textarea class="form-control" id="paymentNotes" rows="2" placeholder="Additional notes..."></textarea>
+                    </div>
+                </form>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-outline" onclick="closeModal('paymentModal')">Cancel</button>
+                <button class="btn btn-primary" onclick="savePayment()">
+                    <i class="fa-solid fa-floppy-disk"></i> Record Payment
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- ============================================================ -->
+<!-- SUPPLIER STATEMENT MODAL -->
+<!-- ============================================================ -->
+<div class="modal" id="statementModal">
+    <div class="modal-dialog modal-xl">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h4><i class="fa-regular fa-file-lines"></i> Supplier Statement</h4>
+                <button class="modal-close" onclick="closeModal('statementModal')">&times;</button>
+            </div>
+            <div class="modal-body" id="statementContent">
+                <!-- Dynamic content -->
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-primary" onclick="printStatement()">
+                    <i class="fa-solid fa-print"></i> Print Statement
+                </button>
+                <button class="btn btn-outline" onclick="closeModal('statementModal')">Close</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<style>
+.payment-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 20px;
+    flex-wrap: wrap;
+    gap: 10px;
+}
+.payment-header-left {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+.payment-header-left h3 {
+    margin: 0;
+    font-size: 1.3rem;
+    color: #1e293b;
+}
+.payment-count {
+    background: #e2e8f0;
+    color: #475569;
+    padding: 2px 10px;
+    border-radius: 12px;
+    font-size: 0.7rem;
+    font-weight: 600;
+}
+
+.payment-stats {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 15px;
+    margin-bottom: 20px;
+}
+@media (max-width: 768px) {
+    .payment-stats {
+        grid-template-columns: repeat(2, 1fr);
+    }
+}
+.stat-card {
+    background: white;
+    padding: 16px 20px;
+    border-radius: 8px;
+    border: 1px solid #e8edf3;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+}
+.stat-card h4 {
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: #64748b;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin: 0 0 4px 0;
+}
+.stat-card p {
+    font-size: 1.5rem;
+    font-weight: 700;
+    margin: 0;
+    color: #0f172a;
+}
+
+.payment-filters {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 16px;
+    gap: 10px;
+    flex-wrap: wrap;
+}
+.filter-group {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+    flex: 1;
+}
+
+.btn {
+    padding: 8px 16px;
+    border: none;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 0.85rem;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    transition: all 0.2s;
+}
+.btn-primary {
+    background: #2563eb;
+    color: white;
+}
+.btn-primary:hover {
+    background: #1d4ed8;
+}
+.btn-outline {
+    background: transparent;
+    color: #475569;
+    border: 1px solid #cbd5e1;
+}
+.btn-outline:hover {
+    background: #f1f5f9;
+}
+.btn-sm {
+    padding: 4px 12px;
+    font-size: 0.75rem;
+}
+
+.card {
+    background: white;
+    border-radius: 10px;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+    border: 1px solid #e8edf3;
+    overflow: hidden;
+}
+.card-header {
+    padding: 12px 20px;
+    border-bottom: 1px solid #e8edf3;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-weight: 500;
+    color: #475569;
+}
+.table-responsive {
+    overflow-x: auto;
+}
+.table-minimal {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.85rem;
+}
+.table-minimal thead th {
+    background: #f8fafc;
+    color: #475569;
+    font-weight: 600;
+    padding: 10px 12px;
+    text-align: left;
+    border-bottom: 2px solid #e2e8f0;
+}
+.table-minimal tbody td {
+    padding: 10px 12px;
+    border-bottom: 1px solid #f1f5f9;
+    vertical-align: middle;
+}
+.table-minimal tbody tr:hover {
+    background: #f8fafc;
+}
+
+.clickable-amount {
+    cursor: pointer;
+    padding: 4px 8px;
+    border-radius: 4px;
+    transition: all 0.2s;
+    display: inline-block;
+    font-weight: 600;
+}
+.clickable-amount:hover {
+    background: #eff6ff;
+    text-decoration: underline;
+    color: #2563eb;
+}
+.clickable-amount.usd:hover {
+    background: #fef3c7;
+}
+.clickable-amount.zmw:hover {
+    background: #dcfce7;
+}
+
+.supplier-name-link {
+    color: #2563eb;
+    text-decoration: none;
+    font-weight: 500;
+    cursor: pointer;
+}
+.supplier-name-link:hover {
+    text-decoration: underline;
+}
+
+.form-group {
+    margin-bottom: 15px;
+}
+.form-group label {
+    display: block;
+    font-weight: 500;
+    color: #475569;
+    margin-bottom: 5px;
+}
+.form-group label.required::after {
+    content: ' *';
+    color: #dc2626;
+}
+.form-control {
+    width: 100%;
+    padding: 8px 12px;
+    border: 1px solid #e2e8f0;
+    border-radius: 6px;
+    font-size: 0.85rem;
+    background: white;
+    transition: border-color 0.2s;
+}
+.form-control:focus {
+    outline: none;
+    border-color: #2563eb;
+    box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.1);
+}
+
+.modal {
+    display: none;
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: rgba(0,0,0,0.5);
+    z-index: 1000;
+    animation: modalFadeIn 0.25s ease;
+}
+.modal.show {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+@keyframes modalFadeIn {
+    from { opacity: 0; transform: scale(0.95); }
+    to { opacity: 1; transform: scale(1); }
+}
+.modal-dialog {
+    width: 95%;
+    max-width: 900px;
+    max-height: 90vh;
+    display: flex;
+    flex-direction: column;
+}
+.modal-xl {
+    max-width: 1200px;
+}
+.modal-content {
+    background: white;
+    border-radius: 12px;
+    display: flex;
+    flex-direction: column;
+    max-height: 90vh;
+    overflow: hidden;
+}
+.modal-header {
+    padding: 16px 24px;
+    border-bottom: 1px solid #e8edf3;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    flex-shrink: 0;
+}
+.modal-header h4 {
+    margin: 0;
+    color: #1e293b;
+}
+.modal-close {
+    background: none;
+    border: none;
+    font-size: 1.5rem;
+    cursor: pointer;
+    color: #94a3b8;
+    padding: 0 8px;
+}
+.modal-close:hover {
+    color: #475569;
+}
+.modal-body {
+    padding: 20px 24px;
+    overflow-y: auto;
+    flex: 1;
+}
+.modal-footer {
+    padding: 12px 24px;
+    border-top: 1px solid #e8edf3;
+    display: flex;
+    gap: 10px;
+    justify-content: flex-end;
+    flex-shrink: 0;
+    flex-wrap: wrap;
+}
+
+.invoice-item {
+    display: flex;
+    align-items: center;
+    padding: 8px 12px;
+    border-bottom: 1px solid #f1f5f9;
+    gap: 10px;
+}
+.invoice-item:hover {
+    background: #f8fafc;
+}
+.invoice-item .checkbox {
+    flex: 0 0 30px;
+}
+.invoice-item .info {
+    flex: 1;
+}
+.invoice-item .info .number {
+    font-weight: 500;
+    color: #0f172a;
+}
+.invoice-item .info .date {
+    font-size: 0.75rem;
+    color: #94a3b8;
+}
+.invoice-item .amount {
+    font-weight: 600;
+    color: #dc2626;
+}
+
+.statement-header {
+    text-align: center;
+    border-bottom: 2px solid #333;
+    padding-bottom: 15px;
+    margin-bottom: 20px;
+}
+.statement-header h2 {
+    margin: 0;
+    color: #0f172a;
+}
+.statement-header p {
+    margin: 3px 0;
+    color: #475569;
+    font-size: 0.9rem;
+}
+.statement-info {
+    background: #f8fafc;
+    padding: 15px;
+    border-radius: 6px;
+    margin-bottom: 20px;
+}
+.statement-info table {
+    width: 100%;
+}
+.statement-info td {
+    padding: 4px 8px;
+}
+.statement-info .label {
+    font-weight: 600;
+    width: 120px;
+    color: #475569;
+}
+.statement-table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 15px 0;
+    font-size: 0.9rem;
+}
+.statement-table th {
+    background: #f1f5f9;
+    padding: 10px;
+    text-align: left;
+    border: 1px solid #e2e8f0;
+}
+.statement-table td {
+    padding: 10px;
+    border: 1px solid #e2e8f0;
+}
+.statement-table .text-right {
+    text-align: right;
+}
+.statement-table .total-row {
+    font-weight: bold;
+    background: #f8fafc;
+}
+.statement-table .credit {
+    color: #15803d;
+}
+.statement-table .debit {
+    color: #dc2626;
+}
+.statement-tabs {
+    display: flex;
+    gap: 0;
+    margin-bottom: 20px;
+    border-bottom: 2px solid #e2e8f0;
+}
+.statement-tab {
+    padding: 10px 24px;
+    cursor: pointer;
+    border-bottom: 3px solid transparent;
+    font-weight: 500;
+    color: #64748b;
+    transition: all 0.2s;
+}
+.statement-tab.active {
+    color: #2563eb;
+    border-bottom-color: #2563eb;
+}
+.statement-tab:hover {
+    color: #2563eb;
+    background: #f8fafc;
+}
+</style>
+
+<script>
+    document.dispatchEvent(new Event('loadModuleComplete'));
+</script>

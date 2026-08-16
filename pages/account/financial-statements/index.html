@@ -1,0 +1,327 @@
+<!-- ============================================ -->
+<!-- FINANCIAL STATEMENTS MODULE -->
+<!-- ============================================ -->
+
+<div class="module-view-container">
+    <!-- Header -->
+    <div class="fs-header">
+        <div class="fs-header-left">
+            <h3><i class="fa-solid fa-chart-pie"></i> Financial Statements</h3>
+            <span class="fs-count" id="fsPeriod">Current Period</span>
+        </div>
+        <div class="fs-header-actions">
+            <button class="btn btn-outline" onclick="refreshFinancialStatements()">
+                <i class="fa-solid fa-rotate"></i> Refresh
+            </button>
+            <button class="btn btn-outline" onclick="exportFinancialStatement()">
+                <i class="fa-solid fa-file-export"></i> Export PDF
+            </button>
+        </div>
+    </div>
+
+    <!-- Filters -->
+    <div class="fs-filters">
+        <div class="filter-group">
+            <div class="filter-item">
+                <label>Report Type</label>
+                <select class="form-control" id="fsReportType" onchange="loadFinancialStatement()">
+                    <option value="income-statement">Income Statement (P&L)</option>
+                    <option value="balance-sheet">Balance Sheet</option>
+                    <option value="cash-flow">Cash Flow Statement</option>
+                    <option value="retained-earnings">Statement of Retained Earnings</option>
+                </select>
+            </div>
+            <div class="filter-item">
+                <label>Period</label>
+                <select class="form-control" id="fsPeriodSelect" onchange="loadFinancialStatement()">
+                    <option value="month">This Month</option>
+                    <option value="quarter">This Quarter</option>
+                    <option value="year">Year-to-Date</option>
+                    <option value="custom">Custom Range</option>
+                </select>
+            </div>
+            <div class="filter-item" id="customDateRange" style="display: none;">
+                <label>From</label>
+                <input type="date" class="form-control" id="fsStartDate">
+            </div>
+            <div class="filter-item" id="customDateRangeEnd" style="display: none;">
+                <label>To</label>
+                <input type="date" class="form-control" id="fsEndDate">
+            </div>
+            <div class="filter-item" style="justify-content: flex-end;">
+                <button class="btn btn-primary" onclick="loadFinancialStatement()">
+                    <i class="fa-solid fa-arrows-rotate"></i> Generate
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Report Display -->
+    <div id="fsReportContainer">
+        <!-- Dynamic content loaded here -->
+        <div class="card" style="padding: 40px; text-align: center; color: #94a3b8;">
+            <i class="fa-solid fa-spinner fa-spin" style="font-size: 2rem; display: block; margin-bottom: 15px;"></i>
+            Loading financial statements...
+        </div>
+    </div>
+</div>
+
+<style>
+.fs-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 20px;
+    flex-wrap: wrap;
+    gap: 10px;
+}
+.fs-header-left {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+.fs-header-left h3 {
+    margin: 0;
+    font-size: 1.3rem;
+    color: #1e293b;
+}
+.fs-count {
+    background: #e2e8f0;
+    color: #475569;
+    padding: 2px 10px;
+    border-radius: 12px;
+    font-size: 0.7rem;
+    font-weight: 600;
+}
+.fs-header-actions {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+}
+
+.fs-filters {
+    background: white;
+    padding: 16px 20px;
+    border-radius: 10px;
+    border: 1px solid #e8edf3;
+    margin-bottom: 20px;
+}
+.filter-group {
+    display: flex;
+    gap: 15px;
+    flex-wrap: wrap;
+    align-items: flex-end;
+}
+.filter-item {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    flex: 1;
+    min-width: 150px;
+}
+.filter-item label {
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: #64748b;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+.filter-item .form-control {
+    min-width: 100%;
+}
+
+/* Report Styles */
+.fs-report {
+    background: white;
+    border-radius: 10px;
+    border: 1px solid #e8edf3;
+    padding: 30px 35px;
+}
+.fs-report-header {
+    text-align: center;
+    border-bottom: 2px solid #e2e8f0;
+    padding-bottom: 20px;
+    margin-bottom: 25px;
+}
+.fs-report-header h2 {
+    margin: 0;
+    color: #0f172a;
+    font-size: 1.5rem;
+}
+.fs-report-header p {
+    margin: 5px 0 0 0;
+    color: #64748b;
+    font-size: 0.9rem;
+}
+
+.fs-section {
+    margin-bottom: 25px;
+}
+.fs-section-title {
+    font-weight: 700;
+    color: #0f172a;
+    font-size: 1rem;
+    border-bottom: 1px solid #e2e8f0;
+    padding-bottom: 8px;
+    margin-bottom: 12px;
+    display: flex;
+    justify-content: space-between;
+}
+.fs-section-title .total {
+    color: #2563eb;
+}
+
+.fs-row {
+    display: flex;
+    justify-content: space-between;
+    padding: 4px 0 4px 20px;
+    font-size: 0.9rem;
+    color: #475569;
+}
+.fs-row .indent-1 {
+    padding-left: 20px;
+}
+.fs-row .indent-2 {
+    padding-left: 40px;
+}
+.fs-row .amount {
+    font-weight: 500;
+}
+.fs-row .amount.positive {
+    color: #15803d;
+}
+.fs-row .amount.negative {
+    color: #dc2626;
+}
+
+.fs-subtotal {
+    display: flex;
+    justify-content: space-between;
+    padding: 8px 0 8px 20px;
+    font-weight: 600;
+    border-top: 1px dashed #e2e8f0;
+    border-bottom: 1px dashed #e2e8f0;
+    background: #f8fafc;
+    margin: 5px 0;
+}
+.fs-subtotal .amount {
+    font-weight: 700;
+}
+
+.fs-total {
+    display: flex;
+    justify-content: space-between;
+    padding: 12px 0;
+    font-weight: 700;
+    font-size: 1.1rem;
+    border-top: 2px solid #0f172a;
+    margin-top: 10px;
+}
+.fs-total .amount {
+    color: #2563eb;
+    font-size: 1.2rem;
+}
+
+.fs-balance-sheet-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 30px;
+}
+@media (max-width: 768px) {
+    .fs-balance-sheet-grid {
+        grid-template-columns: 1fr;
+    }
+}
+.fs-balance-sheet-grid .fs-section {
+    margin-bottom: 15px;
+}
+
+.fs-footer {
+    margin-top: 30px;
+    padding-top: 20px;
+    border-top: 1px solid #e2e8f0;
+    text-align: center;
+    color: #94a3b8;
+    font-size: 0.8rem;
+}
+
+.btn {
+    padding: 8px 16px;
+    border: none;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 0.85rem;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    transition: all 0.2s;
+}
+.btn-primary {
+    background: #2563eb;
+    color: white;
+}
+.btn-primary:hover {
+    background: #1d4ed8;
+}
+.btn-outline {
+    background: transparent;
+    color: #475569;
+    border: 1px solid #cbd5e1;
+}
+.btn-outline:hover {
+    background: #f1f5f9;
+}
+.btn-sm {
+    padding: 4px 12px;
+    font-size: 0.75rem;
+}
+
+.form-control {
+    padding: 8px 12px;
+    border: 1px solid #e2e8f0;
+    border-radius: 6px;
+    font-size: 0.85rem;
+    background: white;
+    transition: border-color 0.2s;
+}
+.form-control:focus {
+    outline: none;
+    border-color: #2563eb;
+    box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.1);
+}
+
+.card {
+    background: white;
+    border-radius: 10px;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+    border: 1px solid #e8edf3;
+    overflow: hidden;
+}
+
+/* Print styles */
+@media print {
+    .fs-header-actions,
+    .fs-filters,
+    .btn {
+        display: none !important;
+    }
+    .fs-report {
+        border: none;
+        padding: 10px;
+        box-shadow: none;
+    }
+    .fs-report-header {
+        border-bottom: 1px solid #333;
+    }
+    .fs-total {
+        border-top: 2px solid #333;
+    }
+    .fs-subtotal {
+        background: #f5f5f5;
+    }
+}
+</style>
+
+<script>
+    document.dispatchEvent(new Event('loadModuleComplete'));
+</script>

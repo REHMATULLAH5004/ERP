@@ -1,0 +1,602 @@
+<!-- ============================================ -->
+<!-- FIXED ASSETS MODULE -->
+<!-- ============================================ -->
+
+<div class="module-view-container">
+    <!-- Header -->
+    <div class="fa-header">
+        <div class="fa-header-left">
+            <h3><i class="fa-solid fa-building"></i> Fixed Assets Register</h3>
+            <span class="fa-count" id="faCount">0 assets</span>
+        </div>
+        <div class="fa-header-actions">
+            <button class="btn btn-primary" onclick="openNewAsset()">
+                <i class="fa-solid fa-plus"></i> Add Asset
+            </button>
+            <button class="btn btn-outline" onclick="runDepreciation()">
+                <i class="fa-solid fa-calculator"></i> Run Depreciation
+            </button>
+            <button class="btn btn-outline" onclick="refreshFixedAssets()">
+                <i class="fa-solid fa-rotate"></i> Refresh
+            </button>
+        </div>
+    </div>
+
+    <!-- Stats Cards -->
+    <div class="fa-stats">
+        <div class="stat-card" style="border-left: 4px solid #2563eb;">
+            <h4>Total Assets</h4>
+            <p id="totalAssets">0</p>
+        </div>
+        <div class="stat-card" style="border-left: 4px solid #10b981;">
+            <h4>Total Cost</h4>
+            <p id="totalCost">$0.00</p>
+        </div>
+        <div class="stat-card" style="border-left: 4px solid #f59e0b;">
+            <h4>Accumulated Depreciation</h4>
+            <p id="totalDepreciation">$0.00</p>
+        </div>
+        <div class="stat-card" style="border-left: 4px solid #8b5cf6;">
+            <h4>Net Book Value</h4>
+            <p id="netBookValue">$0.00</p>
+        </div>
+    </div>
+
+    <!-- Filters -->
+    <div class="fa-filters">
+        <div class="filter-group">
+            <input type="text" class="form-control" id="searchFA" placeholder="Search assets..." style="min-width: 200px;">
+            <select class="form-control" id="faCategoryFilter">
+                <option value="all">All Categories</option>
+                <option value="Furniture">Furniture</option>
+                <option value="IT Equipment">IT Equipment</option>
+                <option value="Vehicles">Vehicles</option>
+                <option value="Office Equipment">Office Equipment</option>
+                <option value="Medical Equipment">Medical Equipment</option>
+                <option value="Other">Other</option>
+            </select>
+            <select class="form-control" id="faStatusFilter">
+                <option value="all">All Status</option>
+                <option value="Active">Active</option>
+                <option value="Fully Depreciated">Fully Depreciated</option>
+                <option value="Disposed">Disposed</option>
+            </select>
+            <button class="btn btn-sm btn-primary" onclick="applyFAFilters()">
+                <i class="fa-solid fa-filter"></i> Apply
+            </button>
+        </div>
+    </div>
+
+    <!-- Asset List -->
+    <div class="card fa-list-card">
+        <div class="card-header">
+            <span><i class="fa-regular fa-folder-open"></i> Fixed Assets</span>
+            <span class="fa-count" id="faListCount">0 assets</span>
+        </div>
+        <div class="table-responsive">
+            <table class="table-minimal" id="faTable">
+                <thead>
+                    <tr>
+                        <th style="padding-left: 20px;">Asset Code</th>
+                        <th>Asset Name</th>
+                        <th>Category</th>
+                        <th>Purchase Date</th>
+                        <th style="text-align: right;">Cost</th>
+                        <th style="text-align: right;">Accum. Dep.</th>
+                        <th style="text-align: right;">Net Book Value</th>
+                        <th style="text-align: center;">Status</th>
+                        <th style="text-align: center;">Actions</th>
+                    </tr>
+                </thead>
+                <tbody id="faTableBody">
+                    <tr>
+                        <td colspan="9" style="text-align: center; padding: 40px; color: #94a3b8;">
+                            <i class="fa-solid fa-spinner fa-spin"></i> Loading assets...
+                        </td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+<!-- ============================================================ -->
+<!-- NEW ASSET MODAL -->
+<!-- ============================================================ -->
+<div class="modal" id="assetModal">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h4 id="assetModalTitle"><i class="fa-solid fa-plus"></i> New Asset</h4>
+                <button class="modal-close" onclick="closeModal('assetModal')">&times;</button>
+            </div>
+            <div class="modal-body">
+                <form id="assetForm">
+                    <input type="hidden" id="editAssetId" value="">
+
+                    <div class="form-row">
+                        <div class="form-group" style="flex: 2;">
+                            <label class="required">Asset Name</label>
+                            <input type="text" class="form-control" id="assetName" required placeholder="e.g. Dell XPS Laptop">
+                        </div>
+                        <div class="form-group" style="flex: 1;">
+                            <label>Asset Code</label>
+                            <input type="text" class="form-control" id="assetCode" placeholder="Auto-generated">
+                        </div>
+                    </div>
+
+                    <div class="form-row">
+                        <div class="form-group" style="flex: 1;">
+                            <label class="required">Category</label>
+                            <select class="form-control" id="assetCategory" required>
+                                <option value="">Select Category</option>
+                                <option value="Furniture">Furniture</option>
+                                <option value="IT Equipment">IT Equipment</option>
+                                <option value="Vehicles">Vehicles</option>
+                                <option value="Office Equipment">Office Equipment</option>
+                                <option value="Medical Equipment">Medical Equipment</option>
+                                <option value="Other">Other</option>
+                            </select>
+                        </div>
+                        <div class="form-group" style="flex: 1;">
+                            <label class="required">Purchase Date</label>
+                            <input type="date" class="form-control" id="assetPurchaseDate" required>
+                        </div>
+                    </div>
+
+                    <div class="form-row">
+                        <div class="form-group" style="flex: 1;">
+                            <label class="required">Cost (ZMW)</label>
+                            <input type="number" class="form-control" id="assetCost" required step="0.01" min="0" placeholder="0.00">
+                        </div>
+                        <div class="form-group" style="flex: 1;">
+                            <label class="required">Paid From</label>
+                            <select class="form-control" id="assetPaidFrom">
+                                <option value="1111">Cash in Hand (ZMW)</option>
+                                <option value="1121">Bank (ZMW)</option>
+                                <option value="1120">Bank (USD)</option>
+                                <option value="2001">Accounts Payable (Credit Purchase)</option>
+                            </select>
+                        </div>
+                    </div>
+
+                    <div class="form-row">
+                        <div class="form-group" style="flex: 1;">
+                            <label>Useful Life (Years)</label>
+                            <input type="number" class="form-control" id="assetUsefulLife" value="5" min="1" max="50">
+                        </div>
+                        <div class="form-group" style="flex: 1;">
+                            <label>Salvage Value</label>
+                            <input type="number" class="form-control" id="assetSalvageValue" step="0.01" min="0" placeholder="0.00">
+                        </div>
+                    </div>
+
+                    <div class="form-row">
+                        <div class="form-group" style="flex: 1;">
+                            <label>Depreciation Method</label>
+                            <select class="form-control" id="assetDepreciationMethod">
+                                <option value="straight-line">Straight Line</option>
+                                <option value="declining-balance">Declining Balance</option>
+                                <option value="units-of-production">Units of Production</option>
+                            </select>
+                        </div>
+                        <div class="form-group" style="flex: 1;">
+                            <label>Serial Number</label>
+                            <input type="text" class="form-control" id="assetSerialNumber" placeholder="e.g. SN-12345">
+                        </div>
+                        <div class="form-group" style="flex: 1;">
+                            <label>Status</label>
+                            <select class="form-control" id="assetStatus">
+                                <option value="Active">Active</option>
+                                <option value="Fully Depreciated">Fully Depreciated</option>
+                                <option value="Disposed">Disposed</option>
+                            </select>
+                        </div>
+                    </div>
+
+                    <div class="form-group">
+                        <label>Description / Notes</label>
+                        <textarea class="form-control" id="assetDescription" rows="2" placeholder="Additional details..."></textarea>
+                    </div>
+
+                    <!-- Depreciation Preview -->
+                    <div id="depreciationPreview" style="display: none; background: #f8fafc; padding: 12px 16px; border-radius: 6px; border: 1px solid #e2e8f0; margin-top: 10px;">
+                        <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 8px;">
+                            <i class="fa-solid fa-calculator" style="color: #2563eb;"></i>
+                            <span style="font-weight: 600; color: #2563eb;">Depreciation Preview</span>
+                        </div>
+                        <div style="font-size: 0.85rem; color: #475569;">
+                            <p style="margin: 0;"><strong>Annual Depreciation:</strong> <span id="previewAnnualDep">ZMW 0.00</span></p>
+                            <p style="margin: 0;"><strong>Monthly Depreciation:</strong> <span id="previewMonthlyDep">ZMW 0.00</span></p>
+                            <p style="margin: 0;"><strong>Total Depreciation:</strong> <span id="previewTotalDep">ZMW 0.00</span></p>
+                        </div>
+                    </div>
+
+                </form>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-outline" onclick="closeModal('assetModal')">Cancel</button>
+                <button class="btn btn-primary" onclick="saveAsset()">
+                    <i class="fa-solid fa-floppy-disk"></i> Save Asset
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- ============================================================ -->
+<!-- VIEW ASSET MODAL -->
+<!-- ============================================================ -->
+<div class="modal" id="viewAssetModal">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h4><i class="fa-regular fa-eye"></i> Asset Details</h4>
+                <button class="modal-close" onclick="closeModal('viewAssetModal')">&times;</button>
+            </div>
+            <div class="modal-body" id="viewAssetContent">
+                <!-- Dynamic content -->
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-primary" onclick="printAsset()">
+                    <i class="fa-solid fa-print"></i> Print
+                </button>
+                <button class="btn btn-outline" onclick="closeModal('viewAssetModal')">Close</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- ============================================================ -->
+<!-- DEPRECIATION HISTORY MODAL -->
+<!-- ============================================================ -->
+<div class="modal" id="depreciationHistoryModal">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h4><i class="fa-regular fa-clock"></i> Depreciation History</h4>
+                <button class="modal-close" onclick="closeModal('depreciationHistoryModal')">&times;</button>
+            </div>
+            <div class="modal-body" id="depreciationHistoryContent">
+                <!-- Dynamic content -->
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-outline" onclick="closeModal('depreciationHistoryModal')">Close</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<style>
+.fa-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 20px;
+    flex-wrap: wrap;
+    gap: 10px;
+}
+.fa-header-left {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+.fa-header-left h3 {
+    margin: 0;
+    font-size: 1.3rem;
+    color: #1e293b;
+}
+.fa-count {
+    background: #e2e8f0;
+    color: #475569;
+    padding: 2px 10px;
+    border-radius: 12px;
+    font-size: 0.7rem;
+    font-weight: 600;
+}
+.fa-header-actions {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+}
+
+.fa-stats {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 12px;
+    margin-bottom: 20px;
+}
+@media (max-width: 768px) {
+    .fa-stats {
+        grid-template-columns: repeat(2, 1fr);
+    }
+}
+.stat-card {
+    background: white;
+    padding: 12px 16px;
+    border-radius: 8px;
+    border: 1px solid #e8edf3;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+}
+.stat-card h4 {
+    font-size: 0.65rem;
+    font-weight: 600;
+    color: #64748b;
+    text-transform: uppercase;
+    letter-spacing: 0.3px;
+    margin: 0 0 2px 0;
+}
+.stat-card p {
+    font-size: 1.2rem;
+    font-weight: 700;
+    margin: 0;
+    color: #0f172a;
+}
+
+.fa-filters {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 16px;
+    gap: 10px;
+    flex-wrap: wrap;
+}
+.filter-group {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+    flex: 1;
+}
+
+.btn {
+    padding: 8px 16px;
+    border: none;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 0.85rem;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    transition: all 0.2s;
+}
+.btn-primary {
+    background: #2563eb;
+    color: white;
+}
+.btn-primary:hover {
+    background: #1d4ed8;
+}
+.btn-outline {
+    background: transparent;
+    color: #475569;
+    border: 1px solid #cbd5e1;
+}
+.btn-outline:hover {
+    background: #f1f5f9;
+}
+.btn-sm {
+    padding: 6px 12px;
+    font-size: 0.75rem;
+}
+.btn-success {
+    background: #10b981;
+    color: white;
+}
+.btn-success:hover {
+    background: #059669;
+}
+.btn-danger {
+    background: #ef4444;
+    color: white;
+}
+.btn-danger:hover {
+    background: #dc2626;
+}
+
+.card {
+    background: white;
+    border-radius: 10px;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+    border: 1px solid #e8edf3;
+    overflow: hidden;
+}
+.card-header {
+    padding: 12px 20px;
+    border-bottom: 1px solid #e8edf3;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-weight: 500;
+    color: #475569;
+}
+.table-responsive {
+    overflow-x: auto;
+}
+.table-minimal {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.85rem;
+}
+.table-minimal thead th {
+    background: #f8fafc;
+    color: #475569;
+    font-weight: 600;
+    padding: 10px 12px;
+    text-align: left;
+    border-bottom: 2px solid #e2e8f0;
+}
+.table-minimal tbody td {
+    padding: 10px 12px;
+    border-bottom: 1px solid #f1f5f9;
+    vertical-align: middle;
+}
+.table-minimal tbody tr:hover {
+    background: #f8fafc;
+}
+.table-minimal .text-right {
+    text-align: right;
+}
+.table-minimal .text-center {
+    text-align: center;
+}
+
+.status-badge {
+    padding: 3px 12px;
+    border-radius: 12px;
+    font-size: 0.7rem;
+    font-weight: 600;
+    display: inline-block;
+}
+.status-active { background: #dcfce7; color: #15803d; }
+.status-fully-depreciated { background: #fef3c7; color: #b45309; }
+.status-disposed { background: #fee2e2; color: #dc2626; }
+
+.form-group {
+    margin-bottom: 15px;
+}
+.form-group label {
+    display: block;
+    font-weight: 500;
+    color: #475569;
+    margin-bottom: 5px;
+    font-size: 0.85rem;
+}
+.form-group label.required::after {
+    content: ' *';
+    color: #dc2626;
+}
+.form-control {
+    width: 100%;
+    padding: 8px 12px;
+    border: 1px solid #e2e8f0;
+    border-radius: 6px;
+    font-size: 0.85rem;
+    background: white;
+    transition: border-color 0.2s;
+}
+.form-control:focus {
+    outline: none;
+    border-color: #2563eb;
+    box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.1);
+}
+.form-row {
+    display: flex;
+    gap: 12px;
+}
+.form-row .form-group {
+    flex: 1;
+}
+@media (max-width: 600px) {
+    .form-row {
+        flex-direction: column;
+    }
+}
+
+.modal {
+    display: none;
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: rgba(0,0,0,0.5);
+    z-index: 1000;
+    animation: modalFadeIn 0.25s ease;
+}
+.modal.show {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+@keyframes modalFadeIn {
+    from { opacity: 0; transform: scale(0.95); }
+    to { opacity: 1; transform: scale(1); }
+}
+.modal-dialog {
+    width: 95%;
+    max-width: 700px;
+    max-height: 90vh;
+    display: flex;
+    flex-direction: column;
+}
+.modal-lg {
+    max-width: 900px;
+}
+.modal-md {
+    max-width: 600px;
+}
+.modal-content {
+    background: white;
+    border-radius: 12px;
+    display: flex;
+    flex-direction: column;
+    max-height: 90vh;
+    overflow: hidden;
+}
+.modal-header {
+    padding: 16px 24px;
+    border-bottom: 1px solid #e8edf3;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    flex-shrink: 0;
+}
+.modal-header h4 {
+    margin: 0;
+    color: #1e293b;
+}
+.modal-close {
+    background: none;
+    border: none;
+    font-size: 1.5rem;
+    cursor: pointer;
+    color: #94a3b8;
+    padding: 0 8px;
+}
+.modal-close:hover {
+    color: #475569;
+}
+.modal-body {
+    padding: 20px 24px;
+    overflow-y: auto;
+    flex: 1;
+}
+.modal-footer {
+    padding: 12px 24px;
+    border-top: 1px solid #e8edf3;
+    display: flex;
+    gap: 10px;
+    justify-content: flex-end;
+    flex-shrink: 0;
+    flex-wrap: wrap;
+}
+
+.view-detail-row {
+    display: flex;
+    padding: 8px 0;
+    border-bottom: 1px solid #f1f5f9;
+}
+.view-detail-row .label {
+    font-weight: 600;
+    width: 150px;
+    color: #475569;
+    flex-shrink: 0;
+}
+.view-detail-row .value {
+    flex: 1;
+}
+
+.text-center {
+    text-align: center;
+}
+.text-muted {
+    color: #94a3b8;
+}
+.text-right {
+    text-align: right;
+}
+</style>
+
+<script>
+    document.dispatchEvent(new Event('loadModuleComplete'));
+</script>

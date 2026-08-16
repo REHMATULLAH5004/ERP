@@ -1,0 +1,241 @@
+<div class="module-view-container">
+    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
+        <h3 style="margin: 0;">Daily Attendance</h3>
+        <div style="display: flex; gap: 10px;">
+            <button id="markAbsentBtn" style="background: #f59e0b; color: white; border: none; padding: 10px 20px; border-radius: 6px; cursor: pointer;">
+                <i class="fa-solid fa-user-slash"></i> Mark Absent
+            </button>
+            <button id="manualEntryBtn" style="background: #2563eb; color: white; border: none; padding: 10px 20px; border-radius: 6px; cursor: pointer;">
+                <i class="fa-solid fa-pen-to-square"></i> Manual Entry
+            </button>
+        </div>
+    </div>
+
+    <!-- ========================================== -->
+    <!-- FAST CLOCK SECTION - Redesigned -->
+    <!-- ========================================== -->
+    <div style="display: flex; gap: 15px; margin-bottom: 25px; align-items: center; flex-wrap: wrap; background: #f8fafc; padding: 15px 20px; border-radius: 10px; border: 1px solid #e2e8f0;">
+        <label style="font-weight: 600; color: #0f172a; font-size: 0.9rem;">Quick Clock:</label>
+        
+        <select id="quickClockDropdown" style="flex: 1; min-width: 200px; padding: 10px 14px; border: 1px solid #d1d5db; border-radius: 6px; background: white; font-size: 0.9rem;">
+            <option value="">-- Select Employee --</option>
+        </select>
+        
+        <button id="quickClockInBtn" style="background: #22c55e; color: white; border: none; padding: 10px 25px; border-radius: 6px; cursor: pointer; font-weight: 600; font-size: 0.9rem;">
+            <i class="fa-solid fa-arrow-right-to-bracket"></i> Clock In
+        </button>
+        
+        <button id="quickClockOutBtn" style="background: #ef4444; color: white; border: none; padding: 10px 25px; border-radius: 6px; cursor: pointer; font-weight: 600; font-size: 0.9rem;">
+            <i class="fa-solid fa-arrow-right-from-bracket"></i> Clock Out
+        </button>
+
+        <button id="publicHolidayBtn" style="background: #8b5cf6; color: white; border: none; padding: 8px 18px; border-radius: 6px; cursor: pointer; font-size: 0.8rem;">
+            <i class="fa-solid fa-calendar-day"></i> Holidays
+        </button>
+    </div>
+
+    <!-- ========================================== -->
+    <!-- 🔥 ADDED: DAY SUMMARY -->
+    <!-- ========================================== -->
+    <div id="attendanceSummary" style="display: flex; gap: 12px; margin-bottom: 20px; flex-wrap: wrap;"></div>
+
+    <!-- ========================================== -->
+    <!-- DATE PICKER -->
+    <!-- ========================================== -->
+    <div style="display: flex; gap: 12px; margin-bottom: 15px; align-items: center;">
+        <label style="font-weight: 500; color: #475569; font-size: 0.85rem;">View Date:</label>
+        <input type="date" id="attendanceDate" style="padding: 8px 12px; border: 1px solid #d1d5db; border-radius: 6px; background: white;">
+        <button id="refreshAttendanceBtn" style="background: #f1f5f9; border: 1px solid #d1d5db; padding: 8px 15px; border-radius: 6px; cursor: pointer;">
+            <i class="fa-solid fa-rotate"></i> Refresh
+        </button>
+    </div>
+
+    <!-- ========================================== -->
+    <!-- ATTENDANCE TABLE -->
+    <!-- ========================================== -->
+    <div class="card" style="padding: 0;">
+        <table class="table-minimal" id="attendanceTable">
+            <thead>
+                <tr>
+                    <th style="padding-left: 20px;">Employee</th>
+                    <th>Date</th>
+                    <th>Clock In</th>
+                    <th>Clock Out</th>
+                    <th style="padding-right: 20px; text-align: right;">Status</th>
+                </tr>
+            </thead>
+            <tbody id="attendanceTableBody">
+                <tr>
+                    <td colspan="5" style="text-align: center; padding: 30px; color: #94a3b8;">
+                        <i class="fa-solid fa-spinner fa-spin"></i> Loading attendance...
+                    </td>
+                </tr>
+            </tbody>
+        </table>
+    </div>
+</div>
+
+<!-- ============================================ -->
+<!-- PUBLIC HOLIDAY MODAL -->
+<!-- ============================================ -->
+<div id="holidayModal" style="display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(15, 23, 42, 0.6); backdrop-filter: blur(4px); z-index: 1000; justify-content: center; align-items: center; overflow-y: auto;">
+    <div style="background: white; padding: 30px; border-radius: 12px; width: 90%; max-width: 600px; max-height: 90vh; overflow-y: auto; box-shadow: 0 20px 50px rgba(0,0,0,0.5);">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; border-bottom: 1px solid #e2e8f0; padding-bottom: 15px;">
+            <h3 style="margin: 0;"><i class="fa-solid fa-calendar-day" style="color: #8b5cf6;"></i> Public Holidays</h3>
+            <button id="closeHolidayModalBtn" style="background: none; border: none; font-size: 1.5rem; cursor: pointer; color: #64748b;">&times;</button>
+        </div>
+
+        <div style="margin-bottom: 15px; display: flex; gap: 10px;">
+            <input type="text" id="holidayName" placeholder="Holiday Name" style="flex: 1; padding: 8px; border: 1px solid #e2e8f0; border-radius: 4px;">
+            <input type="date" id="holidayDate" style="padding: 8px; border: 1px solid #e2e8f0; border-radius: 4px;">
+            <button id="addHolidayBtn" style="background: #2563eb; color: white; border: none; padding: 8px 15px; border-radius: 4px; cursor: pointer;">
+                <i class="fa-solid fa-plus"></i> Add
+            </button>
+        </div>
+
+        <div style="max-height: 300px; overflow-y: auto;">
+            <table class="table-minimal" style="width: 100%; font-size: 0.85rem;">
+                <thead style="background: #f1f5f9; position: sticky; top: 0; z-index: 10;">
+                    <tr>
+                        <th style="padding: 8px; text-align: left;">Holiday Name</th>
+                        <th style="padding: 8px; text-align: left;">Date</th>
+                        <th style="padding: 8px; text-align: right;">Action</th>
+                    </tr>
+                </thead>
+                <tbody id="holidayTableBody">
+                    <tr>
+                        <td colspan="3" style="text-align: center; padding: 20px; color: #94a3b8;">
+                            <i class="fa-solid fa-spinner fa-spin"></i> Loading holidays...
+                        </td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+<!-- ============================================ -->
+<!-- MARK ABSENT MODAL (NEW) -->
+<!-- ============================================ -->
+<div id="absentModal" style="display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(15, 23, 42, 0.6); backdrop-filter: blur(4px); z-index: 1000; justify-content: center; align-items: center; overflow-y: auto;">
+    <div style="background: white; padding: 30px; border-radius: 12px; width: 90%; max-width: 500px; max-height: 90vh; overflow-y: auto; box-shadow: 0 20px 50px rgba(0,0,0,0.5);">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; border-bottom: 1px solid #e2e8f0; padding-bottom: 15px;">
+            <h3 style="margin: 0;"><i class="fa-solid fa-user-slash" style="color: #f59e0b;"></i> Mark Absent / Off</h3>
+            <button id="closeAbsentModalBtn" style="background: none; border: none; font-size: 1.5rem; cursor: pointer; color: #64748b;">&times;</button>
+        </div>
+
+        <form id="absentForm">
+            <div style="margin-bottom: 15px;">
+                <label style="display: block; font-weight: 500; color: #475569; margin-bottom: 3px; font-size: 0.85rem;">Employee *</label>
+                <select id="absentEmployee" required style="width: 100%; padding: 8px; border: 1px solid #e2e8f0; border-radius: 4px; background: white;">
+                    <option value="">Select Employee</option>
+                </select>
+            </div>
+
+            <div style="margin-bottom: 15px;">
+                <label style="display: block; font-weight: 500; color: #475569; margin-bottom: 3px; font-size: 0.85rem;">Date *</label>
+                <input type="date" id="absentDate" required style="width: 100%; padding: 8px; border: 1px solid #e2e8f0; border-radius: 4px;">
+            </div>
+            
+            <div style="margin-bottom: 10px; font-size: 0.8rem; color: #64748b; background: #f1f5f9; padding: 6px 12px; border-radius: 4px;">
+                <i class="fa-solid fa-info-circle"></i> 
+                System will auto-detect Off days (Holidays, Saturdays, Sundays) and mark them accordingly.
+            </div>
+
+            <div style="margin-top: 20px; display: flex; gap: 10px; justify-content: flex-end; border-top: 1px solid #e2e8f0; padding-top: 20px;">
+                <button type="button" id="cancelAbsentModalBtn" style="background: white; border: 1px solid #e2e8f0; padding: 8px 20px; border-radius: 6px; cursor: pointer;">Cancel</button>
+                <button type="submit" id="saveAbsentBtn" style="background: #f59e0b; color: white; border: none; padding: 8px 20px; border-radius: 6px; cursor: pointer;">
+                    <i class="fa-solid fa-floppy-disk"></i> Save Status
+                </button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<!-- ============================================ -->
+<!-- MANUAL ENTRY MODAL (UPDATED) -->
+<!-- ============================================ -->
+<div id="attendanceModal" style="display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(15, 23, 42, 0.6); backdrop-filter: blur(4px); z-index: 1000; justify-content: center; align-items: center; overflow-y: auto;">
+    <div style="background: white; padding: 30px; border-radius: 12px; width: 90%; max-width: 500px; max-height: 90vh; overflow-y: auto; box-shadow: 0 20px 50px rgba(0,0,0,0.5);">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; border-bottom: 1px solid #e2e8f0; padding-bottom: 15px;">
+            <h3 id="attendanceModalTitle" style="margin: 0;"><i class="fa-solid fa-pen-to-square" style="color: #2563eb;"></i> Manual Entry</h3>
+            <button id="closeAttendanceModalBtn" style="background: none; border: none; font-size: 1.5rem; cursor: pointer; color: #64748b;">&times;</button>
+        </div>
+
+        <form id="attendanceForm">
+            <input type="hidden" id="editAttendanceId" value="">
+            
+            <div style="margin-bottom: 15px;">
+                <label style="display: block; font-weight: 500; color: #475569; margin-bottom: 3px; font-size: 0.85rem;">Employee *</label>
+                <select id="attEmployee" required style="width: 100%; padding: 8px; border: 1px solid #e2e8f0; border-radius: 4px; background: white;">
+                    <option value="">Select Employee</option>
+                </select>
+            </div>
+
+            <div style="margin-bottom: 15px;">
+                <label style="display: block; font-weight: 500; color: #475569; margin-bottom: 3px; font-size: 0.85rem;">Date *</label>
+                <input type="date" id="attDate" required style="width: 100%; padding: 8px; border: 1px solid #e2e8f0; border-radius: 4px;">
+            </div>
+
+            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 15px; margin-bottom: 15px;">
+                <div>
+                    <label style="display: block; font-weight: 500; color: #475569; margin-bottom: 3px; font-size: 0.85rem;">Clock In</label>
+                    <input type="time" id="attClockIn" style="width: 100%; padding: 8px; border: 1px solid #e2e8f0; border-radius: 4px;">
+                </div>
+                <div>
+                    <label style="display: block; font-weight: 500; color: #475569; margin-bottom: 3px; font-size: 0.85rem;">Clock Out</label>
+                    <input type="time" id="attClockOut" style="width: 100%; padding: 8px; border: 1px solid #e2e8f0; border-radius: 4px;">
+                </div>
+            </div>
+            
+            <div style="margin-bottom: 10px; font-size: 0.8rem; color: #64748b; background: #f1f5f9; padding: 6px 12px; border-radius: 4px;">
+                <i class="fa-solid fa-info-circle"></i> 
+                System will auto-detect Off days, Holidays, and Overtime based on the employee's schedule.
+            </div>
+
+            <div style="margin-top: 20px; display: flex; gap: 10px; justify-content: flex-end; border-top: 1px solid #e2e8f0; padding-top: 20px;">
+                <button type="button" id="cancelAttendanceModalBtn" style="background: white; border: 1px solid #e2e8f0; padding: 8px 20px; border-radius: 6px; cursor: pointer;">Cancel</button>
+                <button type="submit" id="saveAttendanceBtn" style="background: #2563eb; color: white; border: none; padding: 8px 20px; border-radius: 6px; cursor: pointer;">
+                    <i class="fa-solid fa-floppy-disk"></i> Save Entry
+                </button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<script>
+    document.dispatchEvent(new Event('loadModuleComplete'));
+</script>
+
+<style>
+    /* 🔥 ADDED: attendance summary stat cards */
+    .att-stat {
+        background: white;
+        border: 1px solid #e8edf3;
+        border-left: 4px solid #cbd5e1;
+        border-radius: 8px;
+        padding: 10px 18px;
+        box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+        display: flex;
+        flex-direction: column;
+        min-width: 90px;
+    }
+    .att-stat-num {
+        font-size: 1.3rem;
+        font-weight: 700;
+        color: #0f172a;
+    }
+    .att-stat-label {
+        font-size: 0.7rem;
+        color: #64748b;
+        text-transform: uppercase;
+        letter-spacing: 0.3px;
+        font-weight: 600;
+    }
+    #attendanceTable tbody tr {
+        transition: background 0.15s;
+    }
+    #attendanceTable tbody tr:hover {
+        background: #f8fafc;
+    }
+</style>

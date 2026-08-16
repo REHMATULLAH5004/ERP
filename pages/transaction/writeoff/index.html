@@ -1,0 +1,124 @@
+<div id="writeOffContainer">
+    <!-- Top Bar -->
+    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; padding: 10px 15px; background: white; border-radius: 8px; border: 1px solid #e2e8f0; flex-wrap: wrap; gap: 10px;">
+        <div style="display: flex; align-items: center; gap: 15px;">
+            <button id="toggleSidebarBtn" style="background: none; border: none; font-size: 1.2rem; cursor: pointer; color: #475569; padding: 3px;">
+                <i class="fa-solid fa-bars"></i>
+            </button>
+            <span style="font-weight: 600; color: #0f172a; font-size: 0.9rem;">Write-Off</span>
+            <span id="writeOffIdDisplay" style="font-weight: bold; color: #0f172a; font-size: 0.85rem; background: #f1f5f9; padding: 2px 10px; border-radius: 4px;">WO-2026-0001</span>
+        </div>
+        <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
+            <span style="font-size: 0.75rem; color: #64748b;">
+                <kbd style="background: #e2e8f0; padding: 1px 6px; border-radius: 3px; font-size: 0.7rem;">Ctrl+S</kbd> Save
+            </span>
+            <span style="font-size: 0.75rem; color: #64748b;">
+                <kbd style="background: #e2e8f0; padding: 1px 6px; border-radius: 3px; font-size: 0.7rem;">Ctrl+R</kbd> Reset
+            </span>
+        </div>
+    </div>
+
+    <!-- Reason Section -->
+    <div class="card" style="padding: 15px; margin-bottom: 15px;">
+        <div style="margin-bottom: 15px;">
+            <label style="display: block; font-weight: 500; color: #475569; margin-bottom: 5px; font-size: 0.9rem;">Reason for Write-Off *</label>
+            <select id="writeOffReason" style="width: 100%; padding: 8px 12px; border: 1px solid #e2e8f0; border-radius: 6px; background: white; font-size: 0.9rem;">
+                <option value="">Select Reason...</option>
+                <option value="Expired">Expired</option>
+                <option value="Damaged">Damaged</option>
+                <option value="Expired/Expiring">Expired/Expiring</option>
+                <option value="Damaged/Expired">Damaged/Expired</option>
+                <option value="Stock Adjustment">Stock Adjustment</option>
+                <option value="Other">Other</option>
+            </select>
+            <input type="text" id="writeOffReasonOther" placeholder="Please specify other reason..." style="display: none; width: 100%; margin-top: 5px; padding: 8px 12px; border: 1px solid #e2e8f0; border-radius: 6px; font-size: 0.9rem;">
+        </div>
+    </div>
+
+    <!-- Add Product/Batch Section -->
+    <div class="card" style="padding: 15px; margin-bottom: 15px;">
+        <div style="display: flex; gap: 10px; flex-wrap: wrap; align-items: flex-end;">
+            <div style="flex: 2; min-width: 200px;">
+                <label style="display: block; font-weight: 500; color: #475569; margin-bottom: 5px; font-size: 0.85rem;">Search Product</label>
+                <select id="writeOffProductSelect" style="width: 100%; padding: 8px 12px; border: 1px solid #e2e8f0; border-radius: 6px; background: white; font-size: 0.9rem;">
+                    <option value="">Search or select product...</option>
+                </select>
+            </div>
+            <div style="flex: 1; min-width: 150px;">
+                <label style="display: block; font-weight: 500; color: #475569; margin-bottom: 5px; font-size: 0.85rem;">Select Batch</label>
+                <select id="writeOffBatchSelect" style="width: 100%; padding: 8px 12px; border: 1px solid #e2e8f0; border-radius: 6px; background: white; font-size: 0.9rem;">
+                    <option value="">Select batch...</option>
+                </select>
+            </div>
+            <div>
+                <label style="display: block; font-weight: 500; color: #475569; margin-bottom: 5px; font-size: 0.85rem;">Qty to Write-Off</label>
+                <input type="number" id="writeOffQtyInput" min="1" value="1" style="width: 100px; padding: 8px 12px; border: 1px solid #e2e8f0; border-radius: 6px; font-size: 0.9rem;">
+            </div>
+            <div>
+                <button id="addBatchBtn" style="background: #2563eb; color: white; border: none; padding: 8px 20px; border-radius: 6px; cursor: pointer; font-size: 0.9rem; margin-top: 4px;">
+                    <i class="fa-solid fa-plus"></i> Add to List
+                </button>
+            </div>
+        </div>
+        <div id="batchInfo" style="margin-top: 8px; font-size: 0.85rem; color: #64748b; display: none;">
+            <span id="batchInfoText"></span>
+        </div>
+    </div>
+
+    <!-- Items Table -->
+    <div class="card" style="padding: 0; overflow: hidden;">
+        <div style="border: 1px solid #e2e8f0; border-radius: 6px; overflow-x: auto;">
+            <table class="table-minimal" id="writeOffTable" style="min-width: 800px; width: 100%; font-size: 0.85rem;">
+                <thead style="background: #f1f5f9;">
+                    <tr>
+                        <th style="padding-left: 20px; width: 25%;">Product</th>
+                        <th style="width: 15%;">Batch</th>
+                        <th style="width: 12%;">Expiry</th>
+                        <th style="width: 8%; text-align: center;">Available</th>
+                        <th style="width: 10%; text-align: center;">Qty to Write-Off</th>
+                        <th style="width: 12%; text-align: right;">Cost/Unit</th>
+                        <th style="width: 12%; text-align: right;">Total Cost</th>
+                        <th style="padding-right: 20px; text-align: center; width: 6%;">Action</th>
+                    </tr>
+                </thead>
+                <tbody id="writeOffTableBody">
+                    <tr class="writeoff-placeholder">
+                        <td colspan="8" style="text-align: center; padding: 40px; color: #94a3b8;">
+                            <i class="fa-solid fa-box-open" style="font-size: 2rem; display: block; margin-bottom: 10px;"></i>
+                            <p>No batches added yet.</p>
+                            <p style="font-size: 0.85rem;">Search and select a product above to add batches.</p>
+                        </td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+
+        <!-- Totals Section -->
+        <div style="padding: 12px 20px; background: #f8fafc; border-top: 1px solid #e2e8f0;">
+            <div style="display: flex; justify-content: flex-end; gap: 30px; flex-wrap: wrap;">
+                <div>
+                    <span style="color: #64748b;">Total Items:</span>
+                    <span id="writeOffTotalItems" style="font-weight: 600; margin-left: 10px;">0</span>
+                </div>
+                <div>
+                    <span style="color: #64748b;">Total Qty:</span>
+                    <span id="writeOffTotalQty" style="font-weight: 600; margin-left: 10px;">0</span>
+                </div>
+                <div>
+                    <span style="color: #64748b;">Total Cost:</span>
+                    <span id="writeOffTotalCost" style="font-weight: 600; margin-left: 10px; color: #dc2626;">K0.00</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Buttons -->
+        <div style="padding: 15px 20px; display: flex; gap: 10px; justify-content: flex-end; border-top: 1px solid #e2e8f0; flex-wrap: wrap;">
+            <button id="resetWriteOffBtn" style="background: #f1f5f9; border: 1px solid #e2e8f0; padding: 8px 25px; border-radius: 6px; cursor: pointer; font-size: 0.9rem;">
+                <i class="fa-solid fa-rotate-right"></i> Reset
+            </button>
+            <button id="saveWriteOffBtn" style="background: #dc2626; color: white; border: none; padding: 8px 25px; border-radius: 6px; cursor: pointer; font-size: 0.9rem;">
+                <i class="fa-solid fa-trash-can"></i> Process Write-Off
+            </button>
+        </div>
+    </div>
+</div>

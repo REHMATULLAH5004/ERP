@@ -1,0 +1,223 @@
+<!-- ============================================ -->
+<!-- SALES REPORT MODULE -->
+<!-- ============================================ -->
+<!-- Replaces the old single-date "Daily Sales Breakdown" (pages/report/
+     daily-sales, never linked in the sidebar) with a proper date-RANGE
+     report that also breaks sales down by item and by customer, not just
+     by payment method. -->
+
+     <div class="module-view-container">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:20px; flex-wrap:wrap; gap:10px;">
+            <h3 style="margin:0;"><i class="fa-solid fa-chart-line"></i> Sales Report</h3>
+            <div style="display:flex; gap:10px; align-items:center;">
+                <button class="btn btn-outline" onclick="printSalesReport()">
+                    <i class="fa-solid fa-print"></i> Print / Save PDF
+                </button>
+                <button class="btn btn-primary" onclick="exportSalesReportToExcel()">
+                    <i class="fa-solid fa-file-excel"></i> Download Excel
+                </button>
+            </div>
+        </div>
+    
+        <p style="color:#64748b; font-size:0.85rem; margin-top:-15px; margin-bottom:20px;">
+            Pick a date range and, optionally, a sale type, then choose how you want it broken down below.
+        </p>
+    
+        <!-- Filters -->
+        <div class="salesrep-filters">
+            <div class="salesrep-filter-group">
+                <label>From</label>
+                <input type="date" class="form-control" id="salesRepFromDate">
+            </div>
+            <div class="salesrep-filter-group">
+                <label>To</label>
+                <input type="date" class="form-control" id="salesRepToDate">
+            </div>
+            <div class="salesrep-filter-group">
+                <label>Sale Type</label>
+                <select class="form-control" id="salesRepTypeFilter">
+                    <option value="ALL">All Sale Types</option>
+                    <option value="NHIMA">NHIMA Sale</option>
+                    <option value="REGULAR">Regular Sale</option>
+                    <option value="ONLINE">Online Sale</option>
+                    <option value="STAFF">Staff Sale</option>
+                    <option value="WHOLESALE">Wholesale (Internal or Regular)</option>
+                    <option value="WRITEOFF_DONATION">Write-Off / Donation</option>
+                </select>
+            </div>
+            <button class="btn btn-primary" onclick="loadSalesReport()" style="align-self: flex-end;">
+                <i class="fa-solid fa-rotate"></i> Generate
+            </button>
+        </div>
+    
+        <!-- View Tabs -->
+        <div class="salesrep-tabs">
+            <button class="salesrep-tab active" id="salesRepTabBreakdown" onclick="switchSalesReportView('breakdown')">
+                <i class="fa-solid fa-table-cells"></i> Payment Breakdown
+            </button>
+            <button class="salesrep-tab" id="salesRepTabItem" onclick="switchSalesReportView('item')">
+                <i class="fa-solid fa-pills"></i> Item-Wise Sale
+            </button>
+            <button class="salesrep-tab" id="salesRepTabCustomer" onclick="switchSalesReportView('customer')">
+                <i class="fa-solid fa-user"></i> Customer-Wise Sale
+            </button>
+        </div>
+    
+        <!-- Payment Breakdown View -->
+        <div id="salesRepBreakdownView">
+            <p style="color:#64748b; font-size:0.8rem; margin-top:0; margin-bottom:12px;">
+                Shows where each sale's payment actually went -- money already in hand, money already in the bank, or money still owed. Write-Off/Donation has no payment side at all, so it stays zero across the board by design.
+            </p>
+            <div class="card" style="padding:0;">
+                <table class="table-minimal" id="salesRepBreakdownTable" style="width:100%;">
+                    <thead>
+                        <tr>
+                            <th style="padding-left:20px;">Sale Type</th>
+                            <th style="text-align:right;">Cash In Hand</th>
+                            <th style="text-align:right;">Bank Transfer</th>
+                            <th style="text-align:right;">Accounts Receivable</th>
+                            <th style="text-align:right; padding-right:20px;">Total</th>
+                        </tr>
+                    </thead>
+                    <tbody id="salesRepBreakdownBody">
+                        <tr><td colspan="5" style="text-align:center;padding:30px;color:#94a3b8;">Pick a date range and click Generate.</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    
+        <!-- Item-Wise View -->
+        <div id="salesRepItemView" style="display:none;">
+            <p style="color:#64748b; font-size:0.8rem; margin-top:0; margin-bottom:12px;">
+                Every product sold in the selected range, aggregated across all matching invoices.
+            </p>
+            <div class="card" style="padding:0;">
+                <table class="table-minimal" id="salesRepItemTable" style="width:100%;">
+                    <thead>
+                        <tr>
+                            <th style="padding-left:20px;">Product</th>
+                            <th class="clickable-header" style="text-align:right;" onclick="sortSalesReportItems('qty')">Qty Sold <i class="fa-solid fa-sort"></i></th>
+                            <th class="clickable-header" style="text-align:right;" onclick="sortSalesReportItems('txns')">Invoices <i class="fa-solid fa-sort"></i></th>
+                            <th class="clickable-header" style="text-align:right; padding-right:20px;" onclick="sortSalesReportItems('revenue')">Revenue <i class="fa-solid fa-sort"></i></th>
+                        </tr>
+                    </thead>
+                    <tbody id="salesRepItemBody">
+                        <tr><td colspan="4" style="text-align:center;padding:30px;color:#94a3b8;">Pick a date range and click Generate.</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    
+        <!-- Customer-Wise View -->
+        <div id="salesRepCustomerView" style="display:none;">
+            <p style="color:#64748b; font-size:0.8rem; margin-top:0; margin-bottom:12px;">
+                Every customer who bought something in the selected range (includes NHIMA members, walk-ins, wholesale accounts, and Write-Off/Donation entries).
+            </p>
+            <div class="card" style="padding:0;">
+                <table class="table-minimal" id="salesRepCustomerTable" style="width:100%;">
+                    <thead>
+                        <tr>
+                            <th style="padding-left:20px;">Customer</th>
+                            <th>Phone</th>
+                            <th class="clickable-header" style="text-align:right;" onclick="sortSalesReportCustomers('txns')">Invoices <i class="fa-solid fa-sort"></i></th>
+                            <th class="clickable-header" style="text-align:right; padding-right:20px;" onclick="sortSalesReportCustomers('revenue')">Total Sales <i class="fa-solid fa-sort"></i></th>
+                        </tr>
+                    </thead>
+                    <tbody id="salesRepCustomerBody">
+                        <tr><td colspan="4" style="text-align:center;padding:30px;color:#94a3b8;">Pick a date range and click Generate.</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Drill-Down Modal -- shows the actual invoices behind whichever
+         item/customer row was clicked, so the totals in the tables above can
+         be checked against something. -->
+    <div class="modal" id="salesRepDrillModal">
+        <div class="modal-dialog modal-xl">
+            <div class="modal-content salesrep-drill-content">
+                <div class="modal-header">
+                    <h4 id="salesRepDrillTitle"><i class="fa-solid fa-receipt"></i> Invoices</h4>
+                    <button class="modal-close" onclick="closeSalesReportDrillModal()">&times;</button>
+                </div>
+                <div class="modal-body salesrep-drill-body">
+                    <div class="table-responsive" id="salesRepDrillTableContainer"></div>
+                </div>
+                <div class="modal-footer">
+                    <button class="btn btn-outline" onclick="closeSalesReportDrillModal()">Close</button>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <style>
+    .salesrep-filters {
+        display: flex;
+        gap: 14px;
+        flex-wrap: wrap;
+        align-items: flex-end;
+        margin-bottom: 18px;
+    }
+    .salesrep-filter-group {
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+    }
+    .salesrep-filter-group label {
+        font-size: 0.7rem;
+        font-weight: 600;
+        color: #64748b;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+    }
+    .salesrep-filters .form-control {
+        padding: 8px 12px;
+        border: 1px solid #e2e8f0;
+        border-radius: 6px;
+        font-size: 0.85rem;
+        background: white;
+    }
+    .salesrep-filters .form-control:focus {
+        outline: none;
+        border-color: #2563eb;
+        box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.1);
+    }
+    
+    .salesrep-tabs {
+        display: flex;
+        gap: 6px;
+        margin-bottom: 16px;
+        border-bottom: 1px solid #e2e8f0;
+    }
+    .salesrep-tab {
+        background: none;
+        border: none;
+        border-bottom: 2px solid transparent;
+        padding: 10px 16px;
+        font-size: 0.85rem;
+        font-weight: 500;
+        color: #64748b;
+        cursor: pointer;
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        transition: all 0.15s;
+    }
+    .salesrep-tab:hover { color: #2563eb; }
+    .salesrep-tab.active { color: #2563eb; border-bottom-color: #2563eb; }
+    
+    .salesrep-clickable-row { cursor: pointer; }
+    .salesrep-clickable-row:hover td:first-child { color: #2563eb; text-decoration: underline; }
+    
+    /* 🔥 FIX: the shared .modal-content (assets/css/style.css) caps itself at
+       max-height:90vh with overflow:hidden and never gives .modal-body its
+       own scroll -- fine for short forms, but a long invoice list just got
+       clipped at the modal's edge with no way to reach the rest. Scoped to
+       this modal only: modal-body becomes the flexed, scrollable middle
+       section, while the header/footer stay put. min-height:0 is required
+       here -- without it a flex child won't shrink below its content size,
+       which silently defeats overflow-y:auto in exactly this layout. */
+    .salesrep-drill-content { max-height: 85vh; }
+    .salesrep-drill-body { flex: 1; overflow-y: auto; min-height: 0; }
+    </style>

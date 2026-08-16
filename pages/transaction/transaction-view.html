@@ -1,0 +1,43 @@
+<div class="module-view-container">
+    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:20px; flex-wrap:wrap; gap:10px;">
+        <h3 style="margin:0;"><i class="fa-solid fa-list-check"></i> Today's Transactions</h3>
+        <div style="display:flex; gap:10px; align-items:center;">
+            <input type="text" id="txnSearchInput" placeholder="Search reference, customer, amount..." style="padding:8px 12px; border:1px solid #e2e8f0; border-radius:6px; min-width:260px;">
+            <select id="txnTypeFilter" style="padding:8px 12px; border:1px solid #e2e8f0; border-radius:6px; background:white;">
+                <option value="all">All Types</option>
+                <option value="Sale">Sale</option>
+                <option value="Purchase">Purchase</option>
+                <option value="Write-Off">Write-Off</option>
+                <option value="Payment">Payment</option>
+                <option value="Donation">Donation</option>
+                <option value="Receipt">Receipt</option>
+            </select>
+            <button class="btn btn-outline" onclick="refreshTransactionOverview()">
+                <i class="fa-solid fa-rotate"></i> Refresh
+            </button>
+        </div>
+    </div>
+
+    <p style="color:#64748b; font-size:0.8rem; margin-bottom:12px;">
+        <i class="fa-solid fa-circle-info"></i>
+        Click any row to open it for modification. Payments and Receipts open their module but aren't directly editable here --
+        those are typically reversed rather than edited once recorded.
+    </p>
+
+    <div class="card" style="padding:0;">
+        <table class="table-minimal" id="txnTable" style="width:100%;">
+            <thead>
+                <tr>
+                    <th style="padding-left:20px;">Type</th>
+                    <th>Reference</th>
+                    <th>Customer / Supplier</th>
+                    <th>Time</th>
+                    <th style="text-align:right; padding-right:20px;">Amount</th>
+                </tr>
+            </thead>
+            <tbody id="txnTableBody">
+                <tr><td colspan="5" style="text-align:center; padding:30px; color:#94a3b8;"><i class="fa-solid fa-spinner fa-spin"></i> Loading today's transactions...</td></tr>
+            </tbody>
+        </table>
+    </div>
+</div>

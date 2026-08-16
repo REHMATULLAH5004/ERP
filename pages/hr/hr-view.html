@@ -1,0 +1,210 @@
+<div class="module-view-container">
+
+    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:20px; flex-wrap:wrap; gap:10px;">
+        <h3 style="margin:0;"><i class="fa-solid fa-users-gear"></i> HR Overview</h3>
+        <div style="display:flex; gap:10px; align-items:center;">
+            <button class="btn btn-outline" onclick="printMonthlyAttendance()">
+                <i class="fa-solid fa-print"></i> Print Monthly Attendance
+            </button>
+            <button id="hrOpenApprovalsBtn" class="btn btn-primary" style="position:relative;">
+                <i class="fa-solid fa-user-check"></i> Leave Approvals
+                <span id="hrPendingBadge" style="display:none; position:absolute; top:-8px; right:-8px; background:#dc2626; color:white; font-size:0.7rem; font-weight:700; min-width:20px; height:20px; border-radius:10px; display:flex; align-items:center; justify-content:center; padding:0 5px;"></span>
+            </button>
+            <!-- 🔥 ADDED: Advance Approvals -->
+            <button id="hrOpenAdvanceApprovalsBtn" class="btn btn-primary" style="position:relative;">
+                <i class="fa-solid fa-hand-holding-dollar"></i> Advance Approvals
+                <span id="hrAdvancePendingBadge" style="display:none; position:absolute; top:-8px; right:-8px; background:#dc2626; color:white; font-size:0.7rem; font-weight:700; min-width:20px; height:20px; border-radius:10px; display:flex; align-items:center; justify-content:center; padding:0 5px;"></span>
+            </button>
+        </div>
+    </div>
+
+    <!-- 🔥 ADDED: ALL EMPLOYEE ADVANCES -->
+    <div class="card" style="padding:0; margin-bottom:20px;">
+        <div style="padding:12px 20px; border-bottom:1px solid #e8edf3;">
+            <strong><i class="fa-solid fa-hand-holding-dollar" style="color:#f59e0b;"></i> Outstanding Advances</strong>
+            <span style="font-size:0.75rem; color:#94a3b8; margin-left:8px;">Includes opening advances set at onboarding</span>
+        </div>
+        <table class="table-minimal" style="width:100%;">
+            <thead>
+                <tr>
+                    <th style="padding-left:20px;">Employee</th>
+                    <th style="text-align:right;">Outstanding Balance</th>
+                    <th style="text-align:right; padding-right:20px;">Action</th>
+                </tr>
+            </thead>
+            <tbody id="hrAdvancesBody">
+                <tr><td colspan="3" style="text-align:center;padding:20px;color:#94a3b8;">Loading...</td></tr>
+            </tbody>
+        </table>
+
+    <!-- EMPLOYEE CALENDAR / HOURS VIEWER -->
+    <div class="card" style="padding:20px;">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:15px; flex-wrap:wrap; gap:10px;">
+            <h3 style="margin:0;"><i class="fa-solid fa-calendar-check" style="color:#0891b2;"></i> Employee Attendance</h3>
+            <select id="hrEmployeeSelect" style="padding:8px 12px; border:1px solid #e2e8f0; border-radius:6px; background:white; min-width:220px;">
+                <option value="">Select Employee</option>
+            </select>
+        </div>
+
+        <div id="hrCalendarPlaceholder" style="text-align:center; padding:40px; color:#94a3b8;">
+            Select an employee above to view their attendance calendar.
+        </div>
+
+        <div id="hrCalendarContent" style="display:none;">
+            <div style="display:grid; grid-template-columns:repeat(3,1fr); gap:15px; margin-bottom:20px;">
+                <div style="text-align:center; padding:12px; background:#f8fafc; border-radius:8px;">
+                    <div style="font-size:1.6rem; font-weight:700; color:#0f172a;" id="hrMonthWorkedHours">--</div>
+                    <div style="font-size:0.75rem; color:#64748b; text-transform:uppercase;">Hours Worked</div>
+                </div>
+                <div style="text-align:center; padding:12px; background:#f8fafc; border-radius:8px;">
+                    <div style="font-size:1.6rem; font-weight:700; color:#dc2626;" id="hrMonthAbsent">--</div>
+                    <div style="font-size:0.75rem; color:#64748b; text-transform:uppercase;">Absent Days</div>
+                </div>
+                <div style="text-align:center; padding:12px; background:#f8fafc; border-radius:8px;">
+                    <div style="font-size:1.6rem; font-weight:700; color:#8b5cf6;" id="hrMonthLeave">--</div>
+                    <div style="font-size:0.75rem; color:#64748b; text-transform:uppercase;">Leave Days Taken</div>
+                </div>
+            </div>
+
+            <div style="display:flex; gap:14px; flex-wrap:wrap; margin-bottom:10px; font-size:0.75rem; color:#64748b;">
+                <span><span style="display:inline-block;width:10px;height:10px;background:#22c55e;border-radius:2px;margin-right:4px;"></span>Present</span>
+                <span><span style="display:inline-block;width:10px;height:10px;background:#ef4444;border-radius:2px;margin-right:4px;"></span>Absent</span>
+                <span><span style="display:inline-block;width:10px;height:10px;background:#8b5cf6;border-radius:2px;margin-right:4px;"></span>On Leave</span>
+                <span><span style="display:inline-block;width:10px;height:10px;background:#eab308;border-radius:2px;margin-right:4px;"></span>Holiday</span>
+                <span><span style="display:inline-block;width:10px;height:10px;background:#cbd5e1;border-radius:2px;margin-right:4px;"></span>Off Day</span>
+                <span><span style="display:inline-block;width:10px;height:10px;background:#f1f5f9;border:1px solid #e2e8f0;border-radius:2px;margin-right:4px;"></span>Upcoming</span>
+            </div>
+
+            <div id="hrCalendarGrid" style="display:grid; grid-template-columns:repeat(7,1fr); gap:4px;"></div>
+        </div>
+    </div>
+</div>
+
+<!-- LEAVE APPROVALS MODAL -->
+<div id="hrApprovalsModal" style="display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(15,23,42,0.6); backdrop-filter:blur(4px); z-index:1000; justify-content:center; align-items:center;">
+    <div style="background:white; padding:25px; border-radius:12px; width:90%; max-width:800px; max-height:80vh; overflow-y:auto;">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:16px; border-bottom:1px solid #e2e8f0; padding-bottom:12px;">
+            <h4 style="margin:0;"><i class="fa-solid fa-user-check" style="color:#f59e0b;"></i> Pending Leave Approvals</h4>
+            <button onclick="document.getElementById('hrApprovalsModal').style.display='none'" style="background:none; border:none; font-size:1.4rem; cursor:pointer; color:#94a3b8;">&times;</button>
+        </div>
+        <table class="table-minimal" style="width:100%;">
+            <thead>
+                <tr>
+                    <th style="padding-left:20px;">Employee</th>
+                    <th>Dates</th>
+                    <th>Days</th>
+                    <th>Reason</th>
+                    <th style="text-align:right; padding-right:20px;">Action</th>
+                </tr>
+            </thead>
+            <tbody id="hrApprovalsBody">
+                <tr><td colspan="5" style="text-align:center;padding:20px;color:#94a3b8;">Loading...</td></tr>
+            </tbody>
+        </table>
+    </div>
+</div>
+
+<!-- APPROVE LEAVE MODAL (type decided here) -->
+<div id="hrApproveTypeModal" style="display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(15,23,42,0.6); backdrop-filter:blur(4px); z-index:1100; justify-content:center; align-items:center;">
+    <div style="background:white; padding:25px; border-radius:12px; width:90%; max-width:420px;">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:16px; border-bottom:1px solid #e2e8f0; padding-bottom:12px;">
+            <h4 style="margin:0;"><i class="fa-solid fa-check" style="color:#059669;"></i> Approve Leave</h4>
+            <button type="button" onclick="document.getElementById('hrApproveTypeModal').style.display='none'" style="background:none; border:none; font-size:1.4rem; cursor:pointer; color:#94a3b8;">&times;</button>
+        </div>
+        <form id="hrApproveForm">
+            <input type="hidden" id="hrApproveLeaveId">
+            <input type="hidden" id="hrApproveEmployeeId">
+            <input type="hidden" id="hrApproveDays">
+            <div style="margin-bottom:16px;">
+                <label style="display:block; font-weight:500; color:#475569; margin-bottom:4px; font-size:0.85rem;">Leave Type *</label>
+                <select id="hrApproveType" required style="width:100%; padding:8px 10px; border:1px solid #e2e8f0; border-radius:6px;">
+                    <option value="">Select</option>
+                    <option value="Annual">Annual (paid, deducts from balance)</option>
+                    <option value="Sick">Sick (paid)</option>
+                    <option value="Emergency">Emergency (paid)</option>
+                    <option value="Unpaid">Unpaid (salary deducted at payroll)</option>
+                </select>
+            </div>
+            <div style="display:flex; gap:10px; justify-content:flex-end;">
+                <button type="button" onclick="document.getElementById('hrApproveTypeModal').style.display='none'" style="background:white; border:1px solid #e2e8f0; padding:8px 20px; border-radius:6px; cursor:pointer;">Cancel</button>
+                <button type="submit" id="hrConfirmApproveBtn" class="btn btn-success">
+                    <i class="fa-solid fa-check"></i> Confirm Approval
+                </button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<!-- 🔥 ADDED: ADVANCE APPROVALS LIST -->
+<div id="hrAdvanceApprovalsModal" style="display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(15,23,42,0.6); backdrop-filter:blur(4px); z-index:1000; justify-content:center; align-items:center;">
+    <div style="background:white; padding:25px; border-radius:12px; width:90%; max-width:700px; max-height:80vh; overflow-y:auto;">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:16px; border-bottom:1px solid #e2e8f0; padding-bottom:12px;">
+            <h4 style="margin:0;"><i class="fa-solid fa-hand-holding-dollar" style="color:#f59e0b;"></i> Pending Advance Requests</h4>
+            <button onclick="document.getElementById('hrAdvanceApprovalsModal').style.display='none'" style="background:none; border:none; font-size:1.4rem; cursor:pointer; color:#94a3b8;">&times;</button>
+        </div>
+        <table class="table-minimal" style="width:100%;">
+            <thead>
+                <tr>
+                    <th style="padding-left:20px;">Employee</th>
+                    <th style="text-align:right;">Amount</th>
+                    <th>Reason</th>
+                    <th style="text-align:right; padding-right:20px;">Action</th>
+                </tr>
+            </thead>
+            <tbody id="hrAdvanceApprovalsBody">
+                <tr><td colspan="4" style="text-align:center;padding:20px;color:#94a3b8;">Loading...</td></tr>
+            </tbody>
+        </table>
+    </div>
+</div>
+
+<!-- 🔥 ADDED: APPROVE ADVANCE (pick Pay From) -->
+<div id="hrApproveAdvanceModal" style="display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(15,23,42,0.6); backdrop-filter:blur(4px); z-index:1100; justify-content:center; align-items:center;">
+    <div style="background:white; padding:25px; border-radius:12px; width:90%; max-width:420px;">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:16px; border-bottom:1px solid #e2e8f0; padding-bottom:12px;">
+            <h4 style="margin:0;"><i class="fa-solid fa-check" style="color:#059669;"></i> Approve Advance</h4>
+            <button type="button" onclick="document.getElementById('hrApproveAdvanceModal').style.display='none'" style="background:none; border:none; font-size:1.4rem; cursor:pointer; color:#94a3b8;">&times;</button>
+        </div>
+        <div style="margin-bottom:16px;">
+            <label style="display:block; font-weight:500; color:#475569; margin-bottom:4px; font-size:0.85rem;">Pay From *</label>
+            <select id="hrAdvancePayFrom" required style="width:100%; padding:8px 10px; border:1px solid #e2e8f0; border-radius:6px;">
+                <option value="1111">Cash in Hand (ZMW)</option>
+                <option value="1121">Bank (ZMW)</option>
+            </select>
+        </div>
+        <div style="display:flex; gap:10px; justify-content:flex-end;">
+            <button type="button" onclick="document.getElementById('hrApproveAdvanceModal').style.display='none'" style="background:white; border:1px solid #e2e8f0; padding:8px 20px; border-radius:6px; cursor:pointer;">Cancel</button>
+            <button id="hrConfirmAdvanceApproveBtn" class="btn btn-success" onclick="confirmApproveAdvance()">
+                <i class="fa-solid fa-check"></i> Confirm Approval
+            </button>
+        </div>
+    </div>
+</div>
+
+<!-- 🔥 ADDED: MANUAL SETTLEMENT (recover advance via cash) -->
+<div id="hrSettleAdvanceModal" style="display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(15,23,42,0.6); backdrop-filter:blur(4px); z-index:1000; justify-content:center; align-items:center;">
+    <div style="background:white; padding:25px; border-radius:12px; width:90%; max-width:420px;">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:16px; border-bottom:1px solid #e2e8f0; padding-bottom:12px;">
+            <h4 id="hrSettleTitle" style="margin:0;"><i class="fa-solid fa-hand-holding-dollar" style="color:#f59e0b;"></i> Settle Advance</h4>
+            <button onclick="document.getElementById('hrSettleAdvanceModal').style.display='none'" style="background:none; border:none; font-size:1.4rem; cursor:pointer; color:#94a3b8;">&times;</button>
+        </div>
+        <div style="margin-bottom:16px;">
+            <label style="display:block; font-weight:500; color:#475569; margin-bottom:4px; font-size:0.85rem;">Amount Received in Cash (ZMW) *</label>
+            <input type="number" id="hrSettleAmount" step="0.01" min="0.01" required style="width:100%; padding:8px 10px; border:1px solid #e2e8f0; border-radius:6px;">
+            <small id="hrSettleOutstandingNote" style="display:block; color:#94a3b8; font-size:0.75rem; margin-top:4px;"></small>
+        </div>
+        <div style="margin-bottom:16px;">
+            <label style="display:block; font-weight:500; color:#475569; margin-bottom:4px; font-size:0.85rem;">Received Into *</label>
+            <select id="hrSettleInto" required style="width:100%; padding:8px 10px; border:1px solid #e2e8f0; border-radius:6px;">
+                <option value="1111">Cash in Hand (ZMW)</option>
+                <option value="1121">Bank (ZMW)</option>
+            </select>
+        </div>
+        <div style="display:flex; gap:10px; justify-content:flex-end;">
+            <button type="button" onclick="document.getElementById('hrSettleAdvanceModal').style.display='none'" style="background:white; border:1px solid #e2e8f0; padding:8px 20px; border-radius:6px; cursor:pointer;">Cancel</button>
+            <button id="hrConfirmSettleBtn" class="btn btn-success" onclick="confirmSettleAdvance()">
+                <i class="fa-solid fa-check"></i> Record Settlement
+            </button>
+        </div>
+    </div>
+</div>

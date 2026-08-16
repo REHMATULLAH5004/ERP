@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Griffins Medicals Limited</title>
+
+    <!-- External CSS Libraries -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+
+    <!-- Supabase JS SDK -->
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+
+    <!-- Shared Supabase Config (must load before app.js) -->
+    <script src="assets/js/supabase-config.js"></script>
+
+    <!-- Your Custom CSS -->
+    <link rel="stylesheet" href="assets/css/style.css">
+</head>
+<body style="display:none; opacity:0;">
+    <!-- body starts hidden -- app.js reveals it only after confirming a
+         valid session, so an unauthenticated flash of the app never
+         shows before the login redirect kicks in -->
+
+    <!-- TOP NAVIGATION BAR -->
+    <header class="top-navbar">
+        <div class="nav-left">
+            <div class="logo">
+                <i class="fa-solid fa-globe"></i> Griffins Medicals Limited
+            </div>
+            <nav class="top-menu">
+                <a href="#" class="top-link active" data-module="dashboard">Dashboard</a>
+                <a href="#" class="top-link" data-module="transaction">Transaction</a>
+                <a href="#" class="top-link" data-module="account">Account</a>
+                <a href="#" class="top-link" data-module="crm">CRM</a>
+                <a href="#" class="top-link" data-module="hr">HR</a>
+                <a href="#" class="top-link" data-module="admin">Admin</a>
+                <a href="#" class="top-link" data-module="inventory">Inventory</a>
+                <a href="#" class="top-link" data-module="report">Report</a>
+            </nav>
+        </div>
+        <div class="nav-right">
+            <div class="user-profile">
+                <i class="fa-regular fa-user-circle"></i> <span id="currentUserName">User</span>
+            </div>
+            <a href="#" id="logoutBtn" class="logout-btn"><i class="fa-solid fa-right-from-bracket"></i> Logout</a>
+        </div>
+    </header>
+
+    <!-- MAIN LAYOUT CONTAINER -->
+    <div class="main-layout">
+
+        <!-- LEFT SIDEBAR -->
+        <aside class="sidebar" id="sidebar-container">
+            <div id="sidebar-content">
+                <!-- Sidebar will be dynamically populated by loadModule() -->
+            </div>
+        </aside>
+
+        <!-- MAIN WORKSPACE -->
+        <main class="workspace" id="workspace-container">
+            <div class="workspace-header">
+                <h2 class="page-title" id="page-title">Dashboard</h2>
+                <div class="workspace-actions" id="workspace-actions">
+                    <!-- Dynamic action buttons can appear here -->
+                </div>
+            </div>
+            <div id="workspace-content" class="content-box">
+                <!-- Sub-module content will be dynamically loaded here -->
+            </div>
+        </main>
+    </div>
+
+    <!-- Toast Notification Container (shared, modules can use this or roll their own) -->
+    <div id="toastContainer"></div>
+
+    <!-- Your Custom JS -->
+    <script src="assets/js/shared-attendance-utils.js"></script>
+    <script src="assets/js/shared-exchange-rate.js"></script>
+    <script src="app.js"></script>
+</body>
+</html>

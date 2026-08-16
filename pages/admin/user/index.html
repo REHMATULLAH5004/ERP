@@ -1,0 +1,134 @@
+<div class="module-view-container">
+    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
+        <h3 style="margin: 0;"><i class="fa-solid fa-users-gear"></i> User Accounts</h3>
+        <button id="addUserBtn" class="btn btn-primary">
+            <i class="fa-solid fa-user-plus"></i> Register User
+        </button>
+    </div>
+
+    <div class="card" style="padding: 0;">
+        <table class="table-minimal" id="userTable">
+            <thead>
+                <tr>
+                    <th style="padding-left: 20px;">Employee</th>
+                    <th>Email</th>
+                    <th>Role</th>
+                    <th>Registered</th>
+                    <th style="padding-right: 20px; text-align: right;">Status</th>
+                    <th style="text-align: right;">Action</th>
+                </tr>
+            </thead>
+            <tbody id="userTableBody">
+                <tr>
+                    <td colspan="6" style="text-align: center; padding: 30px; color: #94a3b8;">
+                        <i class="fa-solid fa-spinner fa-spin"></i> Loading users...
+                    </td>
+                </tr>
+            </tbody>
+        </table>
+    </div>
+</div>
+
+<!-- ============================================ -->
+<!-- REGISTER USER MODAL -->
+<!-- ============================================ -->
+<div id="userModal" style="display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(15, 23, 42, 0.6); backdrop-filter: blur(4px); z-index: 1000; justify-content: center; align-items: center;">
+    <div style="background: white; padding: 30px; border-radius: 12px; width: 90%; max-width: 480px; box-shadow: 0 20px 50px rgba(0,0,0,0.5);">
+
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; border-bottom: 1px solid #e2e8f0; padding-bottom: 15px;">
+            <h3 style="margin: 0;"><i class="fa-solid fa-user-plus" style="color: #2563eb;"></i> Register User</h3>
+            <button id="closeUserModalBtn" style="background: none; border: none; font-size: 1.5rem; cursor: pointer; color: #64748b;">&times;</button>
+        </div>
+
+        <form id="userForm">
+            <div style="margin-bottom: 15px;">
+                <label style="display: block; font-weight: 500; color: #475569; margin-bottom: 3px; font-size: 0.85rem;">Employee *</label>
+                <select id="userEmployee" required style="width: 100%; padding: 8px; border: 1px solid #e2e8f0; border-radius: 4px; background: white;">
+                    <option value="">Select Employee</option>
+                </select>
+                <small id="employeeAlreadyRegisteredNote" style="display:none; color: #dc2626; font-size: 0.75rem;">
+                    <i class="fa-solid fa-circle-exclamation"></i> This employee already has a user account.
+                </small>
+            </div>
+
+            <div style="margin-bottom: 15px;">
+                <label style="display: block; font-weight: 500; color: #475569; margin-bottom: 3px; font-size: 0.85rem;">Email Address</label>
+                <input type="email" id="userEmail" readonly placeholder="Auto-filled from employee record" style="width: 100%; padding: 8px; border: 1px solid #e2e8f0; border-radius: 4px; background: #f8fafc; color: #475569;">
+                <small id="noEmailNote" style="display:none; color: #dc2626; font-size: 0.75rem;">
+                    <i class="fa-solid fa-circle-exclamation"></i> This employee has no email on file -- add one in Employee Management first.
+                </small>
+            </div>
+
+            <div style="margin-bottom: 15px;">
+                <label style="display: block; font-weight: 500; color: #475569; margin-bottom: 3px; font-size: 0.85rem;">Role *</label>
+                <select id="userRole" required style="width: 100%; padding: 8px; border: 1px solid #e2e8f0; border-radius: 4px; background: white;">
+                    <option value="">Select Role</option>
+                    <option value="Admin">Admin</option>
+                    <option value="Manager">Manager</option>
+                    <option value="Pharmacist">Pharmacist</option>
+                    <option value="Accountant">Accountant</option>
+                    <option value="Cashier">Cashier</option>
+                </select>
+            </div>
+
+            <div style="margin-bottom: 15px;">
+                <label style="display: block; font-weight: 500; color: #475569; margin-bottom: 3px; font-size: 0.85rem;">Password *</label>
+                <input type="password" id="userPassword" required minlength="6" placeholder="At least 6 characters" style="width: 100%; padding: 8px; border: 1px solid #e2e8f0; border-radius: 4px;">
+            </div>
+
+            <div style="margin-bottom: 10px;">
+                <label style="display: block; font-weight: 500; color: #475569; margin-bottom: 3px; font-size: 0.85rem;">Confirm Password *</label>
+                <input type="password" id="userPasswordConfirm" required minlength="6" style="width: 100%; padding: 8px; border: 1px solid #e2e8f0; border-radius: 4px;">
+            </div>
+
+            <p id="userFormError" style="display:none; color: #dc2626; font-size: 0.85rem; background: #fef2f2; padding: 8px 12px; border-radius: 4px;"></p>
+
+            <div style="margin-top: 15px; display: flex; gap: 10px; justify-content: flex-end; border-top: 1px solid #e2e8f0; padding-top: 20px;">
+                <button type="button" id="cancelUserModalBtn" style="background: white; border: 1px solid #e2e8f0; padding: 8px 20px; border-radius: 6px; cursor: pointer;">Cancel</button>
+                <button type="submit" id="saveUserBtn" style="background: #2563eb; color: white; border: none; padding: 8px 20px; border-radius: 6px; cursor: pointer;">
+                    <i class="fa-solid fa-floppy-disk"></i> Register
+                </button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<!-- ============================================ -->
+<!-- 🔥 ADDED: EDIT ROLE MODAL -->
+<!-- Deliberately minimal -- role only. Email/password changes go
+     through proper Auth flows, not this table. -->
+<!-- ============================================ -->
+<div id="editRoleModal" style="display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(15, 23, 42, 0.6); backdrop-filter: blur(4px); z-index: 1000; justify-content: center; align-items: center;">
+    <div style="background: white; padding: 30px; border-radius: 12px; width: 90%; max-width: 400px; box-shadow: 0 20px 50px rgba(0,0,0,0.5);">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; border-bottom: 1px solid #e2e8f0; padding-bottom: 15px;">
+            <h3 id="editRoleTitle" style="margin: 0;"><i class="fa-solid fa-user-pen" style="color: #2563eb;"></i> Edit Role</h3>
+            <button id="closeEditRoleModalBtn" style="background: none; border: none; font-size: 1.5rem; cursor: pointer; color: #64748b;">&times;</button>
+        </div>
+        <form id="editRoleForm">
+            <input type="hidden" id="editRoleProfileId">
+            <div style="margin-bottom: 15px;">
+                <label style="display: block; font-weight: 500; color: #475569; margin-bottom: 3px; font-size: 0.85rem;">Role *</label>
+                <select id="editRoleSelect" required style="width: 100%; padding: 8px; border: 1px solid #e2e8f0; border-radius: 4px; background: white;">
+                    <option value="Admin">Admin</option>
+                    <option value="Manager">Manager</option>
+                    <option value="Pharmacist">Pharmacist</option>
+                    <option value="Accountant">Accountant</option>
+                    <option value="Cashier">Cashier</option>
+                </select>
+                <small style="display:block; color:#94a3b8; font-size:0.75rem; margin-top:4px;">
+                    <i class="fa-solid fa-circle-info"></i> Takes effect the next time this person logs in.
+                </small>
+            </div>
+            <div style="display: flex; gap: 10px; justify-content: flex-end; border-top: 1px solid #e2e8f0; padding-top: 15px;">
+                <button type="button" id="cancelEditRoleBtn" style="background: white; border: 1px solid #e2e8f0; padding: 8px 20px; border-radius: 6px; cursor: pointer;">Cancel</button>
+                <button type="submit" id="saveEditRoleBtn" style="background: #2563eb; color: white; border: none; padding: 8px 20px; border-radius: 6px; cursor: pointer;">
+                    <i class="fa-solid fa-floppy-disk"></i> Save
+                </button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<script>
+    document.dispatchEvent(new Event('loadModuleComplete'));
+</script>

@@ -1,0 +1,108 @@
+<div class="module-view-container">
+    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:20px; flex-wrap:wrap; gap:10px;">
+        <h3 style="margin:0;"><i class="fa-solid fa-money-check-dollar"></i> Payroll</h3>
+        <div style="display:flex; gap:10px; align-items:center;">
+            <input type="month" id="payrollMonthPicker" style="padding:7px 12px; border:1px solid #e2e8f0; border-radius:6px;">
+            <button class="btn btn-primary" onclick="calculatePayroll()">
+                <i class="fa-solid fa-calculator"></i> Calculate
+            </button>
+        </div>
+    </div>
+
+    <div class="card" style="padding:0;">
+        <table class="table-minimal" id="payrollTable" style="width:100%; font-size:0.82rem;">
+            <thead>
+                <tr>
+                    <th style="padding-left:20px;">Employee</th>
+                    <th style="text-align:right;">Basic Pay</th>
+                    <th style="text-align:right;">Leave Deduct</th>
+                    <th style="text-align:right;">Overtime</th>
+                    <th style="text-align:right;">Gross</th>
+                    <th style="text-align:right;">PAYE</th>
+                    <th style="text-align:right;">NAPSA</th>
+                    <th style="text-align:right;">NHIMA</th>
+                    <th style="text-align:right;">Net Pay</th>
+                    <th style="text-align:center; padding-right:20px;">Status</th>
+                </tr>
+            </thead>
+            <tbody id="payrollTableBody">
+                <tr><td colspan="10" style="text-align:center; padding:30px; color:#94a3b8;">Pick a month and click Calculate.</td></tr>
+            </tbody>
+        </table>
+    </div>
+
+    <!-- 🔥 ADDED: STATUTORY PAYMENTS -->
+    <div class="card" style="padding:20px; margin-top:20px;">
+        <h3 style="margin:0 0 4px 0;"><i class="fa-solid fa-landmark" style="color:#8b5cf6;"></i> Statutory Payments</h3>
+        <p style="color:#64748b; font-size:0.8rem; margin-top:0; margin-bottom:15px;">
+            What's currently owed, across all months, based on payroll runs vs. what's already been paid to each authority.
+        </p>
+        <div id="statutoryPaymentsGrid" style="display:grid; grid-template-columns:repeat(3,1fr); gap:15px;">
+            <div style="text-align:center; padding:20px; color:#94a3b8;"><i class="fa-solid fa-spinner fa-spin"></i> Loading...</div>
+        </div>
+    </div>
+</div>
+
+<!-- PAY STATUTORY MODAL -->
+<div id="payStatutoryModal" style="display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(15,23,42,0.6); backdrop-filter:blur(4px); z-index:1000; justify-content:center; align-items:center;">
+    <div style="background:white; padding:25px; border-radius:12px; width:90%; max-width:420px;">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:16px; border-bottom:1px solid #e2e8f0; padding-bottom:12px;">
+            <h4 id="payStatutoryTitle" style="margin:0;"><i class="fa-solid fa-landmark" style="color:#8b5cf6;"></i> Pay</h4>
+            <button onclick="document.getElementById('payStatutoryModal').style.display='none'" style="background:none; border:none; font-size:1.4rem; cursor:pointer; color:#94a3b8;">&times;</button>
+        </div>
+        <div style="margin-bottom:16px;">
+            <label style="display:block; font-weight:500; color:#475569; margin-bottom:4px; font-size:0.85rem;">Amount to Pay (ZMW) *</label>
+            <input type="number" id="statutoryPayAmount" step="0.01" min="0.01" required style="width:100%; padding:8px 10px; border:1px solid #e2e8f0; border-radius:6px;">
+            <small id="statutoryOutstandingNote" style="display:block; color:#94a3b8; font-size:0.75rem; margin-top:4px;"></small>
+        </div>
+        <div style="margin-bottom:16px;">
+            <label style="display:block; font-weight:500; color:#475569; margin-bottom:4px; font-size:0.85rem;">Pay From *</label>
+            <select id="statutoryPayFrom" required style="width:100%; padding:8px 10px; border:1px solid #e2e8f0; border-radius:6px;">
+                <option value="1111">Cash in Hand (ZMW)</option>
+                <option value="1121">Bank (ZMW)</option>
+            </select>
+        </div>
+        <div style="display:flex; gap:10px; justify-content:flex-end;">
+            <button type="button" onclick="document.getElementById('payStatutoryModal').style.display='none'" style="background:white; border:1px solid #e2e8f0; padding:8px 20px; border-radius:6px; cursor:pointer;">Cancel</button>
+            <button id="confirmStatutoryPayBtn" class="btn btn-success" onclick="confirmStatutoryPayment()">
+                <i class="fa-solid fa-check"></i> Confirm Payment
+            </button>
+        </div>
+    </div>
+</div>
+
+<!-- PAY CONFIRMATION MODAL -->
+<div id="payConfirmModal" style="display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(15,23,42,0.6); backdrop-filter:blur(4px); z-index:1000; justify-content:center; align-items:center;">
+    <div style="background:white; padding:25px; border-radius:12px; width:90%; max-width:480px;">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:16px; border-bottom:1px solid #e2e8f0; padding-bottom:12px;">
+            <h4 id="payConfirmTitle" style="margin:0;"><i class="fa-solid fa-money-check-dollar" style="color:#059669;"></i> Pay Employee</h4>
+            <button onclick="document.getElementById('payConfirmModal').style.display='none'" style="background:none; border:none; font-size:1.4rem; cursor:pointer; color:#94a3b8;">&times;</button>
+        </div>
+        <div id="payConfirmBreakdown" style="margin-bottom:16px; font-size:0.85rem;"></div>
+        <!-- 🔥 ADDED: Advance Deduction -->
+        <div id="payAdvanceSection" style="display:none; margin-bottom:16px; padding:10px 12px; background:#fef3c7; border-radius:6px;">
+            <label style="display:block; font-weight:500; color:#92400e; margin-bottom:4px; font-size:0.85rem;">
+                <i class="fa-solid fa-hand-holding-dollar"></i> Deduct from Advance (optional)
+            </label>
+            <input type="number" id="payAdvanceDeduction" step="0.01" min="0" value="0" style="width:100%; padding:8px 10px; border:1px solid #e2e8f0; border-radius:6px;">
+            <small id="payAdvanceOutstandingNote" style="display:block; color:#92400e; font-size:0.75rem; margin-top:4px;"></small>
+        </div>
+        <div style="margin-bottom:16px;">
+            <label style="display:block; font-weight:500; color:#475569; margin-bottom:4px; font-size:0.85rem;">Pay From *</label>
+            <select id="payFromAccount" required style="width:100%; padding:8px 10px; border:1px solid #e2e8f0; border-radius:6px;">
+                <option value="1111">Cash in Hand (ZMW)</option>
+                <option value="1121">Bank (ZMW)</option>
+            </select>
+        </div>
+        <div style="display:flex; gap:10px; justify-content:flex-end;">
+            <button type="button" onclick="document.getElementById('payConfirmModal').style.display='none'" style="background:white; border:1px solid #e2e8f0; padding:8px 20px; border-radius:6px; cursor:pointer;">Cancel</button>
+            <button id="confirmPayBtn" class="btn btn-success" onclick="confirmPayEmployee()">
+                <i class="fa-solid fa-check"></i> Confirm Payment
+            </button>
+        </div>
+    </div>
+</div>
+
+<script>
+    document.dispatchEvent(new Event('loadModuleComplete'));
+</script>

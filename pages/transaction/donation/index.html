@@ -1,0 +1,138 @@
+<div id="donationPosContainer">
+    <!-- Top Bar - Compact -->
+    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; padding: 8px 15px; background: white; border-radius: 8px; border: 1px solid #e2e8f0; flex-wrap: wrap; gap: 5px;">
+        <div style="display: flex; align-items: center; gap: 10px;">
+            <button id="toggleSidebarBtn" style="background: none; border: none; font-size: 1.2rem; cursor: pointer; color: #475569; padding: 3px;">
+                <i class="fa-solid fa-bars"></i>
+            </button>
+            <span style="font-weight: 600; color: #0f172a; font-size: 0.9rem;">Donation</span>
+            <span id="donationIdDisplay" style="font-weight: bold; color: #0f172a; font-size: 0.85rem; background: #f1f5f9; padding: 2px 10px; border-radius: 4px;">DON-2026-0001</span>
+        </div>
+        <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
+            <span style="font-size: 0.75rem; color: #64748b;">
+                <kbd style="background: #e2e8f0; padding: 1px 6px; border-radius: 3px; font-size: 0.7rem;">Ctrl+S</kbd> Save
+            </span>
+            <span style="font-size: 0.75rem; color: #64748b;">
+                <kbd style="background: #e2e8f0; padding: 1px 6px; border-radius: 3px; font-size: 0.7rem;">Ctrl+R</kbd> Reset
+            </span>
+        </div>
+    </div>
+
+    <!-- Main Content -->
+    <div style="display: flex; gap: 15px;">
+        <!-- Left: Donation Form -->
+        <div style="flex: 2; min-width: 0;">
+            <div class="card" style="padding: 12px;">
+                
+                <!-- Invoice Header - Compact 3 columns -->
+                <div style="display: grid; grid-template-columns: 1.2fr 1fr 0.8fr; gap: 12px; margin-bottom: 10px; background: #f8fafc; padding: 8px 12px; border-radius: 4px; border: 1px solid #e2e8f0;">
+                    <div>
+                        <label style="display: block; font-weight: 500; color: #475569; margin-bottom: 2px; font-size: 0.75rem;">Donation #</label>
+                        <input type="text" id="donationNumber" readonly style="width: 100%; padding: 4px 8px; border: 1px solid #e2e8f0; border-radius: 4px; background: #f1f5f9; font-weight: 600; color: #0f172a; font-size: 0.85rem;">
+                    </div>
+                    <div>
+                        <label style="display: block; font-weight: 500; color: #475569; margin-bottom: 2px; font-size: 0.75rem;">Date & Time</label>
+                        <input type="text" id="donationDateTime" readonly style="width: 100%; padding: 4px 8px; border: 1px solid #e2e8f0; border-radius: 4px; background: #f1f5f9; font-size: 0.8rem;">
+                    </div>
+                    <div>
+                        <label style="display: block; font-weight: 500; color: #475569; margin-bottom: 2px; font-size: 0.75rem;">Payment</label>
+                        <select id="donationPaymentType" style="width: 100%; padding: 4px 8px; border: 1px solid #e2e8f0; border-radius: 4px; background: white; font-size: 0.8rem;">
+                            <option value="Donation">Donation</option>
+                            <option value="Cash">Cash</option>
+                            <option value="Airtel Money">Airtel Money</option>
+                            <option value="Bank Transfer">Bank Transfer</option>
+                        </select>
+                    </div>
+                </div>
+
+                <!-- Customer Details -->
+                <div id="donationCustomerSection" style="border: 1px solid #e2e8f0; padding: 8px 12px; border-radius: 4px; margin-bottom: 8px; background: #f8fafc;">
+                    <span style="font-weight: 500; color: #0f172a; font-size: 0.8rem; display: block; margin-bottom: 6px;">Donee Details</span>
+                    
+                    <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px;">
+                        <div>
+                            <label style="display: block; font-weight: 500; color: #475569; margin-bottom: 2px; font-size: 0.7rem;">Donee Name</label>
+                            <input type="text" id="doneeName" placeholder="Enter donee name" style="width: 100%; padding: 4px 8px; border: 1px solid #e2e8f0; border-radius: 4px; background: white; font-size: 0.8rem;">
+                        </div>
+                        <div>
+                            <label style="display: block; font-weight: 500; color: #475569; margin-bottom: 2px; font-size: 0.7rem;">Contact Number</label>
+                            <input type="text" id="doneeContact" placeholder="Enter phone number" style="width: 100%; padding: 4px 8px; border: 1px solid #e2e8f0; border-radius: 4px; background: white; font-size: 0.8rem;">
+                        </div>
+                        <div>
+                            <label style="display: block; font-weight: 500; color: #475569; margin-bottom: 2px; font-size: 0.7rem;">Address</label>
+                            <input type="text" id="doneeAddress" placeholder="Enter address" style="width: 100%; padding: 4px 8px; border: 1px solid #e2e8f0; border-radius: 4px; background: white; font-size: 0.8rem;">
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Item Table -->
+                <div style="border: 1px solid #e2e8f0; border-radius: 4px; overflow-x: auto;">
+                    <table class="table-minimal" id="donationPosTable" style="min-width: 700px; width: 100%; font-size: 0.8rem;">
+                        <thead style="background: #f1f5f9;">
+                            <tr>
+                                <th style="padding: 4px 6px; text-align: center; width: 5%;">✕</th>
+                                <th style="padding: 4px 6px; text-align: left; width: 35%;">Item Name</th>
+                                <th style="padding: 4px 6px; text-align: center; width: 15%;">Pack Size</th>
+                                <th style="padding: 4px 6px; text-align: center; width: 15%;">Qty</th>
+                                <th style="padding: 4px 6px; text-align: right; width: 20%;">Total</th>
+                            </tr>
+                        </thead>
+                        <tbody id="donationPosTableBody">
+                            <tr class="donation-pos-row">
+                                <td style="padding: 2px 4px; text-align: center;">
+                                    <button class="donation-remove-btn" style="background: none; border: none; color: #ef4444; cursor: pointer; font-size: 0.9rem;">
+                                        <i class="fa-regular fa-trash-can"></i>
+                                    </button>
+                                </td>
+                                <td style="padding: 2px 4px;">
+                                    <select class="donation-pos-item" style="width: 100%; padding: 3px 6px; border: 1px solid #e2e8f0; border-radius: 3px; background: white; font-size: 0.8rem;">
+                                        <option value="">Select Item</option>
+                                    </select>
+                                </td>
+                                <td style="padding: 2px 4px;">
+                                    <input type="text" class="donation-pos-pack-size" readonly style="width: 100%; padding: 3px 6px; border: 1px solid #e2e8f0; border-radius: 3px; background: #f1f5f9; color: #64748b; text-align: center; font-size: 0.8rem;">
+                                </td>
+                                <td style="padding: 2px 4px;">
+                                    <input type="number" class="donation-pos-qty" min="1" value="1" style="width: 100%; padding: 3px 6px; border: 1px solid #e2e8f0; border-radius: 3px; background: white; text-align: center; font-size: 0.8rem;">
+                                </td>
+                                <td style="padding: 2px 4px;">
+                                    <input type="text" class="donation-pos-total" readonly style="width: 100%; padding: 3px 6px; border: 1px solid #e2e8f0; border-radius: 3px; background: #f1f5f9; color: #64748b; text-align: right; font-size: 0.8rem;" value="K0.00">
+                                </td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+
+                <!-- Note Section -->
+                <div style="margin-top: 8px;">
+                    <label style="display: block; font-weight: 500; color: #475569; margin-bottom: 2px; font-size: 0.75rem;">Note / Purpose</label>
+                    <input type="text" id="donationNote" placeholder="e.g. School supplies donation, Medical aid, etc." style="width: 100%; padding: 4px 8px; border: 1px solid #e2e8f0; border-radius: 4px; background: white; font-size: 0.8rem;">
+                </div>
+
+                <!-- Totals Section -->
+                <div style="margin-top: 8px; padding: 8px 15px; background: #f8fafc; border-radius: 4px; border: 1px solid #e2e8f0;">
+                    <div style="display: flex; justify-content: flex-end; gap: 25px; font-size: 0.85rem; flex-wrap: wrap;">
+                        <div style="text-align: right;">
+                            <span style="color: #64748b;">Total Items:</span>
+                            <span id="donationTotalItems" style="font-weight: 500; margin-left: 10px;">0</span>
+                        </div>
+                        <div style="text-align: right;">
+                            <span style="color: #0f172a; font-weight: 600;">Total Donation Value:</span>
+                            <span id="donationGrandTotal" style="font-size: 1.1rem; font-weight: bold; margin-left: 10px; color: #0f172a;">K0.00</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Buttons -->
+                <div style="margin-top: 8px; display: flex; gap: 8px; justify-content: flex-end; border-top: 1px solid #e2e8f0; padding-top: 8px; flex-wrap: wrap;">
+                    <button id="saveDonationBtn" style="background: #10b981; color: white; border: none; padding: 6px 18px; border-radius: 4px; cursor: pointer; font-size: 0.8rem;">
+                        <i class="fa-solid fa-floppy-disk"></i> Save Donation
+                    </button>
+                    <button id="clearDonationBtn" style="background: #f1f5f9; border: 1px solid #e2e8f0; padding: 6px 18px; border-radius: 4px; cursor: pointer; font-size: 0.8rem;">
+                        <i class="fa-solid fa-rotate-right"></i> Reset
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>

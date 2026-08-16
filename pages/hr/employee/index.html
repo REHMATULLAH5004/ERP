@@ -1,0 +1,424 @@
+<div class="module-view-container">
+    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
+        <h3 style="margin: 0;">Employee Management</h3>
+        <button id="addEmployeeBtn" style="background: #2563eb; color: white; border: none; padding: 10px 20px; border-radius: 6px; cursor: pointer;">
+            <i class="fa-solid fa-user-plus"></i> Add Employee
+        </button>
+    </div>
+    
+    <div style="display: flex; gap: 15px; margin-bottom: 20px;">
+        <input type="text" id="searchEmployee" placeholder="Search employees..." style="flex: 1; padding: 10px; border: 1px solid #e2e8f0; border-radius: 6px;">
+        <select id="deptFilter" style="padding: 10px; border: 1px solid #e2e8f0; border-radius: 6px; background: white;">
+            <option value="">All Departments</option>
+        </select>
+    </div>
+
+    <div class="card" style="padding: 0;">
+        <table class="table-minimal" id="employeeTable">
+            <thead>
+                <tr>
+                    <th style="padding-left: 20px;">Employee</th>
+                    <th>Department</th>
+                    <th>Position</th>
+                    <th>Status</th>
+                    <th style="padding-right: 20px; text-align: right;">Actions</th>
+                </tr>
+            </thead>
+            <tbody id="employeeTableBody">
+                <tr>
+                    <td colspan="5" style="text-align: center; padding: 30px; color: #94a3b8;">
+                        <i class="fa-solid fa-spinner fa-spin"></i> Loading employees...
+                    </td>
+                </tr>
+            </tbody>
+        </table>
+    </div>
+</div>
+
+<!-- ============================================ -->
+<!-- ADD / EDIT EMPLOYEE MODAL -->
+<!-- ============================================ -->
+<div id="employeeModal" style="display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(15, 23, 42, 0.6); backdrop-filter: blur(4px); z-index: 1000; justify-content: center; align-items: center; overflow-y: auto;">
+    <div style="background: white; padding: 30px; border-radius: 12px; width: 90%; max-width: 900px; max-height: 90vh; overflow-y: auto; box-shadow: 0 20px 50px rgba(0,0,0,0.5);">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; border-bottom: 1px solid #e2e8f0; padding-bottom: 15px;">
+            <h3 id="employeeModalTitle" style="margin: 0;"><i class="fa-solid fa-user" style="color: #2563eb;"></i> Add New Employee</h3>
+            <button id="closeEmployeeModalBtn" style="background: none; border: none; font-size: 1.5rem; cursor: pointer; color: #64748b;">&times;</button>
+        </div>
+
+        <form id="employeeForm">
+            <input type="hidden" id="editEmployeeId" value="">
+            
+            <h4 style="margin: 0 0 15px 0; color: #0f172a; border-bottom: 1px solid #e2e8f0; padding-bottom: 8px;">Personal Information</h4>
+            <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 15px; margin-bottom: 15px;">
+                <div>
+                    <label style="display: block; font-weight: 500; color: #475569; margin-bottom: 3px; font-size: 0.85rem;">First Name *</label>
+                    <input type="text" id="empFirstName" required style="width: 100%; padding: 8px; border: 1px solid #e2e8f0; border-radius: 4px;">
+                </div>
+                <div>
+                    <label style="display: block; font-weight: 500; color: #475569; margin-bottom: 3px; font-size: 0.85rem;">Middle Name</label>
+                    <input type="text" id="empMiddleName" style="width: 100%; padding: 8px; border: 1px solid #e2e8f0; border-radius: 4px;">
+                </div>
+                <div>
+                    <label style="display: block; font-weight: 500; color: #475569; margin-bottom: 3px; font-size: 0.85rem;">Last Name *</label>
+                    <input type="text" id="empLastName" required style="width: 100%; padding: 8px; border: 1px solid #e2e8f0; border-radius: 4px;">
+                </div>
+                <div>
+                    <label style="display: block; font-weight: 500; color: #475569; margin-bottom: 3px; font-size: 0.85rem;">Gender *</label>
+                    <select id="empGender" required style="width: 100%; padding: 8px; border: 1px solid #e2e8f0; border-radius: 4px; background: white;">
+                        <option value="">Select</option>
+                        <option value="Male">Male</option>
+                        <option value="Female">Female</option>
+                        <option value="Other">Other</option>
+                    </select>
+                </div>
+                <div>
+                    <label style="display: block; font-weight: 500; color: #475569; margin-bottom: 3px; font-size: 0.85rem;">Date of Birth *</label>
+                    <input type="date" id="empDob" required style="width: 100%; padding: 8px; border: 1px solid #e2e8f0; border-radius: 4px;">
+                </div>
+                <div>
+                    <label style="display: block; font-weight: 500; color: #475569; margin-bottom: 3px; font-size: 0.85rem;">Nationality *</label>
+                    <input type="text" id="empNationality" required style="width: 100%; padding: 8px; border: 1px solid #e2e8f0; border-radius: 4px;">
+                </div>
+                <div>
+                    <label style="display: block; font-weight: 500; color: #475569; margin-bottom: 3px; font-size: 0.85rem;">NRC / Passport *</label>
+                    <input type="text" id="empNrc" required placeholder="e.g. 123456/78/9" style="width: 100%; padding: 8px; border: 1px solid #e2e8f0; border-radius: 4px;">
+                </div>
+                <div>
+                    <label style="display: block; font-weight: 500; color: #475569; margin-bottom: 3px; font-size: 0.85rem;">Marital Status</label>
+                    <select id="empMarital" style="width: 100%; padding: 8px; border: 1px solid #e2e8f0; border-radius: 4px; background: white;">
+                        <option value="">Select</option>
+                        <option value="Single">Single</option>
+                        <option value="Married">Married</option>
+                        <option value="Divorced">Divorced</option>
+                    </select>
+                </div>
+                <div>
+                    <label style="display: block; font-weight: 500; color: #475569; margin-bottom: 3px; font-size: 0.85rem;">Phone *</label>
+                    <input type="text" id="empPhone" required placeholder="097..." style="width: 100%; padding: 8px; border: 1px solid #e2e8f0; border-radius: 4px;">
+                </div>
+                <div style="grid-column: span 2;">
+                    <label style="display: block; font-weight: 500; color: #475569; margin-bottom: 3px; font-size: 0.85rem;">Email</label>
+                    <input type="email" id="empEmail" placeholder="name@example.com" style="width: 100%; padding: 8px; border: 1px solid #e2e8f0; border-radius: 4px;">
+                </div>
+                <div style="grid-column: span 3;">
+                    <label style="display: block; font-weight: 500; color: #475569; margin-bottom: 3px; font-size: 0.85rem;">Residential Address *</label>
+                    <input type="text" id="empAddress" required style="width: 100%; padding: 8px; border: 1px solid #e2e8f0; border-radius: 4px;">
+                </div>
+            </div>
+
+            <h4 style="margin: 15px 0 15px 0; color: #0f172a; border-bottom: 1px solid #e2e8f0; padding-bottom: 8px;">Emergency Contact</h4>
+            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 15px; margin-bottom: 15px;">
+                <div>
+                    <label style="display: block; font-weight: 500; color: #475569; margin-bottom: 3px; font-size: 0.85rem;">Contact Name *</label>
+                    <input type="text" id="empEmergName" required style="width: 100%; padding: 8px; border: 1px solid #e2e8f0; border-radius: 4px;">
+                </div>
+                <div>
+                    <label style="display: block; font-weight: 500; color: #475569; margin-bottom: 3px; font-size: 0.85rem;">Contact Phone *</label>
+                    <input type="text" id="empEmergPhone" required style="width: 100%; padding: 8px; border: 1px solid #e2e8f0; border-radius: 4px;">
+                </div>
+            </div>
+
+            <h4 style="margin: 15px 0 15px 0; color: #0f172a; border-bottom: 1px solid #e2e8f0; padding-bottom: 8px;">Employment Details</h4>
+            <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 15px; margin-bottom: 15px;">
+                <div>
+                    <label style="display: block; font-weight: 500; color: #475569; margin-bottom: 3px; font-size: 0.85rem;">Department *</label>
+                    <select id="empDepartment" required style="width: 100%; padding: 8px; border: 1px solid #e2e8f0; border-radius: 4px; background: white;">
+                        <option value="">Select Department</option>
+                        <option value="Pharmacy">Pharmacy</option>
+                        <option value="Sales">Sales</option>
+                        <option value="IT">IT</option>
+                        <option value="HR">HR</option>
+                        <option value="Accounts">Accounts</option>
+                    </select>
+                </div>
+                <div>
+                    <label style="display: block; font-weight: 500; color: #475569; margin-bottom: 3px; font-size: 0.85rem;">Designation *</label>
+                    <input type="text" id="empDesignation" required placeholder="e.g. Pharmacist" style="width: 100%; padding: 8px; border: 1px solid #e2e8f0; border-radius: 4px;">
+                </div>
+                <div>
+                    <label style="display: block; font-weight: 500; color: #475569; margin-bottom: 3px; font-size: 0.85rem;">Employment Type *</label>
+                    <select id="empType" required style="width: 100%; padding: 8px; border: 1px solid #e2e8f0; border-radius: 4px; background: white;">
+                        <option value="">Select Type</option>
+                        <option value="Permanent">Permanent</option>
+                        <option value="Contract">Contract</option>
+                        <option value="Probation">Probation</option>
+                    </select>
+                </div>
+                <div>
+                    <label style="display: block; font-weight: 500; color: #475569; margin-bottom: 3px; font-size: 0.85rem;">Joining Date *</label>
+                    <input type="date" id="empJoiningDate" required style="width: 100%; padding: 8px; border: 1px solid #e2e8f0; border-radius: 4px;">
+                </div>
+
+                <!-- 🔥 ADDED: Pay Category -- explicit field, no longer
+                     inferred from the schedule's name. Fixed employees
+                     are unaffected by leave/overtime; Regular employees'
+                     pay is affected by both. -->
+                <div>
+                    <label style="display: block; font-weight: 500; color: #475569; margin-bottom: 3px; font-size: 0.85rem;">Pay Category *</label>
+                    <select id="empPayCategory" required style="width: 100%; padding: 8px; border: 1px solid #e2e8f0; border-radius: 4px; background: white;">
+                        <option value="">Select</option>
+                        <option value="Fixed">Fixed (leave/overtime do not affect salary)</option>
+                        <option value="Regular">Regular (leave/overtime affect salary)</option>
+                    </select>
+                </div>
+
+                <!-- 🔥 ADDED: Weekly Off Day -->
+                <div>
+                    <label style="display: block; font-weight: 500; color: #475569; margin-bottom: 3px; font-size: 0.85rem;">Weekly Off Day *</label>
+                    <select id="empWeeklyOffDay" required style="width: 100%; padding: 8px; border: 1px solid #e2e8f0; border-radius: 4px; background: white;">
+                        <option value="">Select Day</option>
+                        <option value="Sunday">Sunday</option>
+                        <option value="Monday">Monday</option>
+                        <option value="Tuesday">Tuesday</option>
+                        <option value="Wednesday">Wednesday</option>
+                        <option value="Thursday">Thursday</option>
+                        <option value="Friday">Friday</option>
+                        <option value="Saturday">Saturday</option>
+                    </select>
+                </div>
+
+                <!-- ========================================== -->
+                <!-- LEAVE SETTINGS -->
+                <!-- ========================================== -->
+                <div>
+                    <label style="display: block; font-weight: 500; color: #475569; margin-bottom: 3px; font-size: 0.85rem;">Annual Leave Entitlement (Days)</label>
+                    <input type="number" id="empAnnualLeave" value="20" min="0" style="width: 100%; padding: 8px; border: 1px solid #e2e8f0; border-radius: 4px;">
+                </div>
+
+            </div>
+
+            <!-- 🔥 ADDED: Basic Pay -- needed for payroll (PAYE/NAPSA/
+                 NHIMA, overtime, leave deductions). Previously no salary
+                 field existed anywhere in this system. -->
+            <h4 style="margin: 15px 0 15px 0; color: #0f172a; border-bottom: 1px solid #e2e8f0; padding-bottom: 8px;">Salary</h4>
+            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 15px; margin-bottom: 15px;">
+                <div>
+                    <label style="display: block; font-weight: 500; color: #475569; margin-bottom: 3px; font-size: 0.85rem;">Basic Pay (ZMW/month) *</label>
+                    <input type="number" id="empBasicPay" step="0.01" min="0" required style="width: 100%; padding: 8px; border: 1px solid #e2e8f0; border-radius: 4px;">
+                </div>
+                <div>
+                    <label style="display: block; font-weight: 500; color: #475569; margin-bottom: 3px; font-size: 0.85rem;">Allowances (ZMW/month)</label>
+                    <input type="number" id="empAllowances" step="0.01" min="0" value="0" style="width: 100%; padding: 8px; border: 1px solid #e2e8f0; border-radius: 4px;">
+                    <small style="display:block; color:#94a3b8; font-size:0.75rem; margin-top:2px;">Included in Gross &amp; PAYE/NAPSA, excluded from NHIMA</small>
+                </div>
+            </div>
+
+            <!-- 🔥 ADDED: Opening Advance -- one-time entry when
+                 onboarding an employee who already has an outstanding
+                 advance, matching the same opening-balance pattern used
+                 for suppliers elsewhere in this system. Posts to the
+                 ledger on creation; editing the value later does not
+                 re-post (same convention as suppliers). -->
+            <h4 style="margin: 15px 0 15px 0; color: #0f172a; border-bottom: 1px solid #e2e8f0; padding-bottom: 8px;">Opening Advance</h4>
+            <div style="display: grid; grid-template-columns: 1fr 2fr; gap: 15px; margin-bottom: 15px;">
+                <div>
+                    <label style="display: block; font-weight: 500; color: #475569; margin-bottom: 3px; font-size: 0.85rem;">Opening Advance (ZMW)</label>
+                    <input type="number" id="empOpeningAdvance" step="0.01" min="0" value="0" style="width: 100%; padding: 8px; border: 1px solid #e2e8f0; border-radius: 4px;">
+                </div>
+                <div style="display:flex;align-items:flex-end;padding-bottom:8px;color:#64748b;font-size:0.8rem;">
+                    Only used when adding a new employee who already has an outstanding advance. Leave at 0 otherwise.
+                </div>
+            </div>
+
+            <div style="margin-top: 20px; display: flex; gap: 10px; justify-content: flex-end; border-top: 1px solid #e2e8f0; padding-top: 20px;">
+                <button type="button" id="cancelEmployeeModalBtn" style="background: white; border: 1px solid #e2e8f0; padding: 8px 20px; border-radius: 6px; cursor: pointer;">Cancel</button>
+                <button type="submit" id="saveEmployeeBtn" style="background: #2563eb; color: white; border: none; padding: 8px 20px; border-radius: 6px; cursor: pointer;">
+                    <i class="fa-solid fa-floppy-disk"></i> Save Employee
+                </button>
+            </div>
+        </form>
+    </div>
+</div>
+<style>
+    /* ============================================ */
+    /* EMPLOYEE MODAL STYLES - CLEAN & PROFESSIONAL */
+    /* ============================================ */
+
+    /* Modal Overlay */
+    #employeeModal {
+        position: fixed;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        background: rgba(15, 23, 42, 0.6);
+        backdrop-filter: blur(4px);
+        z-index: 1050;
+        display: none;
+        justify-content: center;
+        align-items: center;
+        overflow-y: auto;
+        padding: 20px;
+    }
+
+    /* Modal Box */
+    #employeeModal > div {
+        background: #ffffff;
+        padding: 25px 30px 30px 30px;
+        border-radius: 16px;
+        width: 100%;
+        max-width: 920px;
+        max-height: 90vh;
+        overflow-y: auto;
+        box-shadow: 0 20px 60px rgba(0, 0, 0, 0.25);
+        animation: fadeSlideIn 0.25s ease;
+    }
+
+    @keyframes fadeSlideIn {
+        from { opacity: 0; transform: translateY(-20px) scale(0.98); }
+        to { opacity: 1; transform: translateY(0) scale(1); }
+    }
+
+    /* Modal Header */
+    #employeeModal .modal-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 20px;
+        border-bottom: 1px solid #e2e8f0;
+        padding-bottom: 15px;
+    }
+
+    #employeeModal .modal-header h3 {
+        margin: 0;
+        font-size: 1.25rem;
+        color: #0f172a;
+    }
+
+    #employeeModal .modal-header #closeEmployeeModalBtn {
+        background: none;
+        border: none;
+        font-size: 1.75rem;
+        cursor: pointer;
+        color: #64748b;
+        transition: color 0.2s;
+        line-height: 1;
+    }
+    #employeeModal .modal-header #closeEmployeeModalBtn:hover {
+        color: #ef4444;
+    }
+
+    /* Form Layout */
+    #employeeForm h4 {
+        margin: 20px 0 12px 0;
+        color: #0f172a;
+        font-size: 1rem;
+        border-bottom: 1px solid #e2e8f0;
+        padding-bottom: 8px;
+    }
+
+    #employeeForm .form-grid-3 {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 15px;
+        margin-bottom: 15px;
+    }
+
+    #employeeForm .form-grid-2 {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 15px;
+        margin-bottom: 15px;
+    }
+
+    #employeeForm .form-group {
+        display: flex;
+        flex-direction: column;
+    }
+
+    #employeeForm .form-group label {
+        font-weight: 500;
+        color: #475569;
+        margin-bottom: 4px;
+        font-size: 0.82rem;
+        letter-spacing: 0.01em;
+    }
+
+    #employeeForm .form-group input,
+    #employeeForm .form-group select {
+        width: 100%;
+        padding: 8px 10px;
+        border: 1px solid #d1d5db;
+        border-radius: 6px;
+        background: white;
+        font-size: 0.9rem;
+        color: #0f172a;
+        transition: border-color 0.2s;
+    }
+
+    #employeeForm .form-group input:focus,
+    #employeeForm .form-group select:focus {
+        outline: none;
+        border-color: #2563eb;
+        box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.15);
+    }
+
+    #employeeForm .form-group input:read-only {
+        background: #f1f5f9;
+        color: #64748b;
+        cursor: not-allowed;
+    }
+
+    /* Spanning full width */
+    #employeeForm .col-span-2 { grid-column: span 2; }
+    #employeeForm .col-span-3 { grid-column: span 3; }
+
+    /* Modal Footer */
+    #employeeForm .modal-footer {
+        margin-top: 25px;
+        display: flex;
+        justify-content: flex-end;
+        gap: 12px;
+        border-top: 1px solid #e2e8f0;
+        padding-top: 20px;
+    }
+
+    #employeeForm .modal-footer .btn-cancel {
+        background: white;
+        border: 1px solid #d1d5db;
+        padding: 10px 24px;
+        border-radius: 6px;
+        cursor: pointer;
+        font-size: 0.9rem;
+        color: #475569;
+        transition: background 0.2s;
+    }
+    #employeeForm .modal-footer .btn-cancel:hover {
+        background: #f1f5f9;
+    }
+
+    #employeeForm .modal-footer .btn-save {
+        background: #2563eb;
+        color: white;
+        border: none;
+        padding: 10px 24px;
+        border-radius: 6px;
+        cursor: pointer;
+        font-size: 0.9rem;
+        font-weight: 500;
+        transition: background 0.2s;
+        display: flex;
+        align-items: center;
+        gap: 6px;
+    }
+    #employeeForm .modal-footer .btn-save:hover {
+        background: #1d4ed8;
+    }
+    #employeeForm .modal-footer .btn-save:disabled {
+        background: #93c5fd;
+        cursor: not-allowed;
+    }
+
+    /* Responsive tweaks */
+    @media (max-width: 768px) {
+        #employeeForm .form-grid-3 { grid-template-columns: 1fr; }
+        #employeeForm .form-grid-2 { grid-template-columns: 1fr; }
+        #employeeForm .col-span-2, 
+        #employeeForm .col-span-3 { grid-column: span 1; }
+        #employeeModal > div { padding: 20px; }
+    }
+</style>
+
+<script>
+    document.dispatchEvent(new Event('loadModuleComplete'));
+</script>

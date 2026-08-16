@@ -1,0 +1,595 @@
+<!-- ============================================ -->
+<!-- EXPENSE MANAGEMENT MODULE -->
+<!-- ============================================ -->
+
+<div class="module-view-container">
+    <!-- Header -->
+    <div class="expense-header">
+        <div class="expense-header-left">
+            <h3><i class="fa-solid fa-receipt"></i> Expense Management</h3>
+            <span class="expense-count" id="expenseCount">0 expenses</span>
+        </div>
+        <div class="expense-header-actions">
+            <button class="btn btn-primary" onclick="openNewExpense()">
+                <i class="fa-solid fa-plus"></i> New Expense
+            </button>
+            <button class="btn btn-outline" onclick="refreshExpenseData()">
+                <i class="fa-solid fa-rotate"></i> Refresh
+            </button>
+        </div>
+    </div>
+
+    <!-- Stats Cards -->
+    <div class="expense-stats">
+        <div class="stat-card" style="border-left: 4px solid #2563eb;">
+            <h4>Total Expenses</h4>
+            <p id="totalExpenses">ZK 0.00</p>
+        </div>
+        <div class="stat-card" style="border-left: 4px solid #f59e0b;">
+            <h4>This Month</h4>
+            <p id="monthExpenses">ZK 0.00</p>
+        </div>
+        <div class="stat-card" style="border-left: 4px solid #10b981;">
+            <h4>This Week</h4>
+            <p id="weekExpenses">ZK 0.00</p>
+        </div>
+        <div class="stat-card" style="border-left: 4px solid #8b5cf6;">
+            <h4>Today</h4>
+            <p id="todayExpenses">ZK 0.00</p>
+        </div>
+    </div>
+
+    <!-- Filters -->
+    <div class="expense-filters">
+        <div class="filter-group">
+            <input type="text" class="form-control" id="searchExpense" placeholder="Search description..." style="min-width: 200px;">
+            <select class="form-control" id="expenseCategoryFilter">
+                <option value="all">All Categories</option>
+                <option value="Administrative">📋 Administrative</option>
+                <option value="Utilities">💡 Utilities</option>
+                <option value="Rent">🏢 Rent</option>
+                <option value="Salaries">👨‍💼 Salaries & Wages</option>
+                <option value="Office Supplies">📎 Office Supplies</option>
+                <option value="Maintenance">🔧 Maintenance</option>
+                <option value="Transport">🚗 Transport</option>
+                <option value="Marketing">📢 Marketing</option>
+                <option value="Insurance">🛡️ Insurance</option>
+                <option value="Licenses">📜 Licenses & Permits</option>
+                <option value="Professional Fees">⚖️ Professional Fees</option>
+                <option value="Bank Charges">🏦 Bank Charges</option>
+                <option value="Taxes">💰 Taxes</option>
+                <option value="Other">📦 Other</option>
+            </select>
+            <select class="form-control" id="expenseAccountFilter">
+                <option value="all">All Accounts</option>
+                <option value="Cash in Hand">💰 Cash in Hand</option>
+                <option value="Bank (ZMW)">🏦 Bank (ZMW)</option>
+            </select>
+            <input type="date" class="form-control" id="expenseStartDate" style="min-width: 140px;">
+            <input type="date" class="form-control" id="expenseEndDate" style="min-width: 140px;">
+            <button class="btn btn-sm btn-primary" onclick="applyExpenseFilters()">
+                <i class="fa-solid fa-filter"></i> Apply
+            </button>
+        </div>
+    </div>
+
+    <!-- Expense List -->
+    <div class="card expense-list-card">
+        <div class="card-header">
+            <span><i class="fa-regular fa-clock"></i> Expense History</span>
+            <span class="expense-count" id="expenseListCount">0 expenses</span>
+        </div>
+        <div class="table-responsive">
+            <table class="table-minimal" id="expenseTable">
+                <thead>
+                    <tr>
+                        <th style="padding-left: 20px;">Date</th>
+                        <th>Account</th>
+                        <th>Category</th>
+                        <th>Description</th>
+                        <th>Reference</th>
+                        <th style="text-align: right;">Amount</th>
+                        <th style="padding-right: 20px; text-align: center;">Actions</th>
+                    </tr>
+                </thead>
+                <tbody id="expenseTableBody">
+                    <tr>
+                        <td colspan="7" style="text-align: center; padding: 40px; color: #94a3b8;">
+                            <i class="fa-solid fa-spinner fa-spin"></i> Loading expenses...
+                        </td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+<!-- ============================================================ -->
+<!-- NEW EXPENSE MODAL -->
+<!-- ============================================================ -->
+<div class="modal" id="expenseModal">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h4 id="expenseModalTitle"><i class="fa-solid fa-plus"></i> New Expense</h4>
+                <button class="modal-close" onclick="closeModal('expenseModal')">&times;</button>
+            </div>
+            <div class="modal-body">
+                <form id="expenseForm">
+                    <input type="hidden" id="editExpenseId" value="">
+
+                    <!-- Account Selection -->
+                    <div class="form-group">
+                        <label class="required">Payment From</label>
+                        <select class="form-control" id="expenseAccount" required>
+                            <option value="">Select Account</option>
+                            <option value="Cash in Hand">💰 Cash in Hand (ZMW)</option>
+                            <option value="Bank (ZMW)">🏦 Bank (ZMW)</option>
+                        </select>
+                    </div>
+
+                    <!-- Expense Category -->
+                    <div class="form-group">
+                        <label class="required">Expense Category</label>
+                        <select class="form-control" id="expenseCategory" required>
+                            <option value="">Select Category</option>
+                            <option value="Administrative">📋 Administrative</option>
+                            <option value="Utilities">💡 Utilities (Electricity, Water, Internet)</option>
+                            <option value="Rent">🏢 Rent</option>
+                            <option value="Salaries">👨‍💼 Salaries & Wages</option>
+                            <option value="Office Supplies">📎 Office Supplies</option>
+                            <option value="Maintenance">🔧 Maintenance & Repairs</option>
+                            <option value="Transport">🚗 Transport & Fuel</option>
+                            <option value="Marketing">📢 Marketing & Advertising</option>
+                            <option value="Insurance">🛡️ Insurance</option>
+                            <option value="Licenses">📜 Licenses & Permits</option>
+                            <option value="Professional Fees">⚖️ Professional Fees</option>
+                            <option value="Bank Charges">🏦 Bank Charges</option>
+                            <option value="Taxes">💰 Taxes</option>
+                            <option value="Other">📦 Other</option>
+                        </select>
+                    </div>
+
+                    <!-- Amount -->
+                    <div class="form-group">
+                        <label class="required">Amount</label>
+                        <div style="display: flex; gap: 10px; align-items: center;">
+                            <input type="number" class="form-control" id="expenseAmount" step="0.01" min="0.01" required placeholder="0.00" style="flex: 1;">
+                            <span id="expenseCurrencySymbol" style="font-weight: 600; color: #2563eb; min-width: 30px;">ZK</span>
+                        </div>
+                    </div>
+
+                    <!-- Description -->
+                    <div class="form-group">
+                        <label class="required">Description</label>
+                        <input type="text" class="form-control" id="expenseDescription" required placeholder="e.g. Office stationery, Electricity bill, etc.">
+                    </div>
+
+                    <!-- Reference -->
+                    <div class="form-group">
+                        <label>Reference Number</label>
+                        <input type="text" class="form-control" id="expenseReference" placeholder="e.g. Receipt #, Invoice #">
+                    </div>
+
+                    <!-- Date -->
+                    <div class="form-group">
+                        <label class="required">Expense Date</label>
+                        <input type="date" class="form-control" id="expenseDate" required>
+                    </div>
+
+                    <!-- Notes -->
+                    <div class="form-group">
+                        <label>Notes</label>
+                        <textarea class="form-control" id="expenseNotes" rows="2" placeholder="Additional notes..."></textarea>
+                    </div>
+
+                    <!-- Expense Summary -->
+                    <div id="expenseSummary" style="display: none; background: #fef2f2; padding: 12px 16px; border-radius: 6px; border: 1px solid #fecaca; margin-top: 10px;">
+                        <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 8px;">
+                            <i class="fa-solid fa-circle-exclamation" style="color: #dc2626;"></i>
+                            <span style="font-weight: 600; color: #dc2626;">Expense Summary</span>
+                        </div>
+                        <div style="font-size: 0.85rem; color: #475569;">
+                            <p style="margin: 0;">This will be recorded as a <strong>Payment (Expense)</strong> from:</p>
+                            <p style="margin: 5px 0 0 0;">
+                                <strong id="expenseAccountSummary">[Account]</strong> → 
+                                <span style="color: #dc2626; font-weight: 700;" id="expenseAmountSummary">ZK 0.00</span>
+                            </p>
+                            <p style="margin: 5px 0 0 0; font-size: 0.8rem; color: #64748b;">
+                                Category: <strong id="expenseCategorySummary">-</strong>
+                            </p>
+                        </div>
+                    </div>
+
+                </form>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-outline" onclick="closeModal('expenseModal')">Cancel</button>
+                <button class="btn btn-danger" onclick="saveExpense()">
+                    <i class="fa-solid fa-floppy-disk"></i> Record Expense
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- ============================================================ -->
+<!-- VIEW EXPENSE MODAL -->
+<!-- ============================================================ -->
+<div class="modal" id="viewExpenseModal">
+    <div class="modal-dialog modal-md">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h4><i class="fa-regular fa-eye"></i> Expense Details</h4>
+                <button class="modal-close" onclick="closeModal('viewExpenseModal')">&times;</button>
+            </div>
+            <div class="modal-body" id="viewExpenseContent">
+                <!-- Dynamic content -->
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-primary" onclick="printExpense()">
+                    <i class="fa-solid fa-print"></i> Print
+                </button>
+                <button class="btn btn-outline" onclick="closeModal('viewExpenseModal')">Close</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- ============================================================ -->
+<!-- EXPENSE BY CATEGORY MODAL -->
+<!-- ============================================================ -->
+<div class="modal" id="expenseCategoryModal">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h4><i class="fa-solid fa-chart-pie"></i> Expenses by Category</h4>
+                <button class="modal-close" onclick="closeModal('expenseCategoryModal')">&times;</button>
+            </div>
+            <div class="modal-body" id="expenseCategoryContent">
+                <!-- Dynamic content -->
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-outline" onclick="closeModal('expenseCategoryModal')">Close</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<style>
+.expense-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 20px;
+    flex-wrap: wrap;
+    gap: 10px;
+}
+.expense-header-left {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+.expense-header-left h3 {
+    margin: 0;
+    font-size: 1.3rem;
+    color: #1e293b;
+}
+.expense-count {
+    background: #e2e8f0;
+    color: #475569;
+    padding: 2px 10px;
+    border-radius: 12px;
+    font-size: 0.7rem;
+    font-weight: 600;
+}
+.expense-header-actions {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+}
+
+.expense-stats {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 15px;
+    margin-bottom: 20px;
+}
+@media (max-width: 768px) {
+    .expense-stats {
+        grid-template-columns: repeat(2, 1fr);
+    }
+}
+.stat-card {
+    background: white;
+    padding: 16px 20px;
+    border-radius: 8px;
+    border: 1px solid #e8edf3;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+}
+.stat-card h4 {
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: #64748b;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin: 0 0 4px 0;
+}
+.stat-card p {
+    font-size: 1.5rem;
+    font-weight: 700;
+    margin: 0;
+    color: #dc2626;
+}
+
+.expense-filters {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 16px;
+    gap: 10px;
+    flex-wrap: wrap;
+}
+.filter-group {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+    flex: 1;
+}
+
+.btn {
+    padding: 8px 16px;
+    border: none;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 0.85rem;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    transition: all 0.2s;
+}
+.btn-primary {
+    background: #2563eb;
+    color: white;
+}
+.btn-primary:hover {
+    background: #1d4ed8;
+}
+.btn-outline {
+    background: transparent;
+    color: #475569;
+    border: 1px solid #cbd5e1;
+}
+.btn-outline:hover {
+    background: #f1f5f9;
+}
+.btn-danger {
+    background: #dc2626;
+    color: white;
+}
+.btn-danger:hover {
+    background: #b91c1c;
+}
+.btn-sm {
+    padding: 6px 12px;
+    font-size: 0.75rem;
+}
+.btn-success {
+    background: #10b981;
+    color: white;
+}
+.btn-success:hover {
+    background: #059669;
+}
+
+.card {
+    background: white;
+    border-radius: 10px;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+    border: 1px solid #e8edf3;
+    overflow: hidden;
+}
+.card-header {
+    padding: 12px 20px;
+    border-bottom: 1px solid #e8edf3;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-weight: 500;
+    color: #475569;
+}
+.table-responsive {
+    overflow-x: auto;
+}
+.table-minimal {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.85rem;
+}
+.table-minimal thead th {
+    background: #f8fafc;
+    color: #475569;
+    font-weight: 600;
+    padding: 10px 12px;
+    text-align: left;
+    border-bottom: 2px solid #e2e8f0;
+}
+.table-minimal tbody td {
+    padding: 10px 12px;
+    border-bottom: 1px solid #f1f5f9;
+    vertical-align: middle;
+}
+.table-minimal tbody tr:hover {
+    background: #f8fafc;
+}
+
+.expense-type-badge {
+    padding: 3px 12px;
+    border-radius: 12px;
+    font-size: 0.7rem;
+    font-weight: 600;
+    display: inline-block;
+}
+.expense-category-badge {
+    padding: 2px 10px;
+    border-radius: 10px;
+    font-size: 0.7rem;
+    font-weight: 500;
+    display: inline-block;
+    background: #f1f5f9;
+    color: #475569;
+}
+
+.account-badge {
+    padding: 2px 10px;
+    border-radius: 10px;
+    font-size: 0.7rem;
+    font-weight: 500;
+    display: inline-block;
+}
+.account-petty-cash {
+    background: #dcfce7;
+    color: #059669;
+}
+.account-usd {
+    background: #dbeafe;
+    color: #1d4ed8;
+}
+.account-zmw {
+    background: #fef3c7;
+    color: #b45309;
+}
+
+.form-group {
+    margin-bottom: 15px;
+}
+.form-group label {
+    display: block;
+    font-weight: 500;
+    color: #475569;
+    margin-bottom: 5px;
+}
+.form-group label.required::after {
+    content: ' *';
+    color: #dc2626;
+}
+.form-control {
+    width: 100%;
+    padding: 8px 12px;
+    border: 1px solid #e2e8f0;
+    border-radius: 6px;
+    font-size: 0.85rem;
+    background: white;
+    transition: border-color 0.2s;
+}
+.form-control:focus {
+    outline: none;
+    border-color: #2563eb;
+    box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.1);
+}
+
+.modal {
+    display: none;
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: rgba(0,0,0,0.5);
+    z-index: 1000;
+    animation: modalFadeIn 0.25s ease;
+}
+.modal.show {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+@keyframes modalFadeIn {
+    from { opacity: 0; transform: scale(0.95); }
+    to { opacity: 1; transform: scale(1); }
+}
+.modal-dialog {
+    width: 95%;
+    max-width: 700px;
+    max-height: 90vh;
+    display: flex;
+    flex-direction: column;
+}
+.modal-lg {
+    max-width: 900px;
+}
+.modal-md {
+    max-width: 600px;
+}
+.modal-content {
+    background: white;
+    border-radius: 12px;
+    display: flex;
+    flex-direction: column;
+    max-height: 90vh;
+    overflow: hidden;
+}
+.modal-header {
+    padding: 16px 24px;
+    border-bottom: 1px solid #e8edf3;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    flex-shrink: 0;
+}
+.modal-header h4 {
+    margin: 0;
+    color: #1e293b;
+}
+.modal-close {
+    background: none;
+    border: none;
+    font-size: 1.5rem;
+    cursor: pointer;
+    color: #94a3b8;
+    padding: 0 8px;
+}
+.modal-close:hover {
+    color: #475569;
+}
+.modal-body {
+    padding: 20px 24px;
+    overflow-y: auto;
+    flex: 1;
+}
+.modal-footer {
+    padding: 12px 24px;
+    border-top: 1px solid #e8edf3;
+    display: flex;
+    gap: 10px;
+    justify-content: flex-end;
+    flex-shrink: 0;
+    flex-wrap: wrap;
+}
+
+.view-detail-row {
+    display: flex;
+    padding: 8px 0;
+    border-bottom: 1px solid #f1f5f9;
+}
+.view-detail-row .label {
+    font-weight: 600;
+    width: 120px;
+    color: #475569;
+    flex-shrink: 0;
+}
+.view-detail-row .value {
+    flex: 1;
+}
+
+.text-center {
+    text-align: center;
+}
+.text-muted {
+    color: #94a3b8;
+}
+</style>
+
+<script>
+    document.dispatchEvent(new Event('loadModuleComplete'));
+</script>

@@ -1,0 +1,82 @@
+<div class="module-view-container">
+    <h3 style="margin: 0 0 20px 0;"><i class="fa-solid fa-chart-simple"></i> Profit & Loss Overview</h3>
+
+    <div style="display: flex; gap: 12px; margin-bottom: 20px; align-items: center; flex-wrap: wrap;">
+        <label style="font-size: 0.85rem; color: #475569; font-weight: 500;">Period:</label>
+        <select id="plPeriodSelect" style="padding: 8px 12px; border: 1px solid #e2e8f0; border-radius: 6px; background: white;">
+            <option value="7">Last 7 Days</option>
+            <option value="14" selected>Last 14 Days</option>
+            <option value="30">Last 30 Days</option>
+            <option value="90">Last 90 Days</option>
+        </select>
+        <span style="font-size: 0.8rem; color: #94a3b8; margin-right: auto;">
+            <i class="fa-solid fa-circle-info"></i> Retail + Wholesale sales only. Donations and write-offs are pure cost, not included as "sales" here.
+        </span>
+        <label style="font-size: 0.85rem; color: #475569; font-weight: 500;">Print Month:</label>
+        <input type="month" id="plMonthPicker" style="padding: 7px 12px; border: 1px solid #e2e8f0; border-radius: 6px;">
+        <button class="btn btn-primary" onclick="printMonthlyPL()">
+            <i class="fa-solid fa-print"></i> Print Monthly Report
+        </button>
+    </div>
+
+    <div style="display: grid; grid-template-columns: 2fr 1fr; gap: 20px; margin-bottom: 20px;">
+
+        <!-- Day-wise P&L -->
+        <div class="card" style="padding: 0;">
+            <div style="padding: 12px 20px; border-bottom: 1px solid #e8edf3;">
+                <strong><i class="fa-solid fa-calendar-days" style="color:#2563eb;"></i> Profit/Loss by Day</strong>
+            </div>
+            <table class="table-minimal" style="width:100%;">
+                <thead>
+                    <tr>
+                        <th style="padding-left:20px;">Date</th>
+                        <th style="text-align:right;">Revenue</th>
+                        <th style="text-align:right;">Cost</th>
+                        <th style="text-align:right;padding-right:20px;">Profit</th>
+                    </tr>
+                </thead>
+                <tbody id="plDayBody"><tr><td colspan="4" style="text-align:center;padding:20px;color:#94a3b8;">Loading...</td></tr></tbody>
+            </table>
+        </div>
+
+        <!-- Summary -->
+        <div class="card" style="padding:20px;">
+            <strong style="display:block; margin-bottom:12px;"><i class="fa-solid fa-calculator" style="color:#8b5cf6;"></i> Period Summary</strong>
+            <div style="margin-bottom:14px;">
+                <div style="font-size:0.75rem; color:#64748b; text-transform:uppercase;">Total Revenue</div>
+                <div id="plTotalRevenue" style="font-size:1.3rem; font-weight:700;">K0.00</div>
+            </div>
+            <div style="margin-bottom:14px;">
+                <div style="font-size:0.75rem; color:#64748b; text-transform:uppercase;">Total Cost</div>
+                <div id="plTotalCost" style="font-size:1.3rem; font-weight:700; color:#dc2626;">K0.00</div>
+            </div>
+            <div>
+                <div style="font-size:0.75rem; color:#64748b; text-transform:uppercase;">Net Profit</div>
+                <div id="plTotalProfit" style="font-size:1.5rem; font-weight:700; color:#059669;">K0.00</div>
+                <div id="plMargin" style="font-size:0.8rem; color:#94a3b8;"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Item-wise P&L -->
+    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px;">
+        <div class="card" style="padding: 0;">
+            <div style="padding: 12px 20px; border-bottom: 1px solid #e8edf3;">
+                <strong><i class="fa-solid fa-trophy" style="color:#f59e0b;"></i> Most Profitable Items</strong>
+            </div>
+            <table class="table-minimal" style="width:100%;">
+                <thead><tr><th style="padding-left:20px;">Item</th><th style="text-align:right;">Revenue</th><th style="text-align:right;">Profit</th><th style="text-align:right;padding-right:20px;">Margin</th></tr></thead>
+                <tbody id="plTopItemsBody"><tr><td colspan="4" style="text-align:center;padding:20px;color:#94a3b8;">Loading...</td></tr></tbody>
+            </table>
+        </div>
+        <div class="card" style="padding: 0;">
+            <div style="padding: 12px 20px; border-bottom: 1px solid #e8edf3;">
+                <strong><i class="fa-solid fa-triangle-exclamation" style="color:#dc2626;"></i> Least Profitable / Loss-Making Items</strong>
+            </div>
+            <table class="table-minimal" style="width:100%;">
+                <thead><tr><th style="padding-left:20px;">Item</th><th style="text-align:right;">Revenue</th><th style="text-align:right;">Profit</th><th style="text-align:right;padding-right:20px;">Margin</th></tr></thead>
+                <tbody id="plBottomItemsBody"><tr><td colspan="4" style="text-align:center;padding:20px;color:#94a3b8;">Loading...</td></tr></tbody>
+            </table>
+        </div>
+    </div>
+</div>

@@ -1,0 +1,261 @@
+<div class="module-view-container">
+
+    <!-- 🔥 ADDED: SHARED EXCHANGE RATE -->
+    <!-- Set once here, used as the default rate across Payments, Purchase
+         Orders, and Cash & Bank for the rest of the day -- instead of
+         re-typing today's rate into every single transaction. Still
+         editable on an individual transaction if one genuinely needs a
+         different rate. -->
+    <div class="card" style="padding: 20px; margin-bottom:20px; display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:15px;">
+        <div>
+            <h3 style="margin: 0 0 4px 0;"><i class="fa-solid fa-money-bill-transfer" style="color:#059669;"></i> Today's Exchange Rate</h3>
+            <p style="margin:0; color:#64748b; font-size:0.85rem; max-width:420px;">Used as the default rate across Payments, Purchase Orders, and Cash &amp; Bank.</p>
+        </div>
+        <div style="display:flex; align-items:center; gap:15px;">
+            <div style="text-align:right;">
+                <div style="font-size:1.6rem; font-weight:700; color:#0f172a;" id="dashExchangeRateValue">--</div>
+                <div style="font-size:0.7rem; color:#94a3b8;" id="dashExchangeRateUpdated">Loading...</div>
+            </div>
+            <button id="dashOpenExchangeRateModalBtn" class="btn btn-primary btn-sm">
+                <i class="fa-solid fa-pen"></i> Update Rate
+            </button>
+        </div>
+    </div>
+
+    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 20px;">
+
+        <!-- QUICK ATTENDANCE -->
+        <div class="card" style="padding: 20px;">
+            <h3 style="margin: 0 0 15px 0;"><i class="fa-solid fa-clock" style="color:#2563eb;"></i> My Attendance Today</h3>
+
+            <div id="dashAttendanceStatus" style="padding: 16px; background: #f8fafc; border-radius: 8px; margin-bottom: 15px; text-align: center;">
+                <span style="color: #94a3b8;"><i class="fa-solid fa-spinner fa-spin"></i> Loading...</span>
+            </div>
+
+            <!-- 🔥 FIX: self-service Clock In/Out removed -- if this
+                 button still worked, employees could bypass the QR code
+                 entirely and just clock in from anywhere via the
+                 website, defeating the whole point of requiring a scan
+                 at the pharmacy. Attendance can now only be recorded by
+                 scanning the QR code at the Clock-In Station. -->
+            <div style="padding: 12px; background: #eff6ff; border-radius: 8px; text-align: center; font-size: 0.85rem; color: #1d4ed8;">
+                <i class="fa-solid fa-qrcode"></i> Scan the QR code at the pharmacy to clock in or out.
+            </div>
+        </div>
+
+        <!-- LEAVE REQUEST -->
+        <div class="card" style="padding: 20px;">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:15px;">
+                <h3 style="margin: 0;"><i class="fa-solid fa-plane-departure" style="color:#8b5cf6;"></i> Leave</h3>
+                <button id="dashOpenLeaveModalBtn" class="btn btn-primary btn-sm">
+                    <i class="fa-solid fa-plus"></i> Request Leave
+                </button>
+            </div>
+            <div id="dashMyLeaveList">
+                <p style="color:#94a3b8; text-align:center; padding: 20px;"><i class="fa-solid fa-spinner fa-spin"></i> Loading...</p>
+            </div>
+        </div>
+    </div>
+
+    <!-- 🔥 ADDED: ADVANCE REQUEST -->
+    <div class="card" style="padding: 20px; margin-bottom:20px;">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:15px;">
+            <h3 style="margin: 0;"><i class="fa-solid fa-hand-holding-dollar" style="color:#f59e0b;"></i> Salary Advance</h3>
+            <button id="dashOpenAdvanceModalBtn" class="btn btn-primary btn-sm">
+                <i class="fa-solid fa-plus"></i> Request Advance
+            </button>
+        </div>
+        <div id="dashMyAdvanceList">
+            <p style="color:#94a3b8; text-align:center; padding: 20px;"><i class="fa-solid fa-spinner fa-spin"></i> Loading...</p>
+        </div>
+    </div>
+
+    <!-- 🔥 ADDED: THIS MONTH SUMMARY -->
+    <div class="card" style="padding:20px; margin-bottom:20px;">
+        <h3 style="margin:0 0 15px 0;"><i class="fa-solid fa-calendar-check" style="color:#0891b2;"></i> This Month</h3>
+        <div style="display:grid; grid-template-columns:repeat(3,1fr); gap:15px; margin-bottom:20px;">
+            <div style="text-align:center; padding:12px; background:#f8fafc; border-radius:8px;">
+                <div style="font-size:1.6rem; font-weight:700; color:#0f172a;" id="dashMonthWorkedHours">--</div>
+                <div style="font-size:0.75rem; color:#64748b; text-transform:uppercase;">Hours Worked</div>
+            </div>
+            <div style="text-align:center; padding:12px; background:#f8fafc; border-radius:8px;">
+                <div style="font-size:1.6rem; font-weight:700; color:#dc2626;" id="dashMonthAbsent">--</div>
+                <div style="font-size:0.75rem; color:#64748b; text-transform:uppercase;">Absent Days</div>
+            </div>
+            <div style="text-align:center; padding:12px; background:#f8fafc; border-radius:8px;">
+                <div style="font-size:1.6rem; font-weight:700; color:#8b5cf6;" id="dashMonthLeave">--</div>
+                <div style="font-size:0.75rem; color:#64748b; text-transform:uppercase;">Leave Days Taken</div>
+            </div>
+        </div>
+
+        <!-- Calendar legend -->
+        <div style="display:flex; gap:14px; flex-wrap:wrap; margin-bottom:10px; font-size:0.75rem; color:#64748b;">
+            <span><span style="display:inline-block;width:10px;height:10px;background:#22c55e;border-radius:2px;margin-right:4px;"></span>Present</span>
+            <span><span style="display:inline-block;width:10px;height:10px;background:#ef4444;border-radius:2px;margin-right:4px;"></span>Absent</span>
+            <span><span style="display:inline-block;width:10px;height:10px;background:#8b5cf6;border-radius:2px;margin-right:4px;"></span>On Leave</span>
+            <span><span style="display:inline-block;width:10px;height:10px;background:#eab308;border-radius:2px;margin-right:4px;"></span>Holiday</span>
+            <span><span style="display:inline-block;width:10px;height:10px;background:#cbd5e1;border-radius:2px;margin-right:4px;"></span>Off Day</span>
+            <span><span style="display:inline-block;width:10px;height:10px;background:#f1f5f9;border:1px solid #e2e8f0;border-radius:2px;margin-right:4px;"></span>Upcoming</span>
+        </div>
+
+        <div id="dashMonthCalendar" style="display:grid; grid-template-columns:repeat(7,1fr); gap:4px;">
+            <!-- Populated by JS -->
+        </div>
+    </div>
+
+    <!-- ADMIN: PENDING APPROVALS (only shown for Admin role) -->
+    <div class="card" id="dashAdminApprovalsCard" style="padding: 0; display:none;">
+        <div style="padding: 12px 20px; border-bottom: 1px solid #e8edf3;">
+            <strong><i class="fa-solid fa-user-check" style="color:#f59e0b;"></i> Pending Leave Approvals</strong>
+        </div>
+        <table class="table-minimal" style="width:100%;">
+            <thead>
+                <tr>
+                    <th style="padding-left:20px;">Employee</th>
+                    <th>Dates</th>
+                    <th>Days</th>
+                    <th>Reason</th>
+                    <th style="text-align:right; padding-right:20px;">Action</th>
+                </tr>
+            </thead>
+            <tbody id="dashAdminApprovalsBody">
+                <tr><td colspan="5" style="text-align:center;padding:20px;color:#94a3b8;">Loading...</td></tr>
+            </tbody>
+        </table>
+    </div>
+</div>
+
+<!-- LEAVE REQUEST MODAL -->
+<div id="dashLeaveModal" style="display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(15,23,42,0.6); backdrop-filter:blur(4px); z-index:1000; justify-content:center; align-items:center;">
+    <div style="background:white; padding:25px; border-radius:12px; width:90%; max-width:450px;">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:16px; border-bottom:1px solid #e2e8f0; padding-bottom:12px;">
+            <h4 style="margin:0;"><i class="fa-solid fa-plane-departure" style="color:#8b5cf6;"></i> Request Leave</h4>
+            <button id="dashCloseLeaveModalBtn" style="background:none; border:none; font-size:1.4rem; cursor:pointer; color:#94a3b8;">&times;</button>
+        </div>
+        <form id="dashLeaveForm">
+            <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-bottom:12px;">
+                <div>
+                    <label style="display:block; font-weight:500; color:#475569; margin-bottom:4px; font-size:0.85rem;">Start Date *</label>
+                    <input type="date" id="dashLeaveStart" required style="width:100%; padding:8px 10px; border:1px solid #e2e8f0; border-radius:6px;">
+                </div>
+                <div>
+                    <label style="display:block; font-weight:500; color:#475569; margin-bottom:4px; font-size:0.85rem;">End Date *</label>
+                    <input type="date" id="dashLeaveEnd" required style="width:100%; padding:8px 10px; border:1px solid #e2e8f0; border-radius:6px;">
+                </div>
+            </div>
+            <div style="margin-bottom:16px;">
+                <label style="display:block; font-weight:500; color:#475569; margin-bottom:4px; font-size:0.85rem;">Reason *</label>
+                <textarea id="dashLeaveReason" required rows="3" style="width:100%; padding:8px 10px; border:1px solid #e2e8f0; border-radius:6px; resize:vertical;"></textarea>
+            </div>
+            <div style="display:flex; gap:10px; justify-content:flex-end;">
+                <button type="button" id="dashCancelLeaveBtn" style="background:white; border:1px solid #e2e8f0; padding:8px 20px; border-radius:6px; cursor:pointer;">Cancel</button>
+                <button type="submit" id="dashSubmitLeaveBtn" class="btn btn-primary">
+                    <i class="fa-solid fa-paper-plane"></i> Submit
+                </button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<!-- 🔥 APPROVE LEAVE MODAL (HR decides the type here) -->
+<div id="dashApproveModal" style="display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(15,23,42,0.6); backdrop-filter:blur(4px); z-index:1000; justify-content:center; align-items:center;">
+    <div style="background:white; padding:25px; border-radius:12px; width:90%; max-width:420px;">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:16px; border-bottom:1px solid #e2e8f0; padding-bottom:12px;">
+            <h4 style="margin:0;"><i class="fa-solid fa-check" style="color:#059669;"></i> Approve Leave</h4>
+            <button type="button" onclick="document.getElementById('dashApproveModal').style.display='none'" style="background:none; border:none; font-size:1.4rem; cursor:pointer; color:#94a3b8;">&times;</button>
+        </div>
+        <form id="dashApproveForm">
+            <input type="hidden" id="dashApproveLeaveId">
+            <input type="hidden" id="dashApproveEmployeeId">
+            <input type="hidden" id="dashApproveDays">
+            <div style="margin-bottom:16px;">
+                <label style="display:block; font-weight:500; color:#475569; margin-bottom:4px; font-size:0.85rem;">Leave Type *</label>
+                <select id="dashApproveType" required style="width:100%; padding:8px 10px; border:1px solid #e2e8f0; border-radius:6px;">
+                    <option value="">Select</option>
+                    <option value="Annual">Annual (paid, deducts from balance)</option>
+                    <option value="Sick">Sick (paid)</option>
+                    <option value="Emergency">Emergency (paid)</option>
+                    <option value="Unpaid">Unpaid (salary deducted at payroll)</option>
+                </select>
+            </div>
+            <div style="display:flex; gap:10px; justify-content:flex-end;">
+                <button type="button" onclick="document.getElementById('dashApproveModal').style.display='none'" style="background:white; border:1px solid #e2e8f0; padding:8px 20px; border-radius:6px; cursor:pointer;">Cancel</button>
+                <button type="submit" id="dashConfirmApproveBtn" class="btn btn-success">
+                    <i class="fa-solid fa-check"></i> Confirm Approval
+                </button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<!-- 🔥 ADDED: ADVANCE REQUEST MODAL -->
+<div id="dashAdvanceModal" style="display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(15,23,42,0.6); backdrop-filter:blur(4px); z-index:1000; justify-content:center; align-items:center;">
+    <div style="background:white; padding:25px; border-radius:12px; width:90%; max-width:420px;">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:16px; border-bottom:1px solid #e2e8f0; padding-bottom:12px;">
+            <h4 style="margin:0;"><i class="fa-solid fa-hand-holding-dollar" style="color:#f59e0b;"></i> Request Advance</h4>
+            <button type="button" id="dashCloseAdvanceModalBtn" style="background:none; border:none; font-size:1.4rem; cursor:pointer; color:#94a3b8;">&times;</button>
+        </div>
+        <form id="dashAdvanceForm">
+            <div style="margin-bottom:12px;">
+                <label style="display:block; font-weight:500; color:#475569; margin-bottom:4px; font-size:0.85rem;">Amount (ZMW) *</label>
+                <input type="number" id="dashAdvanceAmount" step="0.01" min="0.01" required style="width:100%; padding:8px 10px; border:1px solid #e2e8f0; border-radius:6px;">
+            </div>
+            <div style="margin-bottom:16px;">
+                <label style="display:block; font-weight:500; color:#475569; margin-bottom:4px; font-size:0.85rem;">Reason *</label>
+                <textarea id="dashAdvanceReason" required rows="3" style="width:100%; padding:8px 10px; border:1px solid #e2e8f0; border-radius:6px; resize:vertical;"></textarea>
+            </div>
+            <div style="display:flex; gap:10px; justify-content:flex-end;">
+                <button type="button" id="dashCancelAdvanceBtn" style="background:white; border:1px solid #e2e8f0; padding:8px 20px; border-radius:6px; cursor:pointer;">Cancel</button>
+                <button type="submit" id="dashSubmitAdvanceBtn" class="btn btn-primary">
+                    <i class="fa-solid fa-paper-plane"></i> Submit
+                </button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<!-- 🔥 ADDED: UPDATE EXCHANGE RATE MODAL -->
+<div id="dashExchangeRateModal" style="display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(15,23,42,0.6); backdrop-filter:blur(4px); z-index:1000; justify-content:center; align-items:center;">
+    <div style="background:white; padding:25px; border-radius:12px; width:90%; max-width:400px;">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:16px; border-bottom:1px solid #e2e8f0; padding-bottom:12px;">
+            <h4 style="margin:0;"><i class="fa-solid fa-money-bill-transfer" style="color:#059669;"></i> Update Exchange Rate</h4>
+            <button type="button" id="dashCloseExchangeRateModalBtn" style="background:none; border:none; font-size:1.4rem; cursor:pointer; color:#94a3b8;">&times;</button>
+        </div>
+        <form id="dashExchangeRateForm">
+            <div style="margin-bottom:16px;">
+                <label style="display:block; font-weight:500; color:#475569; margin-bottom:4px; font-size:0.85rem;">Rate (ZMW per 1 USD) *</label>
+                <input type="number" id="dashExchangeRateInput" step="0.0001" min="0.0001" required style="width:100%; padding:8px 10px; border:1px solid #e2e8f0; border-radius:6px;">
+                <small style="color:#64748b;">This becomes the default rate everywhere a rate is needed for the rest of the day -- still editable on an individual transaction if one genuinely needs a different rate.</small>
+            </div>
+            <div style="display:flex; gap:10px; justify-content:flex-end;">
+                <button type="button" id="dashCancelExchangeRateBtn" style="background:white; border:1px solid #e2e8f0; padding:8px 20px; border-radius:6px; cursor:pointer;">Cancel</button>
+                <button type="submit" id="dashSaveExchangeRateBtn" class="btn btn-primary">
+                    <i class="fa-solid fa-floppy-disk"></i> Save Rate
+                </button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<!-- 🔥 ADDED: POST NOTICE MODAL (Admin only -- opened from the sidebar) -->
+<div id="dashPostNoticeModal" style="display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(15,23,42,0.6); backdrop-filter:blur(4px); z-index:1000; justify-content:center; align-items:center;">
+    <div style="background:white; padding:25px; border-radius:12px; width:90%; max-width:420px;">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:16px; border-bottom:1px solid #e2e8f0; padding-bottom:12px;">
+            <h4 style="margin:0;"><i class="fa-solid fa-bullhorn" style="color:#2563eb;"></i> Post a Notice</h4>
+            <button type="button" id="dashClosePostNoticeModalBtn" style="background:none; border:none; font-size:1.4rem; cursor:pointer; color:#94a3b8;">&times;</button>
+        </div>
+        <form id="dashPostNoticeForm">
+            <div style="margin-bottom:16px;">
+                <label style="display:block; font-weight:500; color:#475569; margin-bottom:4px; font-size:0.85rem;">Message *</label>
+                <textarea id="dashPostNoticeMessage" required rows="3" maxlength="300" style="width:100%; padding:8px 10px; border:1px solid #e2e8f0; border-radius:6px; resize:vertical;" placeholder="e.g. Closing early this Friday at 3pm."></textarea>
+                <small style="color:#64748b;">Everyone sees this on the Dashboard sidebar the moment they open it.</small>
+            </div>
+            <div style="display:flex; gap:10px; justify-content:flex-end;">
+                <button type="button" id="dashCancelPostNoticeBtn" style="background:white; border:1px solid #e2e8f0; padding:8px 20px; border-radius:6px; cursor:pointer;">Cancel</button>
+                <button type="submit" id="dashSubmitPostNoticeBtn" class="btn btn-primary">
+                    <i class="fa-solid fa-bullhorn"></i> Post
+                </button>
+            </div>
+        </form>
+    </div>
+</div>
