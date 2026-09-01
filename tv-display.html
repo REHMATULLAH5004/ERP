@@ -272,8 +272,62 @@
         // queue is jammed, not that it's legitimately still talking.
         const MAX_REALISTIC_UTTERANCE_MS = 8000;
 
-        function speak(text) {
-            if (!voiceEnabled || !('speechSynthesis' in window)) return;
+        // 🔥 ADDED: CLOUD VOICE (Amazon Polly, via the "tts-polly" Supabase
+        // Edge Function) -- the browser's own speechSynthesis above is
+        // device-dependent (some Android/smart-TV browsers ship few or no
+        // English voices, so it can silently do nothing). This instead
+        // asks a small server-side function to generate real speech audio
+        // with Amazon Polly and plays it back through a normal <audio>
+        // element, so voice quality is the same on every device. If this
+        // ever fails for any reason (offline, AWS hiccup, function not
+        // deployed yet), speak() below automatically falls back to the
+        // browser voice further up -- voice never goes fully silent just
+        // because the cloud call didn't work.
+        const ttsAudioEl = new Audio();
+        const TTS_FUNCTION_URL = SUPABASE_URL + '/functions/v1/tts-polly';
+        const TTS_TIMEOUT_MS = 6000;
+
+        function speakCloud(text) {
+            return new Promise((resolve, reject) => {
+                const controller = new AbortController();
+                const timeout = setTimeout(() => controller.abort(), TTS_TIMEOUT_MS);
+
+                fetch(TTS_FUNCTION_URL, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': 'Bearer ' + SUPABASE_ANON_KEY,
+                        'apikey': SUPABASE_ANON_KEY,
+                    },
+                    body: JSON.stringify({ text }),
+                    signal: controller.signal,
+                })
+                .then(res => {
+                    clearTimeout(timeout);
+                    if (!res.ok) throw new Error('tts-polly returned HTTP ' + res.status);
+                    return res.blob();
+                })
+                .then(blob => {
+                    const url = URL.createObjectURL(blob);
+                    ttsAudioEl.onended = () => { URL.revokeObjectURL(url); resolve(); };
+                    ttsAudioEl.onerror = () => { URL.revokeObjectURL(url); reject(new Error('Audio playback failed')); };
+                    ttsAudioEl.src = url;
+                    ttsAudioEl.play().catch(reject);
+                })
+                .catch(err => {
+                    clearTimeout(timeout);
+                    reject(err);
+                });
+            });
+        }
+
+        // The original browser-voice implementation, kept as the fallback
+        // path -- unchanged in behavior, just renamed and no longer called
+        // directly for real announcements (speak() below decides which to
+        // use). Returns true/false so callers can tell whether it actually
+        // managed to start talking.
+        function speakBrowser(text) {
+            if (!('speechSynthesis' in window)) return false;
             try {
                 // 🔥 FIX: if a PREVIOUS utterance got stuck (the same
                 // idle-timeout bug above can also leave one utterance
@@ -295,9 +349,24 @@
                 if (voice) utterance.voice = voice;
                 utterance.rate = 0.95;
                 speechSynthesis.speak(utterance);
+                return true;
             } catch (e) {
-                console.warn('Voice announcement failed (non-fatal):', e);
+                console.warn('Browser voice announcement failed (non-fatal):', e);
+                return false;
             }
+        }
+
+        // Public entry point every announcement in this file calls.
+        // Cloud voice first; on any failure, falls back to the browser
+        // voice automatically and silently (the gate handler below has
+        // its own copy of this logic that reports failures on-screen,
+        // since that's the one moment staff are actually watching).
+        function speak(text) {
+            if (!voiceEnabled) return;
+            speakCloud(text).catch(err => {
+                console.warn('Cloud voice (Polly) failed, falling back to browser voice:', err);
+                speakBrowser(text);
+            });
         }
 
         function updateVoiceToggleIcon() {
@@ -314,8 +383,12 @@
             voiceEnabled = !voiceEnabled;
             localStorage.setItem('tvVoiceEnabled', voiceEnabled ? 'true' : 'false');
             updateVoiceToggleIcon();
-            if (voiceEnabled) speak('Voice announcements on.');
-            else speechSynthesis.cancel();
+            if (voiceEnabled) {
+                speak('Voice announcements on.');
+            } else {
+                if ('speechSynthesis' in window) speechSynthesis.cancel();
+                ttsAudioEl.pause();
+            }
         });
 
         // ============================================
@@ -324,41 +397,57 @@
         let audioCtx = null;
         document.getElementById('soundGateBtn').addEventListener('click', () => {
             let audioFailed = false;
-            let speechFailed = false;
             try {
                 audioCtx = new (window.AudioContext || window.webkitAudioContext)();
             } catch (e) {
                 console.error('Could not unlock chime audio:', e);
                 audioFailed = true;
             }
-            document.getElementById('soundGate').style.display = 'none';
+
+            // 🔥 ADDED: unlock the <audio> element used for cloud (Polly)
+            // playback the same way audioCtx is unlocked above -- a muted
+            // play()/pause() inside this real click satisfies the
+            // browser's autoplay policy for every later, unprompted
+            // .play() call this session, including ones triggered from
+            // inside an async fetch callback (speakCloud() above), which
+            // wouldn't otherwise count as "user-initiated" on their own.
             try {
-                speak('Queue display ready.'); // also unlocks SpeechSynthesis for later, unprompted calls
-            } catch (e) {
-                console.error('Could not unlock voice:', e);
-                speechFailed = true;
-            }
-            if (!('speechSynthesis' in window)) speechFailed = true;
+                ttsAudioEl.muted = true;
+                ttsAudioEl.play().then(() => { ttsAudioEl.pause(); ttsAudioEl.muted = false; }).catch(() => {});
+            } catch (e) { /* non-fatal -- falls back to browser voice below if genuinely broken */ }
+
+            document.getElementById('soundGate').style.display = 'none';
             loadAll();
 
-            // 🔥 FIX: previously, if either unlock silently failed (the try/
-            // catch above just swallowed the error), the gate still
-            // vanished and the display looked completely normal from then
-            // on -- exactly what happened here: "everything is okay but
-            // voice is not coming", with no way to tell from the screen
-            // itself that sound never actually unlocked. This makes that
-            // failure visible instead of invisible, right where staff are
-            // already looking, so it's obvious this device/browser needs
-            // attention rather than looking like a mystery.
-            if (audioFailed || speechFailed) {
+            function showVoiceWarning(message) {
+                // 🔥 FIX: previously, if voice silently failed to unlock,
+                // the gate still vanished and the display looked completely
+                // normal from then on -- exactly what happened here:
+                // "everything is okay but voice is not coming", with no way
+                // to tell from the screen itself. This makes that failure
+                // visible instead of invisible, right where staff are
+                // already looking.
                 const warn = document.createElement('div');
                 warn.style.cssText = 'position:fixed; top:70px; right:20px; background:#7f1d1d; color:#fecaca; padding:8px 14px; border-radius:8px; font-size:0.8rem; z-index:998; max-width:300px;';
-                warn.textContent = audioFailed && speechFailed
-                    ? '⚠ Sound and voice could not start on this device/browser.'
-                    : audioFailed
-                        ? '⚠ Chime could not start on this device/browser.'
-                        : '⚠ Voice could not start on this device/browser.';
+                warn.textContent = message;
                 document.body.appendChild(warn);
+            }
+
+            if (audioFailed) {
+                showVoiceWarning('⚠ Chime could not start on this device/browser.');
+            }
+
+            // Test voice end-to-end -- cloud first, browser fallback --
+            // and only warn if BOTH genuinely fail. Uses the same two
+            // functions speak() uses internally, but (unlike speak())
+            // reports the outcome on-screen, since this is the one moment
+            // staff are actually watching.
+            if (voiceEnabled) {
+                speakCloud('Queue display ready.').catch(err => {
+                    console.warn('Cloud voice failed on startup, falling back to browser voice:', err);
+                    const ok = speakBrowser('Queue display ready.');
+                    if (!ok) showVoiceWarning('⚠ Voice could not start on this device/browser.');
+                });
             }
         });
 
@@ -444,42 +533,32 @@
 
             countEl.textContent = waitingRows.length;
 
-            if (!recentRows.length) {
-                listEl.innerHTML = '<div class="empty-state">No one called yet today.</div>';
+            // 🔥 CHANGED: this used to be a "recently called" HISTORY list
+            // -- everyone called today, most of them already long done with
+            // this stage. Confirmed from real feedback (viewed on a phone)
+            // that this genuinely doesn't answer the one question someone
+            // sitting in the waiting room actually has: "how many people
+            // are ahead of me, and who's next?" A history of who's already
+            // been served answers a completely different question. This
+            // now shows exactly that instead -- everyone still WAITING for
+            // this stage, in the order they'll be called (same token-number
+            // order the query already sorts by), with the very next person
+            // called out clearly. Nobody in this list has a counter yet
+            // (that's only assigned the moment they're actually called),
+            // so there's nothing counter-related to show per row anymore --
+            // the earlier "Counter 1 ... Done" confusion this replaces
+            // doesn't apply here by construction.
+            if (!waitingRows.length) {
+                listEl.innerHTML = '<div class="empty-state">No one waiting.</div>';
                 return;
             }
 
-            // 🔥 FIX: this list shows every patient EVER called to this
-            // stage today, not just the one currently there -- but it was
-            // only ever dimmed/marked "done" once their whole visit was
-            // fully finished (completed/skipped). A patient who finished
-            // BILLING and moved on to Dispensing still has status
-            // 'waiting_dispensing' or 'serving_dispensing' at that point --
-            // neither counts as "completed" -- so they kept showing up
-            // here looking exactly as active as whoever is really being
-            // served at that counter right now. That's what made two
-            // different patients both tagged "Counter 1" look like a
-            // conflict: one had simply moved on, but nothing on screen
-            // said so.
-            //
-            // Fix: "done" now means "finished with THIS stage specifically"
-            // -- for Billing, anything other than still-serving-billing
-            // (i.e. they've moved on to Dispensing or finished entirely);
-            // for Dispensing, the existing completed/skipped check already
-            // covers it correctly since that's the last stage. Finished
-            // rows also get an explicit "Done" label -- dimming alone can
-            // be hard to read on a TV screen from across a waiting room.
-            listEl.innerHTML = recentRows.map(r => {
-                const isDone = stage === 'billing'
-                    ? r.status !== 'serving_billing'
-                    : (r.status === 'completed' || r.status === 'skipped');
-                return `
-                <div class="recent-row ${isDone ? 'done' : ''}">
+            listEl.innerHTML = waitingRows.map((r, i) => `
+                <div class="recent-row">
                     <span><span class="rn">#${r.token_number}</span> &nbsp; ${r.patient_name}</span>
-                    <span class="rc">${r[counterField] || ''}${isDone ? ' &middot; Done' : ''}</span>
+                    ${i === 0 ? '<span class="rc" style="color:#34d399; font-weight:700;">Up Next</span>' : ''}
                 </div>
-            `;
-            }).join('');
+            `).join('');
         }
 
         // ============================================
