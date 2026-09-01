@@ -31,6 +31,22 @@
         return;
     }
 
+    // 🔥 FIX: tracks the `sales.id` (database UUID) of the invoice currently
+    // loaded for in-place editing via the search modal's "Edit" button. Save
+    // previously ALWAYS inserted a new `sales` row -- even when editing an
+    // existing invoice -- so a re-save minted a brand-new sale_id (catching
+    // the resulting unique-constraint error and retrying with a fresh one),
+    // leaving the original row orphaned, deducting stock a second time, and
+    // posting a second set of accounting entries for the same real-world
+    // transaction. See saveTransaction()'s `editingSaleDbId` branch below.
+    // null = a normal new sale; set = update this existing row instead.
+    // Declared up here (not lower down with currentSaleData/lastSavedSaleData)
+    // because generateNextSaleId() -- which reads it -- is already called
+    // during page init below, before execution would otherwise have reached
+    // a lower declaration; a `let` accessed before its own declaration line
+    // throws, it isn't just `undefined`.
+    let editingSaleDbId = null;
+
     // ============================================
     // DOM REFERENCES
     // ============================================
@@ -1203,7 +1219,7 @@
 
             console.log(`💰 COGS: ${cogsAmount}, Total: ${totalAmount}, Tax: ${taxAmount}`);
 
-            const journalNumber = `SAL-${new Date().getFullYear()}-${String(Math.floor(Math.random() * 10000)).padStart(4, '0')}`;
+            const journalNumber = `SAL-${new Date().getFullYear()}-${Date.now().toString(36).toUpperCase() + Math.random().toString(36).slice(2, 6).toUpperCase()}`;
 
             const revenueJournal = {
                 entry_date: entryDate,
@@ -1265,7 +1281,7 @@
             }
 
             if (cogsAmount > 0) {
-                const cogsJournalNumber = `COG-${new Date().getFullYear()}-${String(Math.floor(Math.random() * 10000)).padStart(4, '0')}`;
+                const cogsJournalNumber = `COG-${new Date().getFullYear()}-${Date.now().toString(36).toUpperCase() + Math.random().toString(36).slice(2, 6).toUpperCase()}`;
 
                 const cogsJournal = {
                     entry_date: entryDate,
@@ -1379,7 +1395,7 @@
                 return sum + (costPrice * item.qty * packSize);
             }, 0);
 
-            const journalNumber = `SAL-${new Date().getFullYear()}-${String(Math.floor(Math.random() * 10000)).padStart(4, '0')}`;
+            const journalNumber = `SAL-${new Date().getFullYear()}-${Date.now().toString(36).toUpperCase() + Math.random().toString(36).slice(2, 6).toUpperCase()}`;
 
             const revenueJournal = {
                 entry_date: entryDate,
@@ -1428,7 +1444,7 @@
             await supabaseClient.from('journal_lines').insert(lines);
 
             if (cogsAmount > 0) {
-                const cogsJournalNumber = `COG-${new Date().getFullYear()}-${String(Math.floor(Math.random() * 10000)).padStart(4, '0')}`;
+                const cogsJournalNumber = `COG-${new Date().getFullYear()}-${Date.now().toString(36).toUpperCase() + Math.random().toString(36).slice(2, 6).toUpperCase()}`;
 
                 const cogsJournal = {
                     entry_date: entryDate,
@@ -1850,9 +1866,19 @@
                 retailSaveContactBtn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Saving...';
 
                 try {
+                    // 🔥 FIX: was checking .select('nhima_number') only, so a
+                    // false-positive "already exists" gave no way to tell
+                    // WHY it thought that -- which patient it's supposedly
+                    // registered to, or whether the stored value has some
+                    // invisible difference (extra space, different dash,
+                    // etc.) from what was just typed. Now selects full_name
+                    // too and echoes both the typed value and the exact
+                    // stored value back in the alert, so the very next time
+                    // this fires, the cause is visible immediately instead
+                    // of needing a database lookup to diagnose.
                     const { data: existing, error: checkError } = await supabaseClient
                         .from('nhima_members')
-                        .select('nhima_number')
+                        .select('nhima_number, full_name')
                         .eq('nhima_number', nhimaNumber)
                         .maybeSingle();
 
@@ -1861,7 +1887,7 @@
                     }
 
                     if (existing) {
-                        alert('NHIMA Number already exists. Please use a different number.');
+                        alert(`NHIMA Number "${nhimaNumber}" already exists -- registered to ${existing.full_name || 'another patient'} (stored as "${existing.nhima_number}"). Please use a different number.`);
                         retailSaveContactBtn.disabled = false;
                         retailSaveContactBtn.innerHTML = '<i class="fa-solid fa-floppy-disk"></i> Save';
                         return;
@@ -2525,6 +2551,15 @@
     }
 
     function generateNextSaleId() {
+        // 🔥 FIX: a fresh generated invoice number means this is a NEW sale
+        // from here on, not an edit of an existing one -- clear the edit
+        // tracker so Save inserts instead of updating. Covers the Reset
+        // button, the client-type toggle, the post-save form reset, and
+        // convertQuotationToInvoice() (which deliberately calls this right
+        // after loadSaleForEdit() to turn a loaded quotation into a
+        // brand-new invoice instead of editing it in place).
+        editingSaleDbId = null;
+
         const display = document.getElementById('saleIdDisplay');
         const invoiceDisplay = document.getElementById('invoiceNumber');
         if (!display) return;
@@ -2980,6 +3015,7 @@
         if (!sale) return null;
 
         return {
+            db_id: sale.id,
             sale_id: sale.sale_id,
             client_sub_type: sale.client_sub_type,
             customer_data: sale.customer_data || {},
@@ -3203,12 +3239,20 @@
                 // query that tolerates any number of existing matches,
                 // and blocks the save on any error instead of assuming
                 // it's fine to proceed (fail-closed).
-                const { data: existingClaims, error: claimCheckError } = await supabaseClient
+                // 🔥 FIX: when editing an existing sale, this same claim
+                // number legitimately already exists on THIS row -- exclude
+                // the row being edited from the check, otherwise saving an
+                // edit with its own unchanged claim number always fails as
+                // "already used" (by itself).
+                let claimCheckQuery = supabaseClient
                     .from('sales')
                     .select('sale_id')
                     .eq('claim_number', claimNumber)
-                    .neq('is_quotation', true)
-                    .limit(1);
+                    .neq('is_quotation', true);
+                if (editingSaleDbId) {
+                    claimCheckQuery = claimCheckQuery.neq('id', editingSaleDbId);
+                }
+                const { data: existingClaims, error: claimCheckError } = await claimCheckQuery.limit(1);
 
                 if (claimCheckError) {
                     console.error('Error checking claim number uniqueness:', claimCheckError);
@@ -3384,40 +3428,123 @@
 
             console.log('💾 Saving sale with customer_id:', customerId);
 
+            // 🔥 FIX: editing an existing invoice (editingSaleDbId set by
+            // loadSaleForEdit()) must UPDATE that row, never insert a new
+            // one. Previously this branch didn't exist at all -- every save
+            // was an insert, so re-saving an edited sale hit the sale_id
+            // unique constraint, minted a brand-new sale_id in the catch
+            // block below, and inserted a second, separate sale for the
+            // same real-world transaction. That left the original row
+            // behind as an orphan, deducted stock a second time, and
+            // posted a second set of accounting entries.
+            //
+            // Fix: before writing the row, undo exactly what the ORIGINAL
+            // save did -- restore the stock it deducted, and remove its old
+            // sale_items and journal entries (matched by reference, which
+            // carries the invoice's sale_id string, e.g. "GRI-2026-...-COGS"
+            // for the COGS leg) -- then let the rest of this function
+            // re-apply stock deduction and accounting entries fresh for the
+            // edited items, exactly as it already does for a normal new
+            // sale. Net effect: one clean, correct final state, same as if
+            // this were the only save that ever happened.
+            if (editingSaleDbId) {
+                const { data: oldItems, error: oldItemsError } = await supabaseClient
+                    .from('sale_items')
+                    .select('batch_id, quantity, pack_size')
+                    .eq('sale_id', editingSaleDbId);
+
+                if (oldItemsError) {
+                    console.error('Error loading original sale items for edit:', oldItemsError);
+                    alert('❌ Could not load the original invoice to edit it safely. Nothing was changed.\n' + oldItemsError.message);
+                    return;
+                }
+
+                if (oldItems && oldItems.length > 0) {
+                    const qtyToRestoreByBatch = new Map();
+                    for (const item of oldItems) {
+                        const packQty = item.pack_size === 'EACH' ? 1 : (parseInt(item.pack_size) || 1);
+                        qtyToRestoreByBatch.set(item.batch_id, (qtyToRestoreByBatch.get(item.batch_id) || 0) + item.quantity * packQty);
+                    }
+                    const { data: batchesToRestore, error: batchFetchError } = await supabaseClient
+                        .from('batches')
+                        .select('id, total_qty')
+                        .in('id', [...qtyToRestoreByBatch.keys()]);
+
+                    if (batchFetchError) {
+                        console.error('Error restoring stock before edit-save:', batchFetchError);
+                    } else {
+                        await Promise.all((batchesToRestore || []).map(b =>
+                            supabaseClient.from('batches')
+                                .update({ total_qty: b.total_qty + (qtyToRestoreByBatch.get(b.id) || 0) })
+                                .eq('id', b.id)
+                        ));
+                    }
+                }
+
+                await supabaseClient.from('sale_items').delete().eq('sale_id', editingSaleDbId);
+
+                const oldSaleIdString = saleData.sale_id; // unchanged across an edit -- same invoice number throughout
+                const { data: oldJournals } = await supabaseClient
+                    .from('journal_entries')
+                    .select('id')
+                    .in('reference', [oldSaleIdString, `${oldSaleIdString}-COGS`]);
+
+                if (oldJournals && oldJournals.length > 0) {
+                    const oldJournalIds = oldJournals.map(j => j.id);
+                    await supabaseClient.from('journal_lines').delete().in('journal_entry_id', oldJournalIds);
+                    await supabaseClient.from('journal_entries').delete().in('id', oldJournalIds);
+                }
+            }
+
             let savedData;
             try {
-                const { data, error } = await supabaseClient
-                    .from('sales')
-                    .insert([dbRecord])
-                    .select();
+                if (editingSaleDbId) {
+                    const { data, error } = await supabaseClient
+                        .from('sales')
+                        .update(dbRecord)
+                        .eq('id', editingSaleDbId)
+                        .select();
 
-                if (error) {
-                    if (error.code === '23505' || error.message?.includes('duplicate key')) {
-                        console.log('⚠️ Duplicate key error, regenerating sale_id...');
-
-                        const timestamp = Date.now().toString().slice(-6);
-                        const random = Math.floor(Math.random() * 10000).toString().padStart(4, '0');
-                        const newSaleId = `${prefix || 'GRI'}-${new Date().getFullYear()}-${timestamp}-${random}`;
-
-                        document.getElementById('invoiceNumber').value = newSaleId;
-                        const display = document.getElementById('saleIdDisplay');
-                        if (display) display.textContent = `Invoice #: ${newSaleId}`;
-
-                        dbRecord.sale_id = newSaleId;
-                        saleData.sale_id = newSaleId;
-
-                        const { data: retryData, error: retryError } = await supabaseClient
-                            .from('sales')
-                            .insert([dbRecord])
-                            .select();
-
-                        if (retryError) throw new Error('Failed to save (Retry): ' + retryError.message);
-                        savedData = retryData;
-                    } else {
-                        throw new Error(error.message);
+                    if (error) throw new Error(error.message);
+                    if (!data || data.length === 0) {
+                        alert('❌ Could not find the original invoice to update. Nothing was saved.');
+                        return;
                     }
-                } else {
                     savedData = data;
+                } else {
+                    const { data, error } = await supabaseClient
+                        .from('sales')
+                        .insert([dbRecord])
+                        .select();
+
+                    if (error) {
+                        if (error.code === '23505' || error.message?.includes('duplicate key')) {
+                            console.log('⚠️ Duplicate key error, regenerating sale_id...');
+
+                            const timestamp = Date.now().toString().slice(-6);
+                            const random = Math.floor(Math.random() * 10000).toString().padStart(4, '0');
+                            const newSaleId = `${prefix || 'GRI'}-${new Date().getFullYear()}-${timestamp}-${random}`;
+
+                            document.getElementById('invoiceNumber').value = newSaleId;
+                            const display = document.getElementById('saleIdDisplay');
+                            if (display) display.textContent = `Invoice #: ${newSaleId}`;
+
+                            dbRecord.sale_id = newSaleId;
+                            saleData.sale_id = newSaleId;
+
+                            const { data: retryData, error: retryError } = await supabaseClient
+                                .from('sales')
+                                .insert([dbRecord])
+                                .select();
+
+                            if (retryError) throw new Error('Failed to save (Retry): ' + retryError.message);
+                            savedData = retryData;
+                        } else {
+                            throw new Error(error.message);
+                        }
+                    } else {
+                        savedData = data;
+                    }
                 }
             } catch (dbError) {
                 console.error('Database error:', dbError);
@@ -3639,32 +3766,53 @@
                 <title>GRIFFINS MEDICALS LIMITED - ${docLabel} ${saleData.sale_id}</title>
                 <style>
                     * { box-sizing: border-box; }
-                    body { font-family: 'Courier New', Courier, monospace; padding: 10px; margin: 0; font-size: 11px; color: #000; }
+                    /* 🔥 FIX: printed on the real thermal printer, everything
+                       that wasn't already bold came out faint/hard to read --
+                       bold text has extra "weight" (thicker strokes), which is
+                       what actually shows up clearly on a thermal head; a
+                       normal-weight (400) character has thin strokes that
+                       print light no matter the font size. Fix: raise the
+                       BASELINE weight for the whole receipt to 600 (semibold)
+                       here on <body>, so everything inherits it unless
+                       overridden -- the item name, section headers, and grand
+                       total stay at 700/800 so they still stand out as
+                       clearly heavier than the rest, but nothing on the page
+                       is left at the too-thin default 400 anymore. */
+                    body { font-family: 'Courier New', Courier, monospace; padding: 10px; margin: 0; font-size: 11px; font-weight: 600; color: #000; }
                     .header { text-align: center; border-bottom: 2px solid #000; padding-bottom: 6px; margin-bottom: 8px; }
                     .header h1 { margin: 0; font-size: 15px; font-weight: 800; letter-spacing: 0.02em; }
-                    .header p { margin: 2px 0; font-size: 10px; }
-                    .doc-type-badge { display: inline-block; margin-top: 6px; padding: 2px 10px; border: 1px solid #000; font-size: 10px; font-weight: bold; }
-                    .meta-row { margin-bottom: 6px; font-size: 10.5px; }
+                    .header p { margin: 2px 0; font-size: 10.5px; }
+                    .doc-type-badge { display: inline-block; margin-top: 6px; padding: 2px 10px; border: 1px solid #000; font-size: 10px; font-weight: 800; }
+                    .meta-row { margin-bottom: 6px; font-size: 11px; }
                     .meta-row div { margin: 1px 0; }
-                    .customer-info { margin-bottom: 8px; padding-bottom: 6px; border-bottom: 1px dashed #000; font-size: 10.5px; }
+                    .customer-info { margin-bottom: 8px; padding-bottom: 6px; border-bottom: 1px dashed #000; font-size: 11px; }
                     .customer-info div { margin: 1px 0; }
-                    table { width: 100%; border-collapse: collapse; margin-bottom: 8px; font-size: 10px; table-layout: fixed; }
-                    th, td { padding: 3px 2px; border-bottom: 1px solid #000; text-align: left; word-wrap: break-word; }
-                    th { font-weight: bold; border-bottom: 2px solid #000; }
-                    .text-right { text-align: right; }
-                    .text-center { text-align: center; }
-                    .col-num { width: 6%; }
-                    .col-item { width: 26%; }
-                    .col-batch { width: 20%; }
-                    .col-tax { width: 10%; }
-                    .col-days { width: 10%; }
-                    .col-rate { width: 12%; }
-                    .col-qty { width: 8%; }
-                    .col-sub { width: 14%; }
+                    /* 🔥 CHANGED: the old layout packed # / Item / Batch /
+                       Tax% / Days / Rate / Qty / Subtotal into ONE fixed-width
+                       table row -- fine for a wide printer, but on an 80mm
+                       receipt each column got so narrow that the item name
+                       (usually the longest text on the line) wrapped onto 4-5
+                       lines and the whole thing read as a wall of squeezed
+                       text (confirmed from a real printed sample). Now each
+                       item gets its own block: the full-width item name on
+                       its own line first, then a second line with the batch
+                       and expiry, then a third line with the remaining stats
+                       (tax/days/rate/qty) on the left and the subtotal on the
+                       right. No column ever has to share its width with the
+                       item name, so nothing needs to wrap. */
+                    .items-list { margin-bottom: 8px; }
+                    .items-header { display: flex; justify-content: space-between; font-size: 10.5px; font-weight: 800; border-bottom: 2px solid #000; padding-bottom: 3px; margin-bottom: 2px; }
+                    .item-block { padding: 5px 0; border-bottom: 1px dashed #000; }
+                    .item-block:last-child { border-bottom: 1px solid #000; }
+                    .item-name { font-size: 11px; font-weight: 700; margin-bottom: 2px; word-wrap: break-word; }
+                    .item-batch { font-size: 10.5px; margin-bottom: 2px; color: #000; }
+                    .item-stats { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: baseline; font-size: 10.5px; gap: 2px 10px; }
+                    .item-stats .stat-group { display: flex; gap: 8px; flex-wrap: wrap; }
+                    .item-stats .item-subtotal { font-weight: 800; font-size: 11px; white-space: nowrap; }
                     .totals { margin-top: 6px; padding-top: 6px; border-top: 1px dashed #000; font-size: 10.5px; }
                     .totals-row { display: flex; justify-content: space-between; margin: 2px 0; }
                     .grand-total { font-size: 13px; font-weight: 800; border-top: 1px solid #000; margin-top: 4px; padding-top: 4px; }
-                    .footer { text-align: center; margin-top: 12px; padding-top: 8px; border-top: 1px dashed #000; font-size: 10px; }
+                    .footer { text-align: center; margin-top: 12px; padding-top: 8px; border-top: 1px dashed #000; font-size: 10.5px; }
                     @media print { @page { margin: 0; } body { padding: 6mm; } }
                 </style>
             </head>
@@ -3687,34 +3835,24 @@
                     ${saleData.customer.nhima_number ? `<div><strong>NHIMA #:</strong> ${saleData.customer.nhima_number}</div>` : ''}
                     ${saleData.customer.nrc ? `<div><strong>NRC:</strong> ${saleData.customer.nrc}</div>` : ''}
                 </div>
-                <table>
-                    <thead>
-                        <tr>
-                            <th class="col-num">#</th>
-                            <th class="col-item">Item</th>
-                            <th class="col-batch">Batch (Exp)</th>
-                            <th class="col-tax text-right">Tax%</th>
-                            <th class="col-days text-center">Days</th>
-                            <th class="col-rate text-right">Rate</th>
-                            <th class="col-qty text-right">Qty</th>
-                            <th class="col-sub text-right">Subtotal</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        ${saleData.items.map((item, index) => `
-                            <tr>
-                                <td class="col-num">${index + 1}</td>
-                                <td class="col-item">${item.product_name}</td>
-                                <td class="col-batch">${cleanBatchDisplay(item.batch_number)}${item.expiry ? ` (${item.expiry})` : ''}</td>
-                                <td class="col-tax text-right">${item.tax_rate}%</td>
-                                <td class="col-days text-center">${item.days_supplied || 0}</td>
-                                <td class="col-rate text-right">K${item.rate.toFixed(2)}</td>
-                                <td class="col-qty text-right">${item.qty}</td>
-                                <td class="col-sub text-right">K${item.total.toFixed(2)}</td>
-                            </tr>
-                        `).join('')}
-                    </tbody>
-                </table>
+                <div class="items-list">
+                    <div class="items-header"><span>ITEMS</span><span>SUBTOTAL</span></div>
+                    ${saleData.items.map((item, index) => `
+                        <div class="item-block">
+                            <div class="item-name">${index + 1}. ${item.product_name}</div>
+                            <div class="item-batch">Batch: ${cleanBatchDisplay(item.batch_number)}${item.expiry ? ` (Exp: ${item.expiry})` : ''}</div>
+                            <div class="item-stats">
+                                <span class="stat-group">
+                                    <span>Tax ${item.tax_rate}%</span>
+                                    <span>Days ${item.days_supplied || 0}</span>
+                                    <span>Rate K${item.rate.toFixed(2)}</span>
+                                    <span>Qty ${item.qty}</span>
+                                </span>
+                                <span class="item-subtotal">K${item.total.toFixed(2)}</span>
+                            </div>
+                        </div>
+                    `).join('')}
+                </div>
                 <div class="totals">
                     <div class="totals-row"><span>Subtotal (Excl. Tax):</span><span>K${saleData.totals.subtotal.toFixed(2)}</span></div>
                     <div class="totals-row"><span>Total Tax:</span><span>K${saleData.totals.tax.toFixed(2)}</span></div>
@@ -3827,6 +3965,15 @@
                     document.getElementById('retailNrc').value = customer.nrc || '';
                     document.getElementById('retailPhoneNumber').value = customer.phone || '';
                     document.getElementById('retailAddress').value = customer.address || '';
+                    // 🔥 FIX: loadSaleForEdit never restored the Claim Number
+                    // field, so re-opening an NHIMA sale left it blank --
+                    // forcing you to retype it, which then tripped the
+                    // uniqueness check below (a "new" claim number that's
+                    // actually just this same sale's own claim number,
+                    // already in the database). Restore it from the saved
+                    // customer_data, same as every other field here.
+                    const claimNumberEl = document.getElementById('retailClaimNumber');
+                    if (claimNumberEl) claimNumberEl.value = customer.claim_number || '';
                 } else {
                     const phoneSelectEl = document.getElementById('retailRegPhone');
                     if (phoneSelectEl && customer.phone) {
@@ -3998,6 +4145,14 @@
 
                 updateTotals();
             }
+
+            // 🔥 FIX: set this AFTER the client-type button click above --
+            // that click fires generateNextSaleId(), which clears this same
+            // flag as a side effect (see generateNextSaleId()'s comment).
+            // Setting it here, once the rest of the form is already
+            // populated, is what makes Save actually update this invoice
+            // instead of inserting a duplicate.
+            editingSaleDbId = saleData.db_id || null;
 
             alert('✅ Sale loaded for editing. Make changes and save.');
 
