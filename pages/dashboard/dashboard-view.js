@@ -552,7 +552,18 @@
                 <title>Labels - ${saleData.sale_id}</title>
                 <style>
                     @page { size: 45mm 40mm; margin: 0; }
-                    body { font-family: Arial, sans-serif; margin: 0; }
+                    /* 🔥 FIX: same issue as the invoice (see buildInvoiceHTML in
+                       retail/index.js) -- on the real thermal printer, anything
+                       left at the default normal weight (400) came out faint no
+                       matter the font size, because thin strokes don't lay down
+                       enough toner/heat on a thermal head. Fix: raise the
+                       baseline weight for the whole label to 600 (semibold) here
+                       on <body>, so every line inherits it unless overridden --
+                       pharmacy name / item name / qty line stay bold (700) so
+                       they're still clearly heavier than the dosage line, but
+                       nothing on the sticker is left at the too-thin default
+                       anymore. */
+                    body { font-family: Arial, sans-serif; margin: 0; font-weight: 600; color: #000; }
                     .sticker {
                         width: 45mm; height: 40mm; padding: 2mm; box-sizing: border-box;
                         border: 1px dashed #94a3b8; page-break-after: always;
@@ -562,7 +573,7 @@
                     .sticker:last-child { page-break-after: auto; }
                     .sticker .pharmacy { font-size: 6.5pt; color: #64748b; text-transform: uppercase; letter-spacing: 0.05em; font-weight: bold; }
                     .sticker .item-name { font-size: 10pt; font-weight: bold; margin: 1.5mm 0 1mm 0; }
-                    .sticker .how-to-take { font-size: 8pt; white-space: pre-line; line-height: 1.3; }
+                    .sticker .how-to-take { font-size: 8pt; white-space: pre-line; line-height: 1.3; font-weight: 600; }
                     .sticker .qty { font-size: 7.5pt; color: #475569; margin-top: 1mm; font-weight: bold; }
                     @media print { .sticker { border: none; } }
                 </style>
