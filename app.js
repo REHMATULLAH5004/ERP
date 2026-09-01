@@ -37,11 +37,18 @@ const TESTING_MODE_ALL_ACCESS = false;
 // ============================================
 
 const FALLBACK_ROLE_ACCESS = {
+    // 🔥 ADDED 'crm' for Cashier -- patient registration lives on the
+    // CRM tab, and any of the 3 billing counters can register a
+    // patient. Added 'dashboard' for Pharmacist -- that's where the
+    // existing "Dispensing -- Print Labels" widget already lives, and
+    // the pharmacist's "Call Next Patient" bar (see
+    // assets/js/shared-queue-bar.js) needs no page of its own since
+    // it's shown app-wide once logged in.
     'Admin':      ['dashboard', 'transaction', 'account', 'crm', 'hr', 'admin', 'inventory', 'report'],
     'Manager':    ['dashboard', 'transaction', 'inventory', 'report'],
-    'Pharmacist': ['transaction', 'inventory'],
+    'Pharmacist': ['dashboard', 'transaction', 'inventory'],
     'Accountant': ['dashboard', 'account', 'report'],
-    'Cashier':    ['transaction']
+    'Cashier':    ['transaction', 'crm']
 };
 const DEFAULT_ROLE = 'Cashier'; // safest/narrowest fallback if a role lookup ever fails
 let ROLE_ACCESS = FALLBACK_ROLE_ACCESS; // replaced with DB data once loaded, see below
@@ -179,6 +186,16 @@ document.addEventListener('DOMContentLoaded', async () => {
     // ============================================
     document.body.style.display = 'flex';
     document.body.style.opacity = '1';
+
+    // 🔥 ADDED: mount the persistent "Call Next Patient" bar (see
+    // assets/js/shared-queue-bar.js, loaded just before this file). It
+    // reads the counter chosen at login (assets/js/auth.js) from
+    // sessionStorage and no-ops if none was chosen -- no role argument
+    // needed any more, since the bar/stage is now driven by which
+    // counter was picked, not by role.
+    if (typeof window.initQueueBar === 'function') {
+        window.initQueueBar();
+    }
 
     // ============================================
     // TOP MENU LOGIC

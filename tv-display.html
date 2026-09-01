@@ -1,0 +1,465 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Now Serving - Griffins Medicals Limited</title>
+
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+    <script src="assets/js/supabase-config.js"></script>
+
+    <!--
+    Standalone kiosk page, same pattern as clock-in.html / the QR
+    clock-in station -- meant to run unattended, full-screen, on a
+    browser left open on the waiting-room TV. Nobody logs in here: it
+    reads via the `anon` role, which database/queue_module_schema.sql
+    grants read-only access to (today's tickets only, and only the
+    columns needed to display them -- no phone/NHIMA number/customer_id).
+
+    Updates live via Supabase Realtime (postgres_changes on
+    queue_tickets), with a plain poll every 5s as a fallback in case
+    Realtime hasn't been switched on for this project yet.
+
+    Voice announcements (browser Web Speech API -- no external service,
+    works offline) read out each newly-called token, and the page
+    reloads itself once a day at a fixed off-hours time to keep a
+    screen that's left running for weeks from slowly accumulating
+    memory/connection cruft. See the "ADDED" comments in the script
+    below for how each works and their trade-offs.
+
+    🔥 CHANGED: "Now Serving" is a table (Counter | Patient) with one
+    row per counter, instead of a single hero number -- Billing has 3
+    counters (Counter 1/2/3) that can all be serving different patients
+    at once, so a single "now serving" box was hiding whichever ones
+    weren't the most-recently-called. See COUNTERS/renderStage() below.
+    -->
+
+    <style>
+        * { box-sizing: border-box; }
+        body {
+            margin: 0;
+            min-height: 100vh;
+            background: #0f172a;
+            color: #f1f5f9;
+            font-family: 'Segoe UI', Arial, sans-serif;
+            display: flex;
+            flex-direction: column;
+        }
+        header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 20px 40px;
+            border-bottom: 1px solid #1e293b;
+        }
+        header .brand { font-size: 1.4rem; font-weight: 700; display: flex; align-items: center; gap: 10px; }
+        header .brand i { color: #3b82f6; }
+        header .clock { font-size: 1.3rem; font-weight: 600; color: #94a3b8; font-variant-numeric: tabular-nums; }
+
+        main {
+            flex: 1;
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 24px;
+            padding: 24px 40px 40px;
+        }
+        .col {
+            background: #111827;
+            border-radius: 16px;
+            border: 1px solid #1e293b;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+        .col-header {
+            padding: 16px 28px;
+            font-size: 1rem;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+        .col-header.billing { background: rgba(37,99,235,0.15); color: #60a5fa; }
+        .col-header.dispensing { background: rgba(217,119,6,0.15); color: #fbbf24; }
+
+        /* 🔥 ADDED: "Now Serving" table -- Counter | Patient, one row per
+           counter, so every counter's current patient is visible at once. */
+        .counter-table { width: 100%; border-collapse: collapse; }
+        .counter-table thead th {
+            text-align: left;
+            font-size: 0.72rem;
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+            color: #64748b;
+            font-weight: 700;
+            padding: 12px 28px;
+            background: #0b1220;
+            border-bottom: 1px solid #1e293b;
+        }
+        .counter-table tbody td {
+            padding: 18px 28px;
+            border-bottom: 1px solid #1e293b;
+            vertical-align: middle;
+        }
+        .counter-table td.counter-name { font-weight: 700; color: #94a3b8; font-size: 1rem; width: 38%; white-space: nowrap; }
+        .counter-table tr.serving td.patient-cell { font-size: 1.5rem; font-weight: 700; color: #f1f5f9; }
+        .counter-table tr.idle td.patient-cell { font-size: 1.1rem; font-style: italic; color: #475569; }
+        .counter-table .token-badge {
+            display: inline-block;
+            background: rgba(255,255,255,0.08);
+            padding: 3px 10px;
+            border-radius: 6px;
+            font-weight: 800;
+            margin-right: 10px;
+            font-variant-numeric: tabular-nums;
+        }
+        .counter-table.billing .token-badge { color: #60a5fa; }
+        .counter-table.dispensing .token-badge { color: #fbbf24; }
+        .counter-table tr.pulse { animation: rowPulse 1.1s ease; }
+        @keyframes rowPulse {
+            0% { background: rgba(37,99,235,0.4); }
+            100% { background: transparent; }
+        }
+
+        .waiting-strip { padding: 10px 28px; font-size: 0.85rem; color: #94a3b8; border-bottom: 1px solid #1e293b; }
+        .waiting-strip strong { color: #f1f5f9; }
+
+        .recent-list { flex: 1; overflow-y: auto; padding: 10px 0; }
+        .recent-row { display: flex; justify-content: space-between; align-items: center; padding: 10px 28px; font-size: 1rem; color: #cbd5e1; }
+        .recent-row .rn { font-weight: 700; }
+        .recent-row .rc { color: #64748b; font-size: 0.85rem; }
+        .recent-row.done { opacity: 0.55; }
+
+        .empty-state { padding: 40px 28px; text-align: center; color: #475569; }
+
+        footer { text-align: center; padding: 10px; font-size: 0.75rem; color: #334155; }
+
+        #soundGate {
+            position: fixed; inset: 0; background: rgba(15,23,42,0.92);
+            display: flex; align-items: center; justify-content: center; z-index: 999;
+        }
+        #soundGate button {
+            background: #2563eb; color: white; border: none; padding: 18px 36px;
+            border-radius: 10px; font-size: 1.2rem; cursor: pointer; font-weight: 600;
+        }
+    </style>
+</head>
+<body>
+
+    <div id="soundGate">
+        <button id="soundGateBtn"><i class="fa-solid fa-volume-high"></i> Tap to Start Display (Sound &amp; Voice)</button>
+    </div>
+
+    <header>
+        <div class="brand"><i class="fa-solid fa-globe"></i> Griffins Medicals Limited</div>
+        <div style="display:flex; align-items:center; gap:16px;">
+            <button id="voiceToggleBtn" title="Turn voice announcements on/off" style="background:#1e293b; border:1px solid #334155; color:#cbd5e1; border-radius:8px; padding:8px 12px; font-size:1rem; cursor:pointer;">
+                <i class="fa-solid fa-volume-high"></i>
+            </button>
+            <div class="clock" id="tvClock">--:--:--</div>
+        </div>
+    </header>
+
+    <main>
+        <section class="col">
+            <div class="col-header billing"><span><i class="fa-solid fa-cash-register"></i> Billing</span></div>
+            <table class="counter-table billing">
+                <thead><tr><th>Counter</th><th>Patient</th></tr></thead>
+                <tbody id="billingCounterTableBody"></tbody>
+            </table>
+            <div class="waiting-strip"><strong id="billingWaitingCount">0</strong> waiting</div>
+            <div class="recent-list" id="billingRecentList"></div>
+        </section>
+
+        <section class="col">
+            <div class="col-header dispensing"><span><i class="fa-solid fa-pills"></i> Dispensing</span></div>
+            <table class="counter-table dispensing">
+                <thead><tr><th>Counter</th><th>Patient</th></tr></thead>
+                <tbody id="dispensingCounterTableBody"></tbody>
+            </table>
+            <div class="waiting-strip"><strong id="dispensingWaitingCount">0</strong> waiting</div>
+            <div class="recent-list" id="dispensingRecentList"></div>
+        </section>
+    </main>
+
+    <footer>Queue display -- updates automatically</footer>
+
+    <script>
+    (function initTvDisplay() {
+        if (typeof supabaseClient === 'undefined') {
+            document.body.innerHTML = '<p style="padding:40px;color:#f87171;">supabaseClient is not defined -- check assets/js/supabase-config.js.</p>';
+            return;
+        }
+
+        // ============================================
+        // CLOCK
+        // ============================================
+        function tickClock() {
+            document.getElementById('tvClock').textContent = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+        }
+        tickClock();
+        setInterval(tickClock, 1000);
+
+        // ============================================
+        // 🔥 ADDED: VOICE ANNOUNCEMENTS (Web Speech API)
+        // ============================================
+        // Reads out "Token number X, Patient Name, please proceed to
+        // Counter Y" whenever a new patient is called, on top of the
+        // chime -- so someone doesn't have to be looking at the screen
+        // to catch their number. Uses the browser's own built-in
+        // text-to-speech (SpeechSynthesis), same as a phone's
+        // accessibility voice -- no account, API key, or internet
+        // service needed. Two real constraints worth knowing:
+        //   1. Browsers block audio AND speech until a real tap/click
+        //      happens on the page (the same "Tap to Start Display" gate
+        //      already here for the chime covers this -- it also fires
+        //      one throwaway utterance below to fully unlock speech).
+        //   2. Available voices depend entirely on what's installed on
+        //      whatever device/browser is actually driving the TV --
+        //      a laptop or Android box running Chrome will have several
+        //      English voices; some bare-bones smart-TV browsers may
+        //      have none, in which case this silently does nothing and
+        //      the chime + visual board still work exactly as before.
+        // A small speaker icon top-right lets staff mute/unmute voice
+        // without touching code; the choice is remembered per-browser.
+        let voiceEnabled = localStorage.getItem('tvVoiceEnabled') !== 'false';
+        let cachedVoice = null;
+
+        function pickVoice() {
+            if (cachedVoice) return cachedVoice;
+            if (!('speechSynthesis' in window)) return null;
+            const voices = speechSynthesis.getVoices();
+            cachedVoice = voices.find(v => v.lang && v.lang.toLowerCase().startsWith('en')) || voices[0] || null;
+            return cachedVoice;
+        }
+        if ('speechSynthesis' in window) {
+            speechSynthesis.onvoiceschanged = () => { cachedVoice = null; pickVoice(); };
+        }
+
+        function speak(text) {
+            if (!voiceEnabled || !('speechSynthesis' in window)) return;
+            try {
+                const utterance = new SpeechSynthesisUtterance(text);
+                const voice = pickVoice();
+                if (voice) utterance.voice = voice;
+                utterance.rate = 0.95;
+                speechSynthesis.speak(utterance);
+            } catch (e) {
+                console.warn('Voice announcement failed (non-fatal):', e);
+            }
+        }
+
+        function updateVoiceToggleIcon() {
+            const btn = document.getElementById('voiceToggleBtn');
+            if (!btn) return;
+            btn.innerHTML = voiceEnabled
+                ? '<i class="fa-solid fa-volume-high"></i>'
+                : '<i class="fa-solid fa-volume-xmark"></i>';
+            btn.style.color = voiceEnabled ? '#cbd5e1' : '#f87171';
+        }
+        updateVoiceToggleIcon();
+
+        document.getElementById('voiceToggleBtn').addEventListener('click', () => {
+            voiceEnabled = !voiceEnabled;
+            localStorage.setItem('tvVoiceEnabled', voiceEnabled ? 'true' : 'false');
+            updateVoiceToggleIcon();
+            if (voiceEnabled) speak('Voice announcements on.');
+            else speechSynthesis.cancel();
+        });
+
+        // ============================================
+        // SOUND (blocked until a tap, per browser autoplay rules)
+        // ============================================
+        let audioCtx = null;
+        document.getElementById('soundGateBtn').addEventListener('click', () => {
+            try { audioCtx = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) { /* ignore */ }
+            document.getElementById('soundGate').style.display = 'none';
+            speak('Queue display ready.'); // also unlocks SpeechSynthesis for later, unprompted calls
+            loadAll();
+        });
+
+        function chime() {
+            if (!audioCtx) return;
+            try {
+                [880, 660].forEach((freq, i) => {
+                    const osc = audioCtx.createOscillator();
+                    const gain = audioCtx.createGain();
+                    osc.type = 'sine';
+                    osc.frequency.value = freq;
+                    gain.gain.setValueAtTime(0.2, audioCtx.currentTime + i * 0.25);
+                    gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + i * 0.25 + 0.4);
+                    osc.connect(gain).connect(audioCtx.destination);
+                    osc.start(audioCtx.currentTime + i * 0.25);
+                    osc.stop(audioCtx.currentTime + i * 0.25 + 0.4);
+                });
+            } catch (e) { /* ignore */ }
+        }
+
+        // ============================================
+        // 🔥 ADDED: "Now Serving" TABLE (Counter | Patient)
+        // ============================================
+        // One row per counter, not one hero box per stage -- Billing has
+        // 3 counters (Counter 1/2/3) that can each be serving a
+        // different patient at the same time, so a single "now serving"
+        // number was silently hiding whichever two weren't the
+        // most-recently-called. Dispensing only ever has one counter
+        // ("Dispatch"), so that table just has one row.
+        const COUNTERS = { billing: ['Counter 1', 'Counter 2', 'Counter 3'], dispensing: ['Dispatch'] };
+
+        // Keyed by "stage:counterName" -> last-seen ticket id for that
+        // counter, so a change is detected (and announced) per counter
+        // instead of per stage. A key that's never been set means "first
+        // time this counter has been rendered this session" -- that case
+        // is intentionally NOT announced, so loading the page doesn't
+        // read out everyone who's already mid-service.
+        let lastServingByCounter = {};
+
+        function renderStage(stage, servingRows, waitingRows, recentRows) {
+            const counterField = stage === 'billing' ? 'billing_counter' : 'dispensing_counter';
+            const tbody = document.getElementById(stage + 'CounterTableBody');
+            const countEl = document.getElementById(stage + 'WaitingCount');
+            const listEl = document.getElementById(stage + 'RecentList');
+
+            const changedCounters = [];
+
+            tbody.innerHTML = COUNTERS[stage].map(counterName => {
+                const ticket = servingRows.find(r => r[counterField] === counterName) || null;
+                const key = stage + ':' + counterName;
+                let pulse = false;
+
+                if (ticket) {
+                    if ((key in lastServingByCounter) && lastServingByCounter[key] !== ticket.id) {
+                        pulse = true;
+                        changedCounters.push({ counterName, ticket });
+                    }
+                    lastServingByCounter[key] = ticket.id;
+                } else {
+                    delete lastServingByCounter[key];
+                }
+
+                const patientCell = ticket
+                    ? `<span class="token-badge">#${ticket.token_number}</span>${ticket.patient_name}`
+                    : 'Waiting&hellip;';
+
+                return `<tr class="${ticket ? 'serving' : 'idle'}${pulse ? ' pulse' : ''}">
+                    <td class="counter-name">${counterName}</td>
+                    <td class="patient-cell">${patientCell}</td>
+                </tr>`;
+            }).join('');
+
+            // Chime once, then read out each changed counter a beat
+            // apart so simultaneous calls don't talk over each other.
+            if (changedCounters.length) {
+                chime();
+                changedCounters.forEach((c, i) => {
+                    setTimeout(() => {
+                        speak(`Token number ${c.ticket.token_number}. ${c.ticket.patient_name}. Please proceed to ${c.counterName}.`);
+                    }, 700 + i * 2500);
+                });
+            }
+
+            countEl.textContent = waitingRows.length;
+
+            if (!recentRows.length) {
+                listEl.innerHTML = '<div class="empty-state">No one called yet today.</div>';
+                return;
+            }
+
+            listEl.innerHTML = recentRows.map(r => `
+                <div class="recent-row ${r.status === 'completed' || r.status === 'skipped' ? 'done' : ''}">
+                    <span><span class="rn">#${r.token_number}</span> &nbsp; ${r.patient_name}</span>
+                    <span class="rc">${r[counterField] || ''}</span>
+                </div>
+            `).join('');
+        }
+
+        // ============================================
+        // LOAD + RENDER BOTH COLUMNS
+        // ============================================
+        async function loadAll() {
+            const today = new Date().toISOString().split('T')[0];
+            const { data, error } = await supabaseClient
+                .from('queue_tickets')
+                .select('id, token_number, patient_name, status, billing_counter, dispensing_counter, called_billing_at, called_dispensing_at, completed_at, created_at')
+                .eq('queue_date', today)
+                .order('token_number', { ascending: true });
+
+            if (error) {
+                console.error('Error loading queue for TV display:', error);
+                return;
+            }
+
+            const rows = data || [];
+
+            // 🔥 CHANGED: ALL currently-serving rows for the stage, not
+            // just the most-recently-called one -- the table shows every
+            // counter at once, so every one of them needs its ticket.
+            const billingServing = rows.filter(r => r.status === 'serving_billing');
+            const billingWaiting = rows.filter(r => r.status === 'waiting_billing');
+            const billingRecent = rows
+                .filter(r => r.called_billing_at)
+                .sort((a, b) => new Date(b.called_billing_at) - new Date(a.called_billing_at))
+                .slice(0, 8);
+
+            const dispensingServing = rows.filter(r => r.status === 'serving_dispensing');
+            const dispensingWaiting = rows.filter(r => r.status === 'waiting_dispensing');
+            const dispensingRecent = rows
+                .filter(r => r.called_dispensing_at)
+                .sort((a, b) => new Date(b.called_dispensing_at) - new Date(a.called_dispensing_at))
+                .slice(0, 8);
+
+            renderStage('billing', billingServing, billingWaiting, billingRecent);
+            renderStage('dispensing', dispensingServing, dispensingWaiting, dispensingRecent);
+        }
+
+        // ============================================
+        // LIVE UPDATES: realtime + polling fallback
+        // ============================================
+        try {
+            supabaseClient
+                .channel('queue_tickets_tv_' + Date.now())
+                .on('postgres_changes', { event: '*', schema: 'public', table: 'queue_tickets' }, () => loadAll())
+                .subscribe();
+        } catch (e) {
+            console.warn('Realtime subscription failed, falling back to polling only:', e);
+        }
+        setInterval(loadAll, 5000);
+
+        // ============================================
+        // 🔥 ADDED: DAILY SELF-REFRESH
+        // ============================================
+        // This page is meant to stay open on a TV indefinitely -- days
+        // or weeks at a stretch. Data freshness is already handled above
+        // (realtime + a 5s poll), so this isn't about that; it's plain
+        // browser hygiene for a tab that never closes: a full reload
+        // once a day clears out any slow memory growth or a realtime
+        // socket that's quietly gone stale, before either becomes
+        // visible as a problem.
+        //
+        // Scheduled for a fixed, configurable off-hours time rather than
+        // "every N hours from whenever it happened to load", so it never
+        // lands in the middle of a busy afternoon. Change
+        // DAILY_RELOAD_HOUR below if 3 AM isn't a quiet time here.
+        //
+        // Trade-off worth knowing: this reload also resets the sound
+        // gate (browsers re-block audio/speech after any full page
+        // load), so voice goes silent until someone taps the screen
+        // again -- normally a non-issue since it lands hours before
+        // opening and whoever arrives first taps it same as any other
+        // morning. The visual board itself is never affected either way.
+        // ============================================
+        const DAILY_RELOAD_HOUR = 3; // 24h clock, local time to this device
+        (function scheduleDailyReload() {
+            const now = new Date();
+            const next = new Date(now);
+            next.setHours(DAILY_RELOAD_HOUR, 0, 0, 0);
+            if (next <= now) next.setDate(next.getDate() + 1);
+            setTimeout(() => location.reload(), next - now);
+        })();
+    })();
+    </script>
+</body>
+</html>
