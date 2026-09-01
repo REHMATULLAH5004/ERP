@@ -2357,9 +2357,19 @@
                         setTimeout(() => {
                             batchSelect.value = batches[0].id;
                             if (taxInput) taxInput.value = product.tax_percent || 0;
-                            updateRowRate(row);
-                            updateRowTotal(row);
-                            updateTotals();
+                            // 🔥 FIX: setting .value programmatically does NOT fire a
+                            // 'change' event, so this auto-pick of the first batch used
+                            // to silently skip the "auto-add next row" logic that only
+                            // ran on a manual batch selection (see the 'change' handler
+                            // on .retail-pos-batch below). That's exactly the real-world
+                            // case: most products only have one batch, it gets
+                            // auto-selected here, qty is already defaulted to 1, and
+                            // nothing is ever "changed" by hand -- so no second row ever
+                            // appeared even though the item was fully entered. Dispatching
+                            // a real 'change' event routes through that same handler
+                            // (rate/total/new-row all in one place) instead of duplicating
+                            // it here.
+                            batchSelect.dispatchEvent(new Event('change', { bubbles: true }));
                         }, 50);
                     }
                 }
@@ -4445,27 +4455,12 @@
     console.log("✅ Customer existence ensurer added - permanent fix for FK constraint");
 
     // ============================================
-    // 🎨 ADDED (layout redesign): qty stepper buttons for the item table.
-    // Purely additive UI sugar -- doesn't duplicate or change any
-    // calculation/business logic above. The buttons just mutate the SAME
-    // .retail-pos-qty input already wired by the 'input' listener further
-    // up and dispatch a real 'input' event, so row total recalculation,
-    // batch stock validation, and auto-adding the next empty row all fire
-    // exactly as if the number had been typed by hand.
+    // 🔥 REMOVED: qty stepper (+/-) buttons for the item table. Cashiers
+    // never used them -- qty is always typed directly -- so the buttons
+    // and their click handler were removed; the HTML qty cell is now just
+    // the plain .retail-pos-qty input (see index.html), still wired by the
+    // 'input' listener further up exactly as before.
     // ============================================
-    posTableBody.addEventListener('click', function (e) {
-        const stepBtn = e.target.closest('.qty-step-inc, .qty-step-dec');
-        if (!stepBtn) return;
-        const row = stepBtn.closest('tr');
-        const qtyInput = row?.querySelector('.retail-pos-qty');
-        if (!qtyInput || qtyInput.disabled) return;
-
-        const step = stepBtn.classList.contains('qty-step-inc') ? 1 : -1;
-        const current = parseInt(qtyInput.value) || 0;
-        const next = Math.max(0, current + step);
-        qtyInput.value = next;
-        qtyInput.dispatchEvent(new Event('input', { bubbles: true }));
-    });
 
 })();
 // ============================================
