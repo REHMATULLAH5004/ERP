@@ -312,7 +312,17 @@
                     ttsAudioEl.onended = () => { URL.revokeObjectURL(url); resolve(); };
                     ttsAudioEl.onerror = () => { URL.revokeObjectURL(url); reject(new Error('Audio playback failed')); };
                     ttsAudioEl.src = url;
-                    ttsAudioEl.play().catch(reject);
+                    // 🔎 TEMPORARY: the ONE thing we still can't see -- whether
+                    // play() actually succeeds on a REAL automatic call, and
+                    // the exact state of the element at that moment (muted?
+                    // volume? is the tab even focused/visible?). Confirmed via
+                    // Supabase's own function logs that Polly IS being called
+                    // and returning real audio for real "Call Next" events --
+                    // this narrows down what happens after that.
+                    console.log('[voice] about to play -- muted:', ttsAudioEl.muted, 'volume:', ttsAudioEl.volume, 'tab visible:', document.visibilityState, 'tab focused:', document.hasFocus());
+                    ttsAudioEl.play()
+                        .then(() => console.log('[voice] play() RESOLVED -- should be audible'))
+                        .catch(err => { console.log('[voice] play() REJECTED:', err.name, '-', err.message); reject(err); });
                 })
                 .catch(err => {
                     clearTimeout(timeout);
