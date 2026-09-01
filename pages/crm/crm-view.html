@@ -1,0 +1,99 @@
+<div class="module-view-container" id="crmRegisterContainer" data-init="false">
+
+    <div style="display: grid; grid-template-columns: 1.1fr 0.9fr; gap: 20px; align-items: start;">
+
+        <!-- ============================= -->
+        <!-- LEFT: REGISTRATION FORM       -->
+        <!-- ============================= -->
+        <!-- 🔥 CHANGED: CRM registration is NHIMA-only now -- the earlier
+             "Cash / Regular Patient" and "NRC Patient" tabs are gone, this
+             is a single-purpose form. It still creates (or reuses) the
+             customer record and issues a queue token, same as before --
+             what's different is HOW an existing patient is found: Retail
+             POS looks patients up by NHIMA number (guaranteed unique to
+             one person), but NRC Number is the "source" field here
+             instead. NHIMA Number is still collected (still required --
+             needed for claims) but is no longer what's used to recognise
+             a returning patient. See the note above ensurePatientCustomer()
+             in crm-view.js for why (NRC, unlike NHIMA number, isn't
+             guaranteed unique to one person). -->
+        <div class="card" style="padding: 20px;">
+            <h3 style="margin: 0 0 4px 0;"><i class="fa-solid fa-user-plus" style="color:#2563eb;"></i> Register NHIMA Patient</h3>
+            <p class="helper-text" style="margin: 0 0 16px 0;">Creates (or reuses) the patient's record and issues a queue token to print. Patients are looked up here by NRC Number -- unlike Retail POS, which looks patients up by NHIMA number.</p>
+
+            <form id="crmRegisterForm">
+                <!-- NRC lookup -- the "source" field: typing an NRC (and
+                     the patient's name) checks for an existing record. -->
+                <div class="form-group">
+                    <label>NRC Number *</label>
+                    <input type="text" id="qregNrc" class="form-control" placeholder="e.g. 123456/78/9" autocomplete="off" required>
+                    <div id="qregNrcMatchHint" class="helper-text" style="margin-top:4px; display:none;"></div>
+                </div>
+
+                <!-- 🔥 ADDED: when patients already exist under this NRC,
+                     pick the returning one here to load (and edit) their
+                     record; leave it on "New patient" to register someone
+                     new under the same NRC instead. See checkNrcMatch()
+                     and ensurePatientCustomer() in crm-view.js. -->
+                <div class="form-group" id="qregNrcMatchWrap" style="display:none;">
+                    <label>Existing Patients With This NRC</label>
+                    <select id="qregNrcMatchSelect" class="form-control">
+                        <option value="">-- New patient (not in the list below) --</option>
+                    </select>
+                </div>
+
+                <div class="form-group">
+                    <label>Full Name *</label>
+                    <input type="text" id="qregFullName" class="form-control" placeholder="Enter patient's full name" required>
+                </div>
+
+                <div class="form-group">
+                    <label>NHIMA Number *</label>
+                    <input type="text" id="qregNhimaNumber" class="form-control" placeholder="Enter NHIMA number" required>
+                </div>
+
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>Phone Number</label>
+                        <input type="text" id="qregPhone" class="form-control" placeholder="e.g. 0971234567">
+                    </div>
+                    <div class="form-group">
+                        <label>Address</label>
+                        <input type="text" id="qregAddress" class="form-control" placeholder="Enter address">
+                    </div>
+                </div>
+
+                <button type="submit" id="qregSubmitBtn" class="btn btn-primary" style="width:100%; justify-content:center; padding:12px;">
+                    <i class="fa-solid fa-ticket"></i> Register &amp; Issue Token
+                </button>
+                <div id="qregFormError" style="display:none; margin-top:10px; padding:10px 12px; background:#fef2f2; color:#dc2626; border-radius:6px; font-size:0.85rem;"></div>
+            </form>
+        </div>
+
+        <!-- ============================= -->
+        <!-- RIGHT: TOKEN PREVIEW + RECENT -->
+        <!-- ============================= -->
+        <div>
+            <div class="card" id="qregTokenCard" style="padding: 24px; text-align:center; margin-bottom:16px; display:none;">
+                <div style="color:#64748b; font-size:0.8rem; font-weight:600; letter-spacing:0.05em; text-transform:uppercase;">Token Issued</div>
+                <div id="qregTokenNumber" style="font-size:3.4rem; font-weight:800; color:#2563eb; line-height:1.1; margin:6px 0;">--</div>
+                <div id="qregTokenName" style="font-size:1.1rem; font-weight:600; color:#0f172a;"></div>
+                <div id="qregTokenMeta" style="font-size:0.85rem; color:#64748b; margin-top:4px;"></div>
+                <div style="display:flex; gap:8px; margin-top:16px;">
+                    <button id="qregPrintBtn" class="btn btn-primary" style="flex:1; justify-content:center;"><i class="fa-solid fa-print"></i> Print Token</button>
+                    <button id="qregNewBtn" class="btn btn-secondary" style="flex:1; justify-content:center;"><i class="fa-solid fa-rotate"></i> Register Next</button>
+                </div>
+            </div>
+
+            <div class="card" style="padding:0;">
+                <div style="padding: 12px 20px; border-bottom: 1px solid #e8edf3; display:flex; justify-content:space-between; align-items:center;">
+                    <strong><i class="fa-solid fa-clock-rotate-left" style="color:#2563eb;"></i> Recently Registered</strong>
+                    <button class="btn btn-outline btn-sm" onclick="window.open('tv-display.html','_blank')"><i class="fa-solid fa-tv"></i> TV Display</button>
+                </div>
+                <div id="qregRecentList" style="max-height: 420px; overflow-y:auto;">
+                    <p class="helper-text" style="padding:16px;">Nothing yet today.</p>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>

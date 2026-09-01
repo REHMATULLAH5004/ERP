@@ -1,107 +1,105 @@
 <div class="module-view-container">
 
-    <!-- 🔥 ADDED: SHARED EXCHANGE RATE -->
-    <!-- Set once here, used as the default rate across Payments, Purchase
-         Orders, and Cash & Bank for the rest of the day -- instead of
-         re-typing today's rate into every single transaction. Still
-         editable on an individual transaction if one genuinely needs a
-         different rate. -->
-    <div class="card" style="padding: 20px; margin-bottom:20px; display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:15px;">
-        <div>
-            <h3 style="margin: 0 0 4px 0;"><i class="fa-solid fa-money-bill-transfer" style="color:#059669;"></i> Today's Exchange Rate</h3>
-            <p style="margin:0; color:#64748b; font-size:0.85rem; max-width:420px;">Used as the default rate across Payments, Purchase Orders, and Cash &amp; Bank.</p>
-        </div>
-        <div style="display:flex; align-items:center; gap:15px;">
-            <div style="text-align:right;">
-                <div style="font-size:1.6rem; font-weight:700; color:#0f172a;" id="dashExchangeRateValue">--</div>
-                <div style="font-size:0.7rem; color:#94a3b8;" id="dashExchangeRateUpdated">Loading...</div>
+    <!-- 🔥 ADDED: CALL NEXT PATIENT (DISPATCH ONLY) -->
+    <!-- Hidden by default -- shown only when THIS login chose "Dispatch"
+         as their counter at login (assets/js/auth.js's counter picker,
+         stored in sessionStorage.staffCounter), checked and unhidden by
+         initDispatchQueueCard() in dashboard-view.js. Not a role check:
+         a Pharmacist login that picked a different counter (or skipped
+         the picker) won't see this. Talks to the exact same
+         call_next_ticket / complete_dispensing_ticket / skip_ticket RPCs
+         (and queue_tickets table) as the always-visible top bar
+         (assets/js/shared-queue-bar.js) -- this card is just a second,
+         more prominent way to reach the same action right here on the
+         page dispatch already works from, kept in sync with the top bar
+         via sessionStorage + a 'queueServingChanged' event. -->
+    <div class="card" id="dashDispatchQueueCard" style="padding: 20px; margin-bottom:20px; display:none;">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:15px; flex-wrap:wrap; gap:10px;">
+            <div>
+                <h3 style="margin: 0 0 4px 0;"><i class="fa-solid fa-bell" style="color:#2563eb;"></i> Dispensing Queue</h3>
+                <p style="margin:0; color:#64748b; font-size:0.85rem;">Call the next patient waiting for dispensing -- also shown on the waiting-room TV.</p>
             </div>
-            <button id="dashOpenExchangeRateModalBtn" class="btn btn-primary btn-sm">
-                <i class="fa-solid fa-pen"></i> Update Rate
+            <span id="dashDispatchWaitingBadge" style="background:#eff6ff; color:#2563eb; padding:4px 12px; border-radius:10px; font-size:0.8rem; font-weight:600;">0 waiting</span>
+        </div>
+
+        <div id="dashDispatchIdle" style="display:flex; align-items:center;">
+            <button id="dashDispatchNextBtn" class="btn btn-primary">
+                <i class="fa-solid fa-forward"></i> Call Next Patient
             </button>
         </div>
-    </div>
 
-    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 20px;">
-
-        <!-- QUICK ATTENDANCE -->
-        <div class="card" style="padding: 20px;">
-            <h3 style="margin: 0 0 15px 0;"><i class="fa-solid fa-clock" style="color:#2563eb;"></i> My Attendance Today</h3>
-
-            <div id="dashAttendanceStatus" style="padding: 16px; background: #f8fafc; border-radius: 8px; margin-bottom: 15px; text-align: center;">
-                <span style="color: #94a3b8;"><i class="fa-solid fa-spinner fa-spin"></i> Loading...</span>
+        <div id="dashDispatchServing" style="display:none; align-items:center; gap:14px; flex-wrap:wrap; background:#f8fafc; border-radius:8px; padding:14px;">
+            <div>
+                <div style="font-size:0.75rem; color:#94a3b8; text-transform:uppercase; letter-spacing:0.5px;">Now Serving</div>
+                <div style="font-size:1.3rem; font-weight:700; color:#0f172a;">#<span id="dashDispatchServingToken">--</span> -- <span id="dashDispatchServingName"></span></div>
             </div>
-
-            <!-- 🔥 FIX: self-service Clock In/Out removed -- if this
-                 button still worked, employees could bypass the QR code
-                 entirely and just clock in from anywhere via the
-                 website, defeating the whole point of requiring a scan
-                 at the pharmacy. Attendance can now only be recorded by
-                 scanning the QR code at the Clock-In Station. -->
-            <div style="padding: 12px; background: #eff6ff; border-radius: 8px; text-align: center; font-size: 0.85rem; color: #1d4ed8;">
-                <i class="fa-solid fa-qrcode"></i> Scan the QR code at the pharmacy to clock in or out.
-            </div>
-        </div>
-
-        <!-- LEAVE REQUEST -->
-        <div class="card" style="padding: 20px;">
-            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:15px;">
-                <h3 style="margin: 0;"><i class="fa-solid fa-plane-departure" style="color:#8b5cf6;"></i> Leave</h3>
-                <button id="dashOpenLeaveModalBtn" class="btn btn-primary btn-sm">
-                    <i class="fa-solid fa-plus"></i> Request Leave
-                </button>
-            </div>
-            <div id="dashMyLeaveList">
-                <p style="color:#94a3b8; text-align:center; padding: 20px;"><i class="fa-solid fa-spinner fa-spin"></i> Loading...</p>
+            <div style="display:flex; gap:8px; margin-left:auto;">
+                <button id="dashDispatchCompleteBtn" class="btn btn-success btn-sm"><i class="fa-solid fa-check"></i> Mark Complete</button>
+                <button id="dashDispatchSkipBtn" style="background:transparent; border:1px solid #e2e8f0; color:#64748b; border-radius:6px; padding:6px 14px; font-size:0.82rem; cursor:pointer;">Skip / No Show</button>
             </div>
         </div>
     </div>
 
-    <!-- 🔥 ADDED: ADVANCE REQUEST -->
+    <!-- 🔥 ADDED: DISPENSING -- PRINT LABELS -->
+    <!-- Sticker/label printing used to happen at the till, chained right
+         after the invoice print -- that made checkout do two people's jobs
+         at once (cashier + dispenser) and meant a slow/jammed label printer
+         blocked the next customer. Moved here so whoever is dispensing can
+         work through completed sales independently of the till, on their
+         own device/screen. Reads `sales.items` directly (the same JSON
+         snapshot the "View Items" modal in POS uses) rather than joining
+         sale_items, since it already has everything a sticker needs --
+         product_name, how_to_take, qty, pack_size, days_supplied. See
+         loadDispenseQueue() / searchDispenseSales() / printLabelsForSale()
+         in dashboard-view.js. Needs sales.labels_printed_at (nullable
+         timestamptz, added via migration) to track what's pending vs done. -->
     <div class="card" style="padding: 20px; margin-bottom:20px;">
-        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:15px;">
-            <h3 style="margin: 0;"><i class="fa-solid fa-hand-holding-dollar" style="color:#f59e0b;"></i> Salary Advance</h3>
-            <button id="dashOpenAdvanceModalBtn" class="btn btn-primary btn-sm">
-                <i class="fa-solid fa-plus"></i> Request Advance
-            </button>
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:15px; flex-wrap:wrap; gap:10px;">
+            <div>
+                <h3 style="margin: 0 0 4px 0;"><i class="fa-solid fa-pills" style="color:#2563eb;"></i> Dispensing -- Print Labels</h3>
+                <p style="margin:0; color:#64748b; font-size:0.85rem; max-width:480px;">Print medicine stickers for completed retail sales -- independent of the till, so dispensing never blocks checkout.</p>
+            </div>
+            <div style="display:flex; gap:8px; flex-wrap:wrap;">
+                <input type="text" id="dashDispenseSearchInput" placeholder="Search invoice # e.g. GRI-2026-..." style="padding:8px 12px; border:1px solid #e2e8f0; border-radius:6px; font-size:0.85rem; width:220px;">
+                <button id="dashDispenseSearchBtn" class="btn btn-primary btn-sm"><i class="fa-solid fa-magnifying-glass"></i> Search</button>
+            </div>
         </div>
-        <div id="dashMyAdvanceList">
-            <p style="color:#94a3b8; text-align:center; padding: 20px;"><i class="fa-solid fa-spinner fa-spin"></i> Loading...</p>
+
+        <div id="dashDispenseSearchResults"></div>
+
+        <div style="display:flex; justify-content:space-between; align-items:center; margin: 15px 0 8px 0;">
+            <div style="font-size:0.7rem; font-weight:700; color:#94a3b8; letter-spacing:0.5px; text-transform:uppercase;">Pending Labels</div>
+            <button id="dashDispenseRefreshBtn" style="background:none; border:none; color:#2563eb; cursor:pointer; font-size:0.8rem;"><i class="fa-solid fa-rotate"></i> Refresh</button>
+        </div>
+        <div class="table-responsive">
+            <table class="table-minimal" id="dashDispenseQueueTable" style="width:100%;">
+                <thead>
+                    <tr>
+                        <th style="padding-left:12px;">Invoice #</th>
+                        <th>Customer</th>
+                        <th>Items</th>
+                        <th>Time</th>
+                        <th style="text-align:right; padding-right:12px;">Action</th>
+                    </tr>
+                </thead>
+                <tbody id="dashDispenseQueueBody">
+                    <tr><td colspan="5" style="text-align:center;padding:20px;color:#94a3b8;">Loading...</td></tr>
+                </tbody>
+            </table>
         </div>
     </div>
 
-    <!-- 🔥 ADDED: THIS MONTH SUMMARY -->
-    <div class="card" style="padding:20px; margin-bottom:20px;">
-        <h3 style="margin:0 0 15px 0;"><i class="fa-solid fa-calendar-check" style="color:#0891b2;"></i> This Month</h3>
-        <div style="display:grid; grid-template-columns:repeat(3,1fr); gap:15px; margin-bottom:20px;">
-            <div style="text-align:center; padding:12px; background:#f8fafc; border-radius:8px;">
-                <div style="font-size:1.6rem; font-weight:700; color:#0f172a;" id="dashMonthWorkedHours">--</div>
-                <div style="font-size:0.75rem; color:#64748b; text-transform:uppercase;">Hours Worked</div>
-            </div>
-            <div style="text-align:center; padding:12px; background:#f8fafc; border-radius:8px;">
-                <div style="font-size:1.6rem; font-weight:700; color:#dc2626;" id="dashMonthAbsent">--</div>
-                <div style="font-size:0.75rem; color:#64748b; text-transform:uppercase;">Absent Days</div>
-            </div>
-            <div style="text-align:center; padding:12px; background:#f8fafc; border-radius:8px;">
-                <div style="font-size:1.6rem; font-weight:700; color:#8b5cf6;" id="dashMonthLeave">--</div>
-                <div style="font-size:0.75rem; color:#64748b; text-transform:uppercase;">Leave Days Taken</div>
-            </div>
-        </div>
-
-        <!-- Calendar legend -->
-        <div style="display:flex; gap:14px; flex-wrap:wrap; margin-bottom:10px; font-size:0.75rem; color:#64748b;">
-            <span><span style="display:inline-block;width:10px;height:10px;background:#22c55e;border-radius:2px;margin-right:4px;"></span>Present</span>
-            <span><span style="display:inline-block;width:10px;height:10px;background:#ef4444;border-radius:2px;margin-right:4px;"></span>Absent</span>
-            <span><span style="display:inline-block;width:10px;height:10px;background:#8b5cf6;border-radius:2px;margin-right:4px;"></span>On Leave</span>
-            <span><span style="display:inline-block;width:10px;height:10px;background:#eab308;border-radius:2px;margin-right:4px;"></span>Holiday</span>
-            <span><span style="display:inline-block;width:10px;height:10px;background:#cbd5e1;border-radius:2px;margin-right:4px;"></span>Off Day</span>
-            <span><span style="display:inline-block;width:10px;height:10px;background:#f1f5f9;border:1px solid #e2e8f0;border-radius:2px;margin-right:4px;"></span>Upcoming</span>
-        </div>
-
-        <div id="dashMonthCalendar" style="display:grid; grid-template-columns:repeat(7,1fr); gap:4px;">
-            <!-- Populated by JS -->
-        </div>
-    </div>
+    <!-- 🔥 MOVED TO SIDEBAR: Today's Exchange Rate, My Attendance Today
+         (removed entirely -- see below), Leave, Salary Advance, and This
+         Month (attendance register) all used to be full cards here.
+         Exchange Rate / Leave / Salary Advance / Attendance Register now
+         live as compact widgets in dashboard-menu.html (this page felt
+         "quite full" with all of them as full-width cards) -- same
+         modals, same logic in dashboard-view.js, just opened from the
+         sidebar now. "My Attendance Today" wasn't moved, it was removed
+         outright: it was a read-only display with nothing to actually do
+         on this page any more since self-service clock in/out was
+         already replaced by the QR Station. -->
 
     <!-- ADMIN: PENDING APPROVALS (only shown for Admin role) -->
     <div class="card" id="dashAdminApprovalsCard" style="padding: 0; display:none;">

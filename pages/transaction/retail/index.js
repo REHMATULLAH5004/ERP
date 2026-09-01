@@ -89,6 +89,16 @@
         });
     }
 
+    // 🔥 ADDED: "+ Add Item" button in the redesigned Items card header --
+    // manually appends a blank row the same way the table already
+    // auto-appends one once you fill in the last row's quantity.
+    const retailAddItemBtn = document.getElementById('retailAddItemBtn');
+    if (retailAddItemBtn) {
+        retailAddItemBtn.addEventListener('click', function () {
+            addPOSRow();
+        });
+    }
+
     if (toggleSidebarBtn) {
         // 🔥 FIX: previously looked up a `#appRoot` element that doesn't
         // exist anywhere in the page, so this button silently did
@@ -244,7 +254,16 @@
         document.body.insertAdjacentHTML('beforeend', viewItemsHTML);
     }
 
-    // 3. Print Confirmation Modal
+    // 3. Confirm Modal (generic themed dialog shell)
+    // 🔥 CHANGED: this used to always be the "Would you like to print
+    // the invoice?" prompt (hence the id/icon still saying "print").
+    // Saving now prints automatically instead -- this same shell is
+    // repurposed by the isolated queue-bridge script at the bottom of
+    // this file for its "Send to Dispatch" popup (shown only when the
+    // sale being saved is tied to a patient queue ticket), which
+    // rewrites the icon/title/message/button text before showing it.
+    // Left with its original id/default copy here so the modal always
+    // exists in the DOM even before the bridge script (if any) touches it.
     if (!document.getElementById('retailPrintModal')) {
         const printModalHTML = `
         <div id="retailPrintModal" style="display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(15, 23, 42, 0.6); backdrop-filter: blur(4px); z-index: 1001; justify-content: center; align-items: center;">
@@ -293,6 +312,108 @@
         document.body.insertAdjacentHTML('beforeend', searchModalHTML);
     }
 
+    // 5. Dose Instructions Modal
+    // 🔥 ADDED: replaces the old free-text "How to Take" field with a
+    // structured builder -- qty per dose, which time(s) of day, before/after
+    // food, and an optional note for rare/special cases. The generated
+    // sentence is written into the same .retail-pos-how-to-take input that
+    // already existed, so nothing downstream (save payload, sticker print,
+    // loading a saved sale for edit) needed to change -- see
+    // buildDoseSentence() and the wiring below.
+    //
+    // 🔥 EXTENDED: the original model only covered tablets/capsules. Added
+    // a Form selector (Tablet/Capsule, Liquid, Injectable) that switches
+    // which fields are relevant -- liquid swaps the unit to ml, injectable
+    // swaps in a route (IM/IV/SC) + a unit choice (ml/vial(s)/ampoule(s)/
+    // units) and a "single dose" toggle, and hides the Food section since
+    // food timing doesn't apply to injections. See buildDoseSentence() and
+    // applyDoseFormVisibility() below.
+    if (!document.getElementById('retailDoseModal')) {
+        const doseModalHTML = `
+        <div id="retailDoseModal" style="display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(15, 23, 42, 0.6); backdrop-filter: blur(4px); z-index: 1002; justify-content: center; align-items: center;">
+            <div class="modal-content-box" style="background: white; padding: 25px; border-radius: 12px; width: 90%; max-width: 420px; max-height: 90vh; overflow-y: auto; box-shadow: 0 20px 50px rgba(0,0,0,0.5);">
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; border-bottom: 1px solid #e2e8f0; padding-bottom: 12px;">
+                    <h3 style="margin: 0; font-size: 1rem;"><i class="fa-solid fa-pills" style="color: #2563eb;"></i> Dosage Instructions</h3>
+                    <button id="retailDoseCloseBtn" type="button" style="background: none; border: none; font-size: 1.4rem; cursor: pointer; color: #64748b;">&times;</button>
+                </div>
+
+                <div style="margin-bottom: 12px;">
+                    <label style="display: block; font-weight: 500; color: #475569; margin-bottom: 6px; font-size: 0.8rem;">Form</label>
+                    <div style="display: flex; gap: 4px; background: #f1f5f9; padding: 3px; border-radius: 6px; width: fit-content;">
+                        <button type="button" class="retail-dose-form-btn active" data-form="tablet" style="padding: 6px 14px; border: none; border-radius: 4px; cursor: pointer; background: #2563eb; color: white; font-weight: 500; font-size: 0.76rem;">Tablet/Capsule</button>
+                        <button type="button" class="retail-dose-form-btn" data-form="liquid" style="padding: 6px 14px; border: none; border-radius: 4px; cursor: pointer; background: transparent; color: #475569; font-size: 0.76rem;">Liquid</button>
+                        <button type="button" class="retail-dose-form-btn" data-form="injectable" style="padding: 6px 14px; border: none; border-radius: 4px; cursor: pointer; background: transparent; color: #475569; font-size: 0.76rem;">Injectable</button>
+                    </div>
+                </div>
+
+                <div style="margin-bottom: 12px; display: flex; gap: 10px; align-items: flex-end;">
+                    <div>
+                        <label id="retailDoseQtyLabel" style="display: block; font-weight: 500; color: #475569; margin-bottom: 4px; font-size: 0.8rem;">Tablets per dose</label>
+                        <input type="number" id="retailDoseQty" min="0.25" step="0.25" value="1" style="width: 90px; padding: 6px 10px; border: 1px solid #e2e8f0; border-radius: 4px; font-size: 0.85rem;">
+                    </div>
+                    <div id="retailDoseUnitRow" style="display: none;">
+                        <label style="display: block; font-weight: 500; color: #475569; margin-bottom: 4px; font-size: 0.8rem;">Unit</label>
+                        <select id="retailDoseUnit" style="padding: 6px 10px; border: 1px solid #e2e8f0; border-radius: 4px; font-size: 0.85rem;">
+                            <option value="ml">ml</option>
+                            <option value="vial">vial(s)</option>
+                            <option value="ampoule">ampoule(s)</option>
+                            <option value="units">units</option>
+                        </select>
+                    </div>
+                </div>
+
+                <div id="retailDoseRouteSection" style="display: none; margin-bottom: 12px;">
+                    <label style="display: block; font-weight: 500; color: #475569; margin-bottom: 6px; font-size: 0.8rem;">Route</label>
+                    <div style="display: flex; gap: 10px;">
+                        <label style="display:flex; align-items:center; gap:5px; font-size:0.82rem; cursor:pointer;"><input type="radio" name="retailDoseRoute" class="retail-dose-route" value="IM" checked> IM</label>
+                        <label style="display:flex; align-items:center; gap:5px; font-size:0.82rem; cursor:pointer;"><input type="radio" name="retailDoseRoute" class="retail-dose-route" value="IV"> IV</label>
+                        <label style="display:flex; align-items:center; gap:5px; font-size:0.82rem; cursor:pointer;"><input type="radio" name="retailDoseRoute" class="retail-dose-route" value="SC"> SC</label>
+                    </div>
+                </div>
+
+                <div id="retailDoseOneTimeRow" style="display: none; margin-bottom: 12px;">
+                    <label style="display:flex; align-items:center; gap:6px; font-size:0.82rem; cursor:pointer; color: #475569;">
+                        <input type="checkbox" id="retailDoseOneTime"> Single (one-time / STAT) dose -- not a recurring schedule
+                    </label>
+                </div>
+
+                <div id="retailDoseWhenSection" style="margin-bottom: 12px;">
+                    <label style="display: block; font-weight: 500; color: #475569; margin-bottom: 6px; font-size: 0.8rem;">When</label>
+                    <div style="display: flex; flex-wrap: wrap; gap: 10px;">
+                        <label style="display:flex; align-items:center; gap:5px; font-size:0.82rem; cursor:pointer;"><input type="checkbox" class="retail-dose-time" value="morning"> Morning</label>
+                        <label style="display:flex; align-items:center; gap:5px; font-size:0.82rem; cursor:pointer;"><input type="checkbox" class="retail-dose-time" value="noon"> Noon</label>
+                        <label style="display:flex; align-items:center; gap:5px; font-size:0.82rem; cursor:pointer;"><input type="checkbox" class="retail-dose-time" value="evening"> Evening</label>
+                        <label style="display:flex; align-items:center; gap:5px; font-size:0.82rem; cursor:pointer;"><input type="checkbox" class="retail-dose-time" value="bedtime"> Before Bed</label>
+                    </div>
+                </div>
+
+                <div id="retailDoseFoodSection" style="margin-bottom: 12px;">
+                    <label style="display: block; font-weight: 500; color: #475569; margin-bottom: 6px; font-size: 0.8rem;">Food</label>
+                    <div style="display: flex; gap: 14px;">
+                        <label style="display:flex; align-items:center; gap:5px; font-size:0.82rem; cursor:pointer;"><input type="checkbox" id="retailDoseAfterFood"> After Food</label>
+                        <label style="display:flex; align-items:center; gap:5px; font-size:0.82rem; cursor:pointer;"><input type="checkbox" id="retailDoseBeforeFood"> Before Food</label>
+                    </div>
+                </div>
+
+                <div style="margin-bottom: 15px;">
+                    <label style="display: block; font-weight: 500; color: #475569; margin-bottom: 4px; font-size: 0.8rem;">Note (optional -- for rare/special cases)</label>
+                    <textarea id="retailDoseNote" rows="2" placeholder="e.g. Take with plenty of water" style="width: 100%; padding: 6px 10px; border: 1px solid #e2e8f0; border-radius: 4px; font-size: 0.8rem; resize: vertical; box-sizing: border-box;"></textarea>
+                </div>
+
+                <div id="retailDosePreview" style="background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 4px; padding: 8px 10px; margin-bottom: 15px; font-size: 0.78rem; color: #475569; min-height: 20px; white-space: pre-line;">
+                    Tick a time above to see the generated instructions.
+                </div>
+
+                <div style="display: flex; gap: 8px; justify-content: flex-end; border-top: 1px solid #e2e8f0; padding-top: 12px;">
+                    <button id="retailDoseCancelBtn" type="button" style="background: #f1f5f9; border: 1px solid #e2e8f0; padding: 8px 20px; border-radius: 6px; cursor: pointer; font-size: 0.85rem;">Cancel</button>
+                    <button id="retailDoseApplyBtn" type="button" style="background: #2563eb; color: white; border: none; padding: 8px 20px; border-radius: 6px; cursor: pointer; font-size: 0.85rem;">Apply</button>
+                </div>
+            </div>
+        </div>
+        `;
+        document.body.insertAdjacentHTML('beforeend', doseModalHTML);
+    }
+
     // 🔥 FIX: now that the modals exist in the DOM, grab the real references.
     modal = document.getElementById('retailAddContactModal');
     closeBtn = document.getElementById('retailCloseModalBtn');
@@ -304,6 +425,7 @@
     retailSaveContactBtn = document.getElementById('retailSaveContactBtn');
     retailPrintModal = document.getElementById('retailPrintModal');
     viewModal = document.getElementById('retailViewItemsModal');
+    const retailDoseModal = document.getElementById('retailDoseModal');
 
     // 🔥 FIX: stop clicks anywhere inside a modal's content card from ever
     // bubbling up to `document`. This is the real fix for "click an input to
@@ -315,7 +437,7 @@
     // modal, right after the modal HTML exists in the DOM — survives the
     // dynamic innerHTML swaps in openNhimaModal/openPhoneModal because the
     // .modal-content-box element itself is never replaced, only its children.
-    document.querySelectorAll('#retailAddContactModal .modal-content-box, #retailViewItemsModal .modal-content-box, #retailPrintModal .modal-content-box, #retailSearchModal .modal-content-box')
+    document.querySelectorAll('#retailAddContactModal .modal-content-box, #retailViewItemsModal .modal-content-box, #retailPrintModal .modal-content-box, #retailSearchModal .modal-content-box, #retailDoseModal .modal-content-box')
         .forEach(box => box.addEventListener('click', (e) => e.stopPropagation()));
 
     // ============================================
@@ -360,6 +482,295 @@
             const searchModalEl = document.getElementById('retailSearchModal');
             if (isModalVisible(searchModalEl) && e.target.closest('#retailSearchModal')) {
                 searchModalEl.style.display = 'none';
+            }
+
+            const doseModalEl = document.getElementById('retailDoseModal');
+            if (isModalVisible(doseModalEl) && e.target.closest('#retailDoseModal')) {
+                doseModalEl.style.display = 'none';
+            }
+        });
+    }
+
+    // ============================================
+    // 🔥 ADDED: DOSAGE INSTRUCTIONS MODAL LOGIC
+    // ============================================
+    // Turns (qty per dose, ticked times, before/after food, optional note)
+    // into the plain-English sentence(s) that get printed on the medicine
+    // sticker -- e.g. qty=2, morning+evening ticked, "after" food ticked ->
+    //   "2 tablets in the morning after breakfast.
+    //    2 tablets in the evening after dinner."
+    // Each ticked time becomes its own line (joined with \n); the sticker's
+    // .how-to-take CSS uses white-space: pre-line so those line breaks
+    // actually render instead of collapsing into one run-on sentence.
+    const DOSE_TIME_CONFIG = {
+        morning: { phrase: 'in the morning', meal: 'breakfast' },
+        noon: { phrase: 'at noon', meal: 'lunch' },
+        evening: { phrase: 'in the evening', meal: 'dinner' },
+        bedtime: { phrase: 'before bed', meal: null }
+    };
+    const DOSE_TIME_ORDER = ['morning', 'noon', 'evening', 'bedtime'];
+
+    // 🔥 ADDED: best-guess dosage Form from a product's dosage_forms.name
+    // (free text set in Product Master, e.g. "Tablet", "Syrup",
+    // "Prefilled Syringe For Injection"). Only used as the modal's
+    // starting point -- the cashier can always change it with the Form
+    // buttons, and whatever they pick is what gets saved on the row.
+    function classifyDosageForm(dosageFormName) {
+        const n = (dosageFormName || '').toLowerCase();
+        if (/inject|syringe|\bvial\b|ampoule|\biv\b|\bim\b|\bsc\b/.test(n)) return 'injectable';
+        if (/syrup|suspension|solution|liquid|drops|elixir|linctus/.test(n)) return 'liquid';
+        return 'tablet';
+    }
+
+    // 🔥 ADDED: best-effort, non-blocking lookup of a product's dosage form
+    // so the Dosage Instructions modal can default to the right Form
+    // automatically. Deliberately isolated in its own try/catch and never
+    // awaited by the caller -- if this query fails or the relationship
+    // doesn't resolve, it just leaves row.dataset.doseFormGuess unset (the
+    // modal falls back to Tablet/Capsule), and never affects the real
+    // product/batch/rate loading in the '.retail-pos-item' change handler.
+    async function stashDoseFormGuess(row, productId) {
+        try {
+            const { data } = await supabaseClient
+                .from('products')
+                .select('dosage_forms(name)')
+                .eq('id', productId)
+                .maybeSingle();
+            row.dataset.doseFormGuess = classifyDosageForm(data?.dosage_forms?.name);
+        } catch (e) {
+            console.warn('Could not determine dosage form for product', productId, e);
+        }
+    }
+
+    function buildDoseSentence(state) {
+        const qtyNum = parseFloat(state.qty);
+        const qty = (qtyNum && qtyNum > 0) ? qtyNum : 1;
+        const form = state.form || 'tablet';
+        const times = state.times || [];
+        const foodRelation = state.foodRelation || ''; // 'after' | 'before' | ''
+        const route = state.route || 'IM';
+        const oneTime = !!state.oneTime;
+
+        let amountText;
+        if (form === 'liquid') {
+            amountText = `${qty}ml`;
+        } else if (form === 'injectable') {
+            const unit = state.unit || 'ml';
+            if (unit === 'ml') {
+                amountText = `${qty}ml`;
+            } else {
+                const unitLabel = { vial: 'vial(s)', ampoule: 'ampoule(s)', units: 'units' }[unit] || unit;
+                amountText = `${qty} ${unitLabel}`;
+            }
+        } else {
+            const tabletWord = qty === 1 ? 'tablet' : 'tablets';
+            amountText = `${qty} ${tabletWord}`;
+        }
+
+        const lines = [];
+
+        if (form === 'injectable' && oneTime) {
+            // Single/STAT administration -- no time-of-day schedule.
+            lines.push(`${amountText} ${route}, single dose.`);
+        } else if (form === 'injectable') {
+            DOSE_TIME_ORDER
+                .filter(key => times.includes(key))
+                .forEach(key => {
+                    const cfg = DOSE_TIME_CONFIG[key];
+                    lines.push(`${amountText} ${route} ${cfg.phrase}.`);
+                });
+        } else {
+            // Tablet/Capsule and Liquid -- identical shape to the original
+            // model, just with amountText carrying the right unit.
+            DOSE_TIME_ORDER
+                .filter(key => times.includes(key))
+                .forEach(key => {
+                    const cfg = DOSE_TIME_CONFIG[key];
+                    let line = `${amountText} ${cfg.phrase}`;
+                    if (foodRelation) {
+                        line += cfg.meal ? ` ${foodRelation} ${cfg.meal}` : `, ${foodRelation} food`;
+                    }
+                    lines.push(line + '.');
+                });
+        }
+
+        if (state.note && state.note.trim()) {
+            lines.push(state.note.trim());
+        }
+
+        return lines.join('\n');
+    }
+
+    let doseModalTargetRow = null;
+    let currentDoseForm = 'tablet';
+
+    const doseFormBtns = document.querySelectorAll('.retail-dose-form-btn');
+    const doseQtyLabel = document.getElementById('retailDoseQtyLabel');
+    const doseQtyInput = document.getElementById('retailDoseQty');
+    const doseUnitRow = document.getElementById('retailDoseUnitRow');
+    const doseUnitSelect = document.getElementById('retailDoseUnit');
+    const doseRouteSection = document.getElementById('retailDoseRouteSection');
+    const doseRouteRadios = document.querySelectorAll('.retail-dose-route');
+    const doseOneTimeRow = document.getElementById('retailDoseOneTimeRow');
+    const doseOneTimeCheck = document.getElementById('retailDoseOneTime');
+    const doseWhenSection = document.getElementById('retailDoseWhenSection');
+    const doseFoodSection = document.getElementById('retailDoseFoodSection');
+    const doseTimeChecks = document.querySelectorAll('.retail-dose-time');
+    const doseAfterFoodCheck = document.getElementById('retailDoseAfterFood');
+    const doseBeforeFoodCheck = document.getElementById('retailDoseBeforeFood');
+    const doseNoteInput = document.getElementById('retailDoseNote');
+    const dosePreviewEl = document.getElementById('retailDosePreview');
+    const doseCloseBtn = document.getElementById('retailDoseCloseBtn');
+    const doseCancelBtn = document.getElementById('retailDoseCancelBtn');
+    const doseApplyBtn = document.getElementById('retailDoseApplyBtn');
+
+    // Shows/hides the fields that only make sense for a given Form, and
+    // keeps the Form buttons' active styling in sync. Called on open, on
+    // Form change, and on the one-time-dose toggle (which also affects
+    // whether the When section applies).
+    function applyDoseFormVisibility(form) {
+        if (doseQtyLabel) {
+            doseQtyLabel.textContent = form === 'liquid' ? 'Amount per dose (ml)'
+                : form === 'injectable' ? 'Amount per dose'
+                : 'Tablets per dose';
+        }
+
+        const isInjectable = form === 'injectable';
+        if (doseUnitRow) doseUnitRow.style.display = isInjectable ? 'block' : 'none';
+        if (doseRouteSection) doseRouteSection.style.display = isInjectable ? 'block' : 'none';
+        if (doseOneTimeRow) doseOneTimeRow.style.display = isInjectable ? 'block' : 'none';
+        if (doseFoodSection) doseFoodSection.style.display = isInjectable ? 'none' : 'block';
+
+        const hideWhen = isInjectable && !!doseOneTimeCheck?.checked;
+        if (doseWhenSection) doseWhenSection.style.display = hideWhen ? 'none' : 'block';
+
+        doseFormBtns.forEach(btn => {
+            const active = btn.dataset.form === form;
+            btn.style.background = active ? '#2563eb' : 'transparent';
+            btn.style.color = active ? 'white' : '#475569';
+        });
+    }
+
+    doseFormBtns.forEach(btn => {
+        btn.addEventListener('click', () => {
+            currentDoseForm = btn.dataset.form;
+            applyDoseFormVisibility(currentDoseForm);
+            updateDosePreview();
+        });
+    });
+
+    if (doseUnitSelect) doseUnitSelect.addEventListener('change', updateDosePreview);
+    doseRouteRadios.forEach(r => r.addEventListener('change', updateDosePreview));
+    if (doseOneTimeCheck) {
+        doseOneTimeCheck.addEventListener('change', () => {
+            applyDoseFormVisibility(currentDoseForm);
+            updateDosePreview();
+        });
+    }
+
+    function readDoseModalState() {
+        const checkedRoute = Array.from(doseRouteRadios).find(r => r.checked);
+        return {
+            form: currentDoseForm,
+            qty: doseQtyInput ? doseQtyInput.value : 1,
+            unit: doseUnitSelect ? doseUnitSelect.value : 'ml',
+            route: checkedRoute ? checkedRoute.value : 'IM',
+            oneTime: !!doseOneTimeCheck?.checked,
+            times: Array.from(doseTimeChecks).filter(cb => cb.checked).map(cb => cb.value),
+            foodRelation: doseAfterFoodCheck?.checked ? 'after' : (doseBeforeFoodCheck?.checked ? 'before' : ''),
+            note: doseNoteInput ? doseNoteInput.value : ''
+        };
+    }
+
+    function updateDosePreview() {
+        if (!dosePreviewEl) return;
+        const sentence = buildDoseSentence(readDoseModalState());
+        dosePreviewEl.textContent = sentence || 'Tick a time above to see the generated instructions.';
+    }
+
+    // Before/After food are mutually exclusive -- a dose can't logically be
+    // both, so ticking one clears the other rather than allowing both on.
+    if (doseAfterFoodCheck && doseBeforeFoodCheck) {
+        doseAfterFoodCheck.addEventListener('change', () => {
+            if (doseAfterFoodCheck.checked) doseBeforeFoodCheck.checked = false;
+            updateDosePreview();
+        });
+        doseBeforeFoodCheck.addEventListener('change', () => {
+            if (doseBeforeFoodCheck.checked) doseAfterFoodCheck.checked = false;
+            updateDosePreview();
+        });
+    }
+
+    doseTimeChecks.forEach(cb => cb.addEventListener('change', updateDosePreview));
+    if (doseNoteInput) doseNoteInput.addEventListener('input', updateDosePreview);
+    if (doseQtyInput) doseQtyInput.addEventListener('input', updateDosePreview);
+
+    function openDoseModal(row) {
+        if (!retailDoseModal || !row) return;
+        doseModalTargetRow = row;
+
+        // Restore the row's previously-chosen structured state if it has
+        // one (stored as JSON on the row itself), otherwise fall back to a
+        // best guess from the selected product's dosage form (stashed on
+        // the row when the item was picked -- see the product 'change'
+        // handler), else default to Tablet/Capsule. We deliberately don't
+        // try to parse the generated sentence back apart, since that's
+        // lossy/fragile; the structured state is the source of truth and
+        // the sentence is just its output.
+        let saved = null;
+        try {
+            saved = row.dataset.doseState ? JSON.parse(row.dataset.doseState) : null;
+        } catch (e) {
+            saved = null;
+        }
+
+        currentDoseForm = saved?.form || row.dataset.doseFormGuess || 'tablet';
+
+        if (doseQtyInput) doseQtyInput.value = saved?.qty ?? 1;
+        if (doseUnitSelect) doseUnitSelect.value = saved?.unit || 'ml';
+        doseRouteRadios.forEach(r => { r.checked = (saved?.route || 'IM') === r.value; });
+        if (doseOneTimeCheck) doseOneTimeCheck.checked = !!saved?.oneTime;
+        doseTimeChecks.forEach(cb => cb.checked = !!(saved?.times || []).includes(cb.value));
+        if (doseAfterFoodCheck) doseAfterFoodCheck.checked = saved?.foodRelation === 'after';
+        if (doseBeforeFoodCheck) doseBeforeFoodCheck.checked = saved?.foodRelation === 'before';
+        if (doseNoteInput) doseNoteInput.value = saved?.note || '';
+
+        applyDoseFormVisibility(currentDoseForm);
+        updateDosePreview();
+        retailDoseModal.style.display = 'flex';
+    }
+
+    function closeDoseModal() {
+        if (retailDoseModal) retailDoseModal.style.display = 'none';
+        doseModalTargetRow = null;
+    }
+
+    if (doseCloseBtn) doseCloseBtn.addEventListener('click', closeDoseModal);
+    if (doseCancelBtn) doseCancelBtn.addEventListener('click', closeDoseModal);
+
+    if (doseApplyBtn) {
+        doseApplyBtn.addEventListener('click', () => {
+            if (!doseModalTargetRow) return;
+            const state = readDoseModalState();
+            const sentence = buildDoseSentence(state);
+
+            const targetInput = doseModalTargetRow.querySelector('.retail-pos-how-to-take');
+            if (targetInput) targetInput.value = sentence;
+            doseModalTargetRow.dataset.doseState = JSON.stringify(state);
+
+            closeDoseModal();
+        });
+    }
+
+    // Opens the modal from either the pencil button or a click on the
+    // (readonly) sentence display itself -- delegated on posTableBody so
+    // it keeps working for every row added later via addPOSRow()'s
+    // cloneNode(), with no per-row wiring needed.
+    if (posTableBody) {
+        posTableBody.addEventListener('click', (e) => {
+            const trigger = e.target.closest('.retail-dose-edit-btn, .retail-pos-how-to-take');
+            if (trigger) {
+                openDoseModal(trigger.closest('tr'));
             }
         });
     }
@@ -1111,6 +1522,7 @@
             const itemSelect = firstRow.querySelector('.retail-pos-item');
             const batchSelect = firstRow.querySelector('.retail-pos-batch');
             const packInput = firstRow.querySelector('.retail-pos-pack-size');
+            const expiryInput = firstRow.querySelector('.retail-pos-expiry');
             const taxInput = firstRow.querySelector('.retail-pos-tax');
             const rateInput = firstRow.querySelector('.retail-pos-rate');
             const qtyInput = firstRow.querySelector('.retail-pos-qty');
@@ -1121,6 +1533,7 @@
             if (itemSelect) itemSelect.value = '';
             if (batchSelect) batchSelect.innerHTML = `<option value="">Select Batch</option>`;
             if (packInput) packInput.value = '';
+            if (expiryInput) expiryInput.value = '';
             if (taxInput) taxInput.value = '';
             if (rateInput) rateInput.value = '';
             if (qtyInput) {
@@ -1130,7 +1543,15 @@
             }
             if (totalInput) totalInput.value = '';
             if (daysInput) daysInput.value = '0';
-            if (howToTakeInput) howToTakeInput.value = '';
+            // 🔥 FIX: also clear the structured dose state stored on the row
+            // (see the Dosage Instructions modal) -- otherwise reopening the
+            // modal on this now-blank row would still show the previous
+            // item's ticked times/food/note.
+            if (howToTakeInput) {
+                howToTakeInput.value = '';
+                const doseStateRow = howToTakeInput.closest('tr');
+                if (doseStateRow) delete doseStateRow.dataset.doseState;
+            }
 
             if (itemSelect) {
                 loadProductDropdownsForRow(itemSelect);
@@ -1667,7 +2088,15 @@
                 if (qtyInput) qtyInput.value = '1';
                 if (totalInput) totalInput.value = '';
                 if (daysInput) daysInput.value = '0';
-                if (howToTakeInput) howToTakeInput.value = '';
+                // 🔥 FIX: also clear the structured dose state stored on the row
+            // (see the Dosage Instructions modal) -- otherwise reopening the
+            // modal on this now-blank row would still show the previous
+            // item's ticked times/food/note.
+            if (howToTakeInput) {
+                howToTakeInput.value = '';
+                const doseStateRow = howToTakeInput.closest('tr');
+                if (doseStateRow) delete doseStateRow.dataset.doseState;
+            }
             }
 
             // 🔥 Prefetch all dropdowns to avoid slow async delays
@@ -1732,6 +2161,9 @@
 
                         const packInput = targetRow.querySelector('.retail-pos-pack-size');
                         if (packInput) packInput.value = item.pack_size;
+
+                        const expiryInput = targetRow.querySelector('.retail-pos-expiry');
+                        if (expiryInput) expiryInput.value = expiry;
 
                         const taxInput = targetRow.querySelector('.retail-pos-tax');
                         if (taxInput) taxInput.value = item.tax_rate;
@@ -1804,6 +2236,7 @@
             const productId = e.target.value;
             const batchSelect = row.querySelector('.retail-pos-batch');
             const packInput = row.querySelector('.retail-pos-pack-size');
+            const expiryInput = row.querySelector('.retail-pos-expiry');
             const taxInput = row.querySelector('.retail-pos-tax');
             const rateInput = row.querySelector('.retail-pos-rate');
             const qtyInput = row.querySelector('.retail-pos-qty');
@@ -1811,6 +2244,7 @@
             if (!productId) {
                 if (batchSelect) batchSelect.innerHTML = `<option value="">Select Batch</option>`;
                 if (packInput) packInput.value = '';
+                if (expiryInput) expiryInput.value = '';
                 if (taxInput) taxInput.value = '';
                 if (rateInput) rateInput.value = '';
                 if (qtyInput) {
@@ -1823,6 +2257,9 @@
             }
 
             try {
+                // Non-critical, fired in parallel -- see stashDoseFormGuess().
+                stashDoseFormGuess(row, productId);
+
                 const { data: product, error: prodError } = await supabaseClient
                     .from('products')
                     .select('conversion_rate, tax_percent, nhima_price_fixed, retail_regular_percent, retail_online_percent, retail_staff_percent')
@@ -1925,6 +2362,21 @@
             updateRowRate(row);
             updateRowTotal(row);
             updateTotals();
+
+            // 🔥 FIX: a new empty row used to only get auto-added when you
+            // TYPED into the Qty field of the last row (see the 'input'
+            // handler below) -- but every new row starts with Qty already
+            // defaulted to 1, so if the real quantity genuinely was 1 (very
+            // common), that field was never touched, no 'input' event ever
+            // fired, and no second row appeared. Selecting a batch is really
+            // the moment the item is "committed" regardless of quantity, so
+            // that's the right trigger for auto-adding the next row.
+            if (selectedBatch && selectedBatch.value) {
+                const rows = posTableBody.querySelectorAll('tr');
+                if (row === rows[rows.length - 1]) {
+                    addPOSRow();
+                }
+            }
         }
     });
 
@@ -1957,6 +2409,7 @@
         const itemSelect = newRow.querySelector('.retail-pos-item');
         const batchSelect = newRow.querySelector('.retail-pos-batch');
         const packInput = newRow.querySelector('.retail-pos-pack-size');
+        const expiryInput = newRow.querySelector('.retail-pos-expiry');
         const taxInput = newRow.querySelector('.retail-pos-tax');
         const rateInput = newRow.querySelector('.retail-pos-rate');
         const qtyInput = newRow.querySelector('.retail-pos-qty');
@@ -1970,6 +2423,7 @@
         }
         if (batchSelect) batchSelect.innerHTML = `<option value="">Select Batch</option>`;
         if (packInput) packInput.value = '';
+        if (expiryInput) expiryInput.value = '';
         if (taxInput) taxInput.value = '';
         if (rateInput) rateInput.value = '';
         if (qtyInput) {
@@ -1982,6 +2436,7 @@
         if (howToTakeInput) howToTakeInput.value = '';
 
         posTableBody.appendChild(newRow);
+        updateItemCountBadge();
     }
 
     // ============================================
@@ -2106,10 +2561,12 @@
         const batchSelect = row.querySelector('.retail-pos-batch');
         const rateInput = row.querySelector('.retail-pos-rate');
         const packInput = row.querySelector('.retail-pos-pack-size');
+        const expiryInput = row.querySelector('.retail-pos-expiry');
 
         if (!batchSelect || !rateInput || !packInput) return;
 
         const selected = batchSelect.options[batchSelect.selectedIndex];
+        if (expiryInput) expiryInput.value = (selected && selected.value) ? (selected.dataset.expiry || '') : '';
         if (!selected || !selected.value) {
             rateInput.value = '';
             return;
@@ -2149,6 +2606,21 @@
         if (totalInput) totalInput.value = (rate * qty).toFixed(2);
     }
 
+    // 🔥 ADDED: small "N" badge next to the "Items" section header in the
+    // redesigned layout -- just counts rows that actually have a product
+    // picked (the trailing always-blank template row doesn't count).
+    function updateItemCountBadge() {
+        const badge = document.getElementById('retailItemCountBadge');
+        if (!badge) return;
+        const rows = posTableBody.querySelectorAll('tr');
+        let count = 0;
+        rows.forEach(row => {
+            const itemSelect = row.querySelector('.retail-pos-item');
+            if (itemSelect && itemSelect.value) count++;
+        });
+        badge.textContent = String(count);
+    }
+
     function updateTotals() {
         const rows = posTableBody.querySelectorAll('tr');
         let subtotal = 0;
@@ -2166,6 +2638,8 @@
                 subtotal += total;
             }
         });
+
+        updateItemCountBadge();
 
         const grandTotal = subtotal + totalTax;
 
@@ -2265,19 +2739,20 @@
 
                 html += `
                     <div style="margin-top: ${saleIndex > 0 ? '12px' : '0'}; padding: 10px; background: #f8fafc; border-radius: 6px; border: 1px solid #e2e8f0;">
-                        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
-                            <div>
-                                <span style="font-weight: 600; font-size: 0.85rem;">${sale.sale_id}</span>
-                                <span style="font-size: 0.7rem; color: #64748b; margin-left: 8px;">${date} ${time}</span>
-                            </div>
-                            <div style="display: flex; gap: 8px; align-items: center;">
-                                <span style="background: ${statusColor}; color: white; padding: 1px 10px; border-radius: 10px; font-size: 0.65rem;">${sale.status}</span>
-                                <span style="font-weight: 600; color: #0f172a; font-size: 0.85rem;">K${(sale.grand_total || 0).toFixed(2)}</span>
-                                <button class="add-all-items" data-sale-id="${sale.id}" style="background: #10b981; color: white; border: none; padding: 2px 10px; border-radius: 4px; cursor: pointer; font-size: 0.65rem;">
-                                    <i class="fa-solid fa-cart-plus"></i> Add All
-                                </button>
-                            </div>
+                        <!-- 🔥 CHANGED: stacked into narrower rows (was one wide flex row) so this
+                             reads cleanly in the ~300px customer/history sidebar instead of the old
+                             full-width bottom panel -- same data, same .add-all-items delegation. -->
+                        <div style="display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 4px;">
+                            <span style="font-weight: 600; font-size: 0.83rem;">${sale.sale_id}</span>
+                            <span style="font-weight: 600; color: #0f172a; font-size: 0.83rem;">K${(sale.grand_total || 0).toFixed(2)}</span>
                         </div>
+                        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+                            <span style="font-size: 0.68rem; color: #64748b;">${date} ${time}</span>
+                            <span style="background: ${statusColor}; color: white; padding: 1px 10px; border-radius: 10px; font-size: 0.63rem;">${sale.status}</span>
+                        </div>
+                        <button class="add-all-items" data-sale-id="${sale.id}" style="width: 100%; background: #10b981; color: white; border: none; padding: 5px 10px; border-radius: 4px; cursor: pointer; font-size: 0.68rem; margin-bottom: 8px;">
+                            <i class="fa-solid fa-cart-plus"></i> Add All Items
+                        </button>
                         <div style="display: flex; flex-wrap: wrap; gap: 6px;">
                 `;
 
@@ -2657,6 +3132,11 @@
                         // every saved sale and printed invoice. Now
                         // stores just the actual batch code.
                         batch_number: batchSelect.options[batchSelect.selectedIndex]?.dataset.batchNumber || '',
+                        // 🔥 ADDED: captured here (same dataset attribute
+                        // the batch dropdown already carries -- see the
+                        // "data-expiry" option markup above) purely so the
+                        // printed invoice can show it per item.
+                        expiry: batchSelect.options[batchSelect.selectedIndex]?.dataset.expiry || '',
                         qty: qty,
                         rate: parseFloat(rateInput.value) || 0,
                         pack_size: packInput.value || 'EACH',
@@ -3048,11 +3528,20 @@
             // ============================================
             // CLEANUP & UI RESET
             // ============================================
-            if (status === 'COMPLETED' && !isQuotation) {
-                showPrintDialog(saleData);
-            } else {
-                await new Promise(resolve => setTimeout(resolve, 500));
-                printSale();
+            // 🔥 CHANGED: the "Would you like to print the invoice?"
+            // confirmation popup is gone -- a completed sale now prints
+            // straight away, same as a quotation already did. In its
+            // place, the isolated queue-bridge script appended at the
+            // bottom of this file shows a "Send to Dispatch" popup
+            // instead -- but ONLY when this sale is tied to a patient
+            // token queue ticket (i.e. the cashier got here via "Open in
+            // POS" on the queue bar). A normal walk-in sale with no
+            // ticket gets no popup at all, just the print.
+            await new Promise(resolve => setTimeout(resolve, 500));
+            printSale();
+
+            if (status === 'COMPLETED' && !isQuotation && typeof window.__onRetailSaleSaved === 'function') {
+                window.__onRetailSaleSaved();
             }
 
             resetCustomerFields();
@@ -3077,68 +3566,19 @@
     // ============================================
     // PRINT FUNCTIONS
     // ============================================
-    function showPrintDialog(saleData) {
-        const printModalEl = document.getElementById('retailPrintModal');
-        if (!printModalEl) return;
-
-        const titleEl = printModalEl.querySelector('h3');
-        const messageEl = printModalEl.querySelector('p');
-
-        // 🔥 ADDED: second confirmation step for stickers, shown only after
-        // the invoice print dialog has been triggered -- reuses the same
-        // modal with updated text rather than a separate one. Each "Yes"
-        // click is its own genuine user gesture, so the sticker's
-        // window.open() is never at risk of being treated as an
-        // unrequested popup, and printing them as two separate steps
-        // means each can be sent to a different printer if you have one
-        // dedicated to labels.
-        function showStickerPrompt() {
-            if (saleData.is_quotation) return; // nothing to dispense for a quote
-
-            if (titleEl) titleEl.textContent = 'Invoice Printed!';
-            if (messageEl) messageEl.textContent = 'Would you like to print the medicine labels for this sale?';
-
-            printModalEl.style.display = 'flex';
-
-            const yesBtn2 = document.getElementById('retailPrintYesBtn');
-            const noBtn2 = document.getElementById('retailPrintNoBtn');
-            const newYesBtn2 = yesBtn2.cloneNode(true);
-            const newNoBtn2 = noBtn2.cloneNode(true);
-            yesBtn2.parentNode.replaceChild(newYesBtn2, yesBtn2);
-            noBtn2.parentNode.replaceChild(newNoBtn2, noBtn2);
-
-            newYesBtn2.onclick = function () {
-                printModalEl.style.display = 'none';
-                printStickers();
-            };
-            newNoBtn2.onclick = function () {
-                printModalEl.style.display = 'none';
-            };
-        }
-
-        if (titleEl) titleEl.textContent = 'Invoice Saved Successfully!';
-        if (messageEl) messageEl.textContent = 'Would you like to print the invoice?';
-        printModalEl.style.display = 'flex';
-
-        const yesBtn = document.getElementById('retailPrintYesBtn');
-        const noBtn = document.getElementById('retailPrintNoBtn');
-
-        const newYesBtn = yesBtn.cloneNode(true);
-        const newNoBtn = noBtn.cloneNode(true);
-        yesBtn.parentNode.replaceChild(newYesBtn, yesBtn);
-        noBtn.parentNode.replaceChild(newNoBtn, noBtn);
-
-        newYesBtn.onclick = function () {
-            printModalEl.style.display = 'none';
-            printSale();
-            setTimeout(showStickerPrompt, 300);
-        };
-
-        newNoBtn.onclick = function () {
-            printModalEl.style.display = 'none';
-            setTimeout(showStickerPrompt, 300);
-        };
-    }
+    // 🔥 CHANGED: the sticker/label print step that used to chain after this
+    // (a second "print medicine labels?" prompt) has been removed from POS
+    // entirely. Label printing now happens exclusively from the Dispensing
+    // screen (Dashboard -> Dispensing), which lists sales pending labels via
+    // sales.labels_printed_at and lets a dispenser reprint any invoice by
+    // number -- decoupled from the cashier's save/checkout flow so a busy
+    // till never blocks on a slow or jammed label printer.
+    // 🔥 REMOVED: showPrintDialog() -- the "Would you like to print the
+    // invoice?" confirmation popup. A completed sale now prints
+    // automatically instead (see the save handler above); the
+    // #retailPrintModal DOM shell it used to drive is now repurposed by
+    // the queue-bridge script at the bottom of this file for the "Send
+    // to Dispatch" popup instead.
 
     // 🔥 CLEANUP: printSale() and pdfSale() used to each carry their own copy of
     // this ~70-line invoice HTML string. Consolidated into one builder so both
@@ -3153,6 +3593,27 @@
         return batchNumber.replace(/\s*-\s*(⚠️\s*)?\d+\s*units?(\s*\(Low Stock\))?\s*$/i, '').trim();
     }
 
+    // 🔥 CHANGED (2nd pass): back to a real HTML <table> -- the previous
+    // plain-text <pre> version was built specifically to survive
+    // Windows' "Generic / Text Only" print driver (which strips out all
+    // CSS/HTML and just extracts raw characters, squashing table cells
+    // together with no space between them). That driver is meant for
+    // printers that genuinely cannot render graphics at all. Most 80mm
+    // thermal receipt printers actually DO ship a real, graphics-capable
+    // driver (an "XP-58/80", "POS-80", or the printer's own branded
+    // driver, usually from the manufacturer's install disc/website,
+    // separate from the plain "Generic / Text Only" option Windows
+    // offers by default) -- picking that driver instead lets the printer
+    // rasterize the page exactly like any other printer, so a real
+    // table with borders and bold text prints correctly. If your
+    // printer genuinely has no such driver, say so and this goes back to
+    // the padded plain-text layout -- just ask.
+    //
+    // Columns are deliberately compact per the pharmacy's own spec:
+    // Item / Batch (+ expiry in the same cell) / Tax% / Days Supply /
+    // Rate / Qty / Subtotal. "Pack" was dropped -- it's always "EACH"
+    // for NHIMA, so printing it added nothing but width, which matters
+    // a lot on a narrow receipt.
     function buildInvoiceHTML(saleData) {
         // 🔥 FIX: this used to always say "Invoice #:" even for a
         // quotation, which made no sense on a document that isn't an
@@ -3164,25 +3625,47 @@
         return `<!DOCTYPE html>
             <html>
             <head>
-                <title>${docLabel} - ${saleData.sale_id}</title>
+                <meta charset="UTF-8">
+                <!-- 🔥 the printed page's title/URL is what some browsers'
+                     "headers and footers" print option stamps at the top
+                     and bottom of the page (that stray "about:blank ...
+                     1/1" line) -- naming it after the pharmacy at least
+                     makes that stamp useful instead of meaningless.
+                     Turning that stamp off entirely is a print-dialog
+                     setting on the printing computer, not something this
+                     page can control: in the print dialog, open "More
+                     settings" and uncheck "Headers and footers" -- most
+                     browsers remember that choice for next time. -->
+                <title>GRIFFINS MEDICALS LIMITED - ${docLabel} ${saleData.sale_id}</title>
                 <style>
-                    body { font-family: 'Courier New', monospace; padding: 20px; max-width: 800px; margin: 0 auto; }
-                    .header { text-align: center; border-bottom: 2px solid #333; padding-bottom: 10px; margin-bottom: 20px; }
-                    .header h1 { margin: 0; color: #0f172a; font-size: 1.5rem; }
-                    .header p { margin: 3px 0; color: #475569; font-size: 0.9rem; }
-                    .doc-type-badge { display: inline-block; margin-top: 8px; padding: 3px 14px; border-radius: 12px; font-size: 0.8rem; font-weight: bold; ${isQuotation ? 'background:#fef3c7; color:#92400e;' : 'background:#dcfce7; color:#166534;'} }
-                    .invoice-info { margin-bottom: 20px; padding: 10px; background: #f8fafc; border-radius: 4px; font-size: 0.9rem; }
-                    .invoice-info div { display: inline-block; margin-right: 30px; }
-                    .customer-info { margin-bottom: 20px; padding: 10px; background: #f8fafc; border-radius: 4px; font-size: 0.9rem; }
-                    table { width: 100%; border-collapse: collapse; margin-bottom: 20px; font-size: 0.85rem; }
-                    th { background: #f1f5f9; padding: 8px; text-align: left; border-bottom: 2px solid #e2e8f0; }
-                    td { padding: 8px; border-bottom: 1px solid #e2e8f0; }
+                    * { box-sizing: border-box; }
+                    body { font-family: 'Courier New', Courier, monospace; padding: 10px; margin: 0; font-size: 11px; color: #000; }
+                    .header { text-align: center; border-bottom: 2px solid #000; padding-bottom: 6px; margin-bottom: 8px; }
+                    .header h1 { margin: 0; font-size: 15px; font-weight: 800; letter-spacing: 0.02em; }
+                    .header p { margin: 2px 0; font-size: 10px; }
+                    .doc-type-badge { display: inline-block; margin-top: 6px; padding: 2px 10px; border: 1px solid #000; font-size: 10px; font-weight: bold; }
+                    .meta-row { margin-bottom: 6px; font-size: 10.5px; }
+                    .meta-row div { margin: 1px 0; }
+                    .customer-info { margin-bottom: 8px; padding-bottom: 6px; border-bottom: 1px dashed #000; font-size: 10.5px; }
+                    .customer-info div { margin: 1px 0; }
+                    table { width: 100%; border-collapse: collapse; margin-bottom: 8px; font-size: 10px; table-layout: fixed; }
+                    th, td { padding: 3px 2px; border-bottom: 1px solid #000; text-align: left; word-wrap: break-word; }
+                    th { font-weight: bold; border-bottom: 2px solid #000; }
                     .text-right { text-align: right; }
                     .text-center { text-align: center; }
-                    .totals { text-align: right; margin-top: 20px; padding-top: 20px; border-top: 2px solid #e2e8f0; font-size: 0.9rem; }
-                    .grand-total { font-size: 1.2rem; font-weight: bold; color: #0f172a; }
-                    .footer { text-align: center; margin-top: 30px; padding-top: 20px; border-top: 1px solid #e2e8f0; color: #64748b; font-size: 0.8rem; }
-                    @media print { body { margin: 0; padding: 10px; } }
+                    .col-num { width: 6%; }
+                    .col-item { width: 26%; }
+                    .col-batch { width: 20%; }
+                    .col-tax { width: 10%; }
+                    .col-days { width: 10%; }
+                    .col-rate { width: 12%; }
+                    .col-qty { width: 8%; }
+                    .col-sub { width: 14%; }
+                    .totals { margin-top: 6px; padding-top: 6px; border-top: 1px dashed #000; font-size: 10.5px; }
+                    .totals-row { display: flex; justify-content: space-between; margin: 2px 0; }
+                    .grand-total { font-size: 13px; font-weight: 800; border-top: 1px solid #000; margin-top: 4px; padding-top: 4px; }
+                    .footer { text-align: center; margin-top: 12px; padding-top: 8px; border-top: 1px dashed #000; font-size: 10px; }
+                    @media print { @page { margin: 0; } body { padding: 6mm; } }
                 </style>
             </head>
             <body>
@@ -3192,53 +3675,50 @@
                     <p>Phone: +260 97 000 0000 | ZAMRA: ZAMRA-123456</p>
                     <div class="doc-type-badge">${isQuotation ? 'QUOTATION -- NOT A TAX INVOICE' : 'TAX INVOICE'}</div>
                 </div>
-                <div class="invoice-info">
+                <div class="meta-row">
                     <div><strong>${docLabel} #:</strong> ${saleData.sale_id}</div>
                     <div><strong>Date:</strong> ${saleData.date}</div>
                     ${!isQuotation ? `<div><strong>Payment:</strong> ${saleData.payment.type}</div>` : ''}
                 </div>
                 <div class="customer-info">
-                    <strong>Customer Details</strong><br>
-                    <strong>Name:</strong> ${saleData.customer.full_name || 'N/A'}<br>
-                    <strong>Phone:</strong> ${saleData.customer.phone || 'N/A'}<br>
-                    <strong>Address:</strong> ${saleData.customer.address || 'N/A'}<br>
-                    ${saleData.customer.nhima_number ? `<strong>NHIMA #:</strong> ${saleData.customer.nhima_number}<br>` : ''}
-                    ${saleData.customer.nrc ? `<strong>NRC:</strong> ${saleData.customer.nrc}` : ''}
+                    <div><strong>Customer:</strong> ${saleData.customer.full_name || 'N/A'}</div>
+                    <div><strong>Phone:</strong> ${saleData.customer.phone || 'N/A'}</div>
+                    <div><strong>Address:</strong> ${saleData.customer.address || 'N/A'}</div>
+                    ${saleData.customer.nhima_number ? `<div><strong>NHIMA #:</strong> ${saleData.customer.nhima_number}</div>` : ''}
+                    ${saleData.customer.nrc ? `<div><strong>NRC:</strong> ${saleData.customer.nrc}</div>` : ''}
                 </div>
                 <table>
                     <thead>
                         <tr>
-                            <th>#</th>
-                            <th>Item</th>
-                            <th>Batch</th>
-                            <th class="text-center">Pack</th>
-                            <th class="text-right">Tax %</th>
-                            <th class="text-right">Rate</th>
-                            <th class="text-right">Qty</th>
-                            <th class="text-right">Total</th>
-                            <th class="text-center">Days</th>
+                            <th class="col-num">#</th>
+                            <th class="col-item">Item</th>
+                            <th class="col-batch">Batch (Exp)</th>
+                            <th class="col-tax text-right">Tax%</th>
+                            <th class="col-days text-center">Days</th>
+                            <th class="col-rate text-right">Rate</th>
+                            <th class="col-qty text-right">Qty</th>
+                            <th class="col-sub text-right">Subtotal</th>
                         </tr>
                     </thead>
                     <tbody>
                         ${saleData.items.map((item, index) => `
                             <tr>
-                                <td>${index + 1}</td>
-                                <td>${item.product_name}</td>
-                                <td>${cleanBatchDisplay(item.batch_number)}</td>
-                                <td class="text-center">${item.pack_size}</td>
-                                <td class="text-right">${item.tax_rate}%</td>
-                                <td class="text-right">K${item.rate.toFixed(2)}</td>
-                                <td class="text-right">${item.qty}</td>
-                                <td class="text-right">K${item.total.toFixed(2)}</td>
-                                <td class="text-center">${item.days_supplied || 0}</td>
+                                <td class="col-num">${index + 1}</td>
+                                <td class="col-item">${item.product_name}</td>
+                                <td class="col-batch">${cleanBatchDisplay(item.batch_number)}${item.expiry ? ` (${item.expiry})` : ''}</td>
+                                <td class="col-tax text-right">${item.tax_rate}%</td>
+                                <td class="col-days text-center">${item.days_supplied || 0}</td>
+                                <td class="col-rate text-right">K${item.rate.toFixed(2)}</td>
+                                <td class="col-qty text-right">${item.qty}</td>
+                                <td class="col-sub text-right">K${item.total.toFixed(2)}</td>
                             </tr>
                         `).join('')}
                     </tbody>
                 </table>
                 <div class="totals">
-                    <p>Subtotal (Excl. Tax): <strong>K${saleData.totals.subtotal.toFixed(2)}</strong></p>
-                    <p>Total Tax: <strong>K${saleData.totals.tax.toFixed(2)}</strong></p>
-                    <p class="grand-total">Grand Total: <strong>K${saleData.totals.grand_total.toFixed(2)}</strong></p>
+                    <div class="totals-row"><span>Subtotal (Excl. Tax):</span><span>K${saleData.totals.subtotal.toFixed(2)}</span></div>
+                    <div class="totals-row"><span>Total Tax:</span><span>K${saleData.totals.tax.toFixed(2)}</span></div>
+                    <div class="totals-row grand-total"><span>GRAND TOTAL:</span><span>K${saleData.totals.grand_total.toFixed(2)}</span></div>
                 </div>
                 <div class="footer">
                     ${isQuotation
@@ -3251,39 +3731,50 @@
         `;
     }
 
-    function buildStickerHTML(saleData) {
-        return `<!DOCTYPE html>
-            <html>
-            <head>
-                <title>Labels - ${saleData.sale_id}</title>
-                <style>
-                    @page { size: 60mm 40mm; margin: 2mm; }
-                    body { font-family: Arial, sans-serif; margin: 0; }
-                    .sticker {
-                        width: 60mm; min-height: 40mm; padding: 3mm; box-sizing: border-box;
-                        border: 1px dashed #94a3b8; page-break-after: always;
-                        display: flex; flex-direction: column; justify-content: center;
-                    }
-                    .sticker:last-child { page-break-after: auto; }
-                    .sticker .pharmacy { font-size: 7pt; color: #64748b; text-transform: uppercase; letter-spacing: 0.05em; }
-                    .sticker .item-name { font-size: 11pt; font-weight: bold; margin: 2mm 0 1mm 0; }
-                    .sticker .how-to-take { font-size: 9pt; }
-                    .sticker .qty { font-size: 8pt; color: #475569; margin-top: 1mm; }
-                    @media print { .sticker { border: none; } }
-                </style>
-            </head>
-            <body>
-                ${saleData.items.map(item => `
-                    <div class="sticker">
-                        <div class="pharmacy">Griffins Medicals Limited</div>
-                        <div class="item-name">${item.product_name}</div>
-                        <div class="how-to-take">${item.how_to_take || 'As directed'}</div>
-                        <div class="qty">Qty: ${item.qty} ${item.pack_size}</div>
-                    </div>
-                `).join('')}
-            </body>
-            </html>
-        `;
+    // 🔥 CHANGED: prints through a hidden, off-screen <iframe> instead of
+    // window.open() -- window.open() was launching a full separate
+    // browser window/tab for every print (visible in the screenshots as
+    // its own "Invoice - ... - Microsoft Edge" window sitting on top of
+    // POS, left open after printing until manually closed), which is
+    // what made printing feel like it took two steps/two windows. The
+    // OS/browser print dialog itself still has to appear -- no web page
+    // can silently print without it -- but there's no separate browser
+    // window to see, wait for, or close: the iframe is invisible, and
+    // removes itself right after the print dialog is dismissed.
+    function printHTMLViaHiddenFrame(html) {
+        const existing = document.getElementById('posPrintFrame');
+        if (existing) existing.remove();
+
+        const frame = document.createElement('iframe');
+        frame.id = 'posPrintFrame';
+        frame.style.cssText = 'position:fixed; right:0; bottom:0; width:0; height:0; border:0; visibility:hidden;';
+        document.body.appendChild(frame);
+
+        const cleanup = () => { const f = document.getElementById('posPrintFrame'); if (f) f.remove(); };
+        // Safety-net removal in case the print dialog is dismissed in a
+        // way that doesn't let the code below run its own cleanup (e.g.
+        // the tab loses focus during a slow print job).
+        const safetyTimer = setTimeout(cleanup, 60000);
+
+        frame.onload = () => {
+            try {
+                frame.contentWindow.focus();
+                frame.contentWindow.print();
+            } catch (e) {
+                console.error('Print failed:', e);
+            }
+            // print() blocks until the dialog is dismissed in most
+            // browsers, so this runs right after -- but even where it
+            // doesn't block, the browser has already snapshotted the
+            // frame's content by the time print() was called, so a short
+            // delay before removing it is safe either way.
+            setTimeout(() => { clearTimeout(safetyTimer); cleanup(); }, 1000);
+        };
+
+        const doc = frame.contentDocument || frame.contentWindow.document;
+        doc.open();
+        doc.write(html);
+        doc.close();
     }
 
     function printSale() {
@@ -3292,39 +3783,20 @@
             alert('No sale data to print.');
             return;
         }
-
-        const printWindow = window.open('', '_blank', 'width=800,height=600');
-        printWindow.document.write(buildInvoiceHTML(saleData));
-        printWindow.document.close();
-        printWindow.print();
+        printHTMLViaHiddenFrame(buildInvoiceHTML(saleData));
     }
 
-    // 🔥 ADDED: prints the sticker labels only -- called from its own
-    // separate confirmation step after the invoice print, as its own
-    // distinct user click.
-    function printStickers() {
-        const saleData = window.currentPrintData || currentSaleData;
-        if (!saleData) return;
-
-        const stickerWindow = window.open('', '_blank', 'width=400,height=500');
-        stickerWindow.document.write(buildStickerHTML(saleData));
-        stickerWindow.document.close();
-        stickerWindow.print();
-    }
 
     function pdfSale() {
+        // "Save as PDF" is just a destination choice inside the same OS
+        // print dialog -- same hidden-iframe path as printSale(), no
+        // separate window needed here either.
         const saleData = window.currentPrintData || currentSaleData;
         if (!saleData) {
             alert('No sale data to generate PDF.');
             return;
         }
-
-        const pdfWindow = window.open('', '_blank', 'width=800,height=600');
-        pdfWindow.document.write(buildInvoiceHTML(saleData));
-        pdfWindow.document.close();
-        setTimeout(() => {
-            pdfWindow.print();
-        }, 500);
+        printHTMLViaHiddenFrame(buildInvoiceHTML(saleData));
     }
 
     // ============================================
@@ -3397,6 +3869,7 @@
                     const itemSelect = firstRow.querySelector('.retail-pos-item');
                     const batchSelect = firstRow.querySelector('.retail-pos-batch');
                     const packInput = firstRow.querySelector('.retail-pos-pack-size');
+                    const expiryInput = firstRow.querySelector('.retail-pos-expiry');
                     const taxInput = firstRow.querySelector('.retail-pos-tax');
                     const rateInput = firstRow.querySelector('.retail-pos-rate');
                     const qtyInput = firstRow.querySelector('.retail-pos-qty');
@@ -3407,12 +3880,21 @@
                     if (itemSelect) itemSelect.value = '';
                     if (batchSelect) batchSelect.innerHTML = `<option value="">Select Batch</option>`;
                     if (packInput) packInput.value = '';
+                    if (expiryInput) expiryInput.value = '';
                     if (taxInput) taxInput.value = '';
                     if (rateInput) rateInput.value = '';
                     if (qtyInput) qtyInput.value = '1';
                     if (totalInput) totalInput.value = '';
                     if (daysInput) daysInput.value = '0';
-                    if (howToTakeInput) howToTakeInput.value = '';
+                    // 🔥 FIX: also clear the structured dose state stored on the row
+            // (see the Dosage Instructions modal) -- otherwise reopening the
+            // modal on this now-blank row would still show the previous
+            // item's ticked times/food/note.
+            if (howToTakeInput) {
+                howToTakeInput.value = '';
+                const doseStateRow = howToTakeInput.closest('tr');
+                if (doseStateRow) delete doseStateRow.dataset.doseState;
+            }
                 }
 
                 saleData.items.forEach((item, index) => {
@@ -3501,6 +3983,11 @@
                     // Set the exact original values directly -- not
                     // recalculated from a freshly-selected batch.
                     if (packInput) packInput.value = item.pack_size || 'EACH';
+                    const editExpiryInput = targetRow.querySelector('.retail-pos-expiry');
+                    if (editExpiryInput) {
+                        const editBatchInfo = item.batch_id ? editBatchMap[item.batch_id] : null;
+                        editExpiryInput.value = editBatchInfo ? new Date(editBatchInfo.expiry_date).toLocaleDateString() : '';
+                    }
                     if (taxInput) taxInput.value = item.tax_rate || 0;
                     if (rateInput) rateInput.value = (item.rate || 0).toFixed(2);
                     if (qtyInput) qtyInput.value = item.qty || 1;
@@ -3754,7 +4241,6 @@
     window.saveTransaction = saveTransaction;
     window.getSaleData = getSaleData;
     window.printSale = printSale;
-    window.showPrintDialog = showPrintDialog;
     window.loadSaleForEdit = loadSaleForEdit;
     window.showViewItemsModal = showViewItemsModal;
     window.addPOSRow = addPOSRow;
@@ -3803,4 +4289,350 @@
     console.log("✅ Stock validation enabled - only batches with qty > 0 shown");
     console.log("✅ Customer existence ensurer added - permanent fix for FK constraint");
 
+    // ============================================
+    // 🎨 ADDED (layout redesign): qty stepper buttons for the item table.
+    // Purely additive UI sugar -- doesn't duplicate or change any
+    // calculation/business logic above. The buttons just mutate the SAME
+    // .retail-pos-qty input already wired by the 'input' listener further
+    // up and dispatch a real 'input' event, so row total recalculation,
+    // batch stock validation, and auto-adding the next empty row all fire
+    // exactly as if the number had been typed by hand.
+    // ============================================
+    posTableBody.addEventListener('click', function (e) {
+        const stepBtn = e.target.closest('.qty-step-inc, .qty-step-dec');
+        if (!stepBtn) return;
+        const row = stepBtn.closest('tr');
+        const qtyInput = row?.querySelector('.retail-pos-qty');
+        if (!qtyInput || qtyInput.disabled) return;
+
+        const step = stepBtn.classList.contains('qty-step-inc') ? 1 : -1;
+        const current = parseInt(qtyInput.value) || 0;
+        const next = Math.max(0, current + step);
+        qtyInput.value = next;
+        qtyInput.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+
+})();
+// ============================================
+// 🔥 ADDED: QUEUE MODULE BRIDGE (patient token queue -> POS -> dispensing)
+// ============================================
+// Deliberately a SEPARATE, isolated IIFE appended after the whole POS
+// script above -- it doesn't touch or wrap any of that code, so it can
+// never change POS's own behaviour even if something here fails.
+//
+// When a cashier presses "Open in POS" on the persistent queue bar
+// (assets/js/shared-queue-bar.js, visible app-wide once logged in), it
+// stashes the ticket being served in sessionStorage under
+// 'activeQueueTicket' and navigates here. This block:
+//   1. reads that ticket and pre-selects the matching NHIMA/Regular
+//      customer in the form above (same buttons/selects a person would
+//      click by hand), and shows a small banner confirming which
+//      patient is being served (with a manual "Send to Dispensing Now"
+//      button, for cases like a quotation-only save that don't go
+//      through the popup below at all),
+//   2. on a completed sale, the invoice now just prints automatically
+//      (no more "would you like to print?" popup -- see the save
+//      handler above) and, right after, this shows a "Send to
+//      Dispatch" popup instead: confirming, it advances the ticket to
+//      Dispensing AND immediately calls the next waiting patient for
+//      this same billing counter -- same effect as pressing "Call Next
+//      Patient" on the queue bar, but without ever leaving POS. The
+//      next patient's details are pre-filled into the (already reset)
+//      form the same way as step 1, ready to bill straight away.
+//   3. keeps the always-visible top bar (and the Dashboard's own
+//      dispatch card, for Dispatch logins) in sync via the same
+//      sessionStorage keys the bar itself uses, plus the
+//      'queueServingChanged' event it already listens for.
+//
+// 🔥 ADDED: a manual "Call Next Patient" button, in the NHIMA panel
+// itself, for a cashier who's already sitting on this page and wants
+// to pull the next waiting billing ticket right now -- not just
+// automatically after finishing a sale. Without this, the ONLY way to
+// call a patient into POS was the top bar's "Call Next Patient" ->
+// "Open in POS" round trip, which only actually hands the ticket to
+// this page on a fresh navigation -- it does nothing if you're already
+// sitting here (this file never listens for the bar's own
+// 'queueServingChanged' broadcasts, only sends them). The button reuses
+// the exact same callNextForThisCounter() the auto-call-next flow
+// already uses below, just without a "ticket just sent" prefix on the
+// toast. See the wiring right after callNextForThisCounter()'s
+// definition.
+// ============================================
+(function initQueueBridge() {
+    try {
+        if (typeof supabaseClient === 'undefined') return;
+
+        const workspaceContent = document.getElementById('workspace-content');
+        if (!workspaceContent) return;
+
+        function pollForOptionAndSelect(selectId, value, attemptsLeft) {
+            if (!value || attemptsLeft <= 0) return;
+            const select = document.getElementById(selectId);
+            if (select) {
+                const opt = Array.from(select.options).find(o => o.value === value);
+                if (opt) {
+                    select.value = value;
+                    select.dispatchEvent(new Event('change'));
+                    return;
+                }
+            }
+            setTimeout(() => pollForOptionAndSelect(selectId, value, attemptsLeft - 1), 300);
+        }
+
+        function showQueueToast(message, muted) {
+            const toast = document.createElement('div');
+            toast.style.cssText = `position:fixed; top:20px; right:20px; padding:14px 22px; border-radius:8px; color:white; font-weight:500; z-index:9999; box-shadow:0 4px 12px rgba(0,0,0,0.15); background:${muted ? '#475569' : '#2563eb'}; max-width:360px;`;
+            toast.textContent = message;
+            document.body.appendChild(toast);
+            setTimeout(() => toast.remove(), 4500);
+        }
+
+        // The ticket currently being handled in THIS pos session -- null
+        // once it's been sent to dispensing or dismissed, and reassigned
+        // (not re-declared) whenever "Send to Dispatch" auto-calls the
+        // next patient in.
+        let ticket = null;
+
+        // ---- Pre-select the customer + show the "Serving Token #N"
+        // banner for whichever ticket is current right now. ----
+        function hydrateFormFromTicket(t) {
+            ticket = t;
+            sessionStorage.setItem('activeQueueTicket', JSON.stringify(t));
+
+            const wantsNhima = ticket.customerType === 'NHIMA';
+            const typeBtn = document.querySelector(`.retail-client-btn[data-type="${wantsNhima ? 'NHIMA' : 'REGULAR'}"]`);
+            if (typeBtn) typeBtn.click();
+
+            if (wantsNhima) {
+                pollForOptionAndSelect('retailNhimaNumber', ticket.nhimaNumber, 15);
+            } else {
+                pollForOptionAndSelect('retailRegPhone', ticket.phone, 15);
+            }
+
+            document.getElementById('queueBridgeBanner')?.remove();
+            const banner = document.createElement('div');
+            banner.id = 'queueBridgeBanner';
+            banner.style.cssText = 'display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap; background:#eff6ff; border:1px solid #bfdbfe; color:#1e3a8a; padding:10px 16px; border-radius:8px; margin-bottom:14px; font-size:0.85rem;';
+            banner.innerHTML = `
+                <span><i class="fa-solid fa-ticket" style="color:#2563eb;"></i>
+                    Serving <strong>Token #${ticket.tokenNumber}</strong> -- ${ticket.patientName}.
+                    Saving the sale sends them to Dispensing and calls the next patient automatically.
+                </span>
+                <span style="display:flex; gap:8px;">
+                    <button type="button" id="queueBridgeSendBtn" class="btn btn-success btn-sm"><i class="fa-solid fa-check"></i> Send to Dispensing Now</button>
+                    <button type="button" id="queueBridgeDismissBtn" class="btn btn-outline btn-sm">Dismiss</button>
+                </span>
+            `;
+            workspaceContent.insertAdjacentElement('afterbegin', banner);
+
+            document.getElementById('queueBridgeSendBtn')?.addEventListener('click', async () => {
+                const sent = ticket;
+                await advanceCurrentTicketToDispensing();
+                ticket = null;
+                const b = document.getElementById('queueBridgeBanner');
+                if (b) {
+                    b.style.background = '#f0fdf4';
+                    b.style.borderColor = '#bbf7d0';
+                    b.style.color = '#065f46';
+                    b.innerHTML = `<span><i class="fa-solid fa-circle-check" style="color:#059669;"></i> Token #${sent.tokenNumber} sent to the Dispensing queue.</span>`;
+                    setTimeout(() => b.remove(), 4000);
+                }
+            });
+            document.getElementById('queueBridgeDismissBtn')?.addEventListener('click', () => {
+                sessionStorage.removeItem('activeQueueTicket');
+                document.getElementById('queueBridgeBanner')?.remove();
+                ticket = null;
+            });
+        }
+
+        async function advanceCurrentTicketToDispensing() {
+            if (!ticket) return;
+            try {
+                await supabaseClient.rpc('complete_billing_ticket', { p_ticket_id: ticket.id });
+            } catch (e) {
+                console.warn('Queue bridge: could not advance ticket to dispensing:', e);
+            }
+            sessionStorage.removeItem('activeQueueTicket');
+        }
+
+        // ---- "Send to Dispatch" popup, shown right after a completed
+        // sale finishes printing (replaces the old print-confirmation
+        // popup -- see the save handler above and the repurposed
+        // #retailPrintModal shell it drives). ----
+        function showSendToDispatchPopup() {
+            if (!ticket) return;
+            const modalEl = document.getElementById('retailPrintModal');
+            const yesBtn = document.getElementById('retailPrintYesBtn');
+            const noBtn = document.getElementById('retailPrintNoBtn');
+            if (!modalEl || !yesBtn || !noBtn) return;
+
+            const iconEl = modalEl.querySelector('i.fa-solid');
+            const titleEl = modalEl.querySelector('h3');
+            const messageEl = modalEl.querySelector('p');
+            if (iconEl) iconEl.className = 'fa-solid fa-bell';
+            if (titleEl) titleEl.textContent = 'Sale Saved!';
+            if (messageEl) messageEl.textContent = `Send Token #${ticket.tokenNumber} (${ticket.patientName}) to Dispensing and call the next patient?`;
+            modalEl.style.display = 'flex';
+
+            // Strip any previously-attached handlers -- this popup can
+            // show more than once per page load (several sales in a row
+            // without navigating away).
+            const newYesBtn = yesBtn.cloneNode(true);
+            const newNoBtn = noBtn.cloneNode(true);
+            yesBtn.parentNode.replaceChild(newYesBtn, yesBtn);
+            noBtn.parentNode.replaceChild(newNoBtn, noBtn);
+            newYesBtn.innerHTML = '<i class="fa-solid fa-forward"></i> Send to Dispatch';
+            newNoBtn.textContent = 'Not Now';
+
+            newYesBtn.onclick = async function () {
+                modalEl.style.display = 'none';
+                const sent = ticket;
+                await advanceCurrentTicketToDispensing();
+                document.getElementById('queueBridgeBanner')?.remove();
+                ticket = null;
+                await callNextForThisCounter(sent);
+            };
+            newNoBtn.onclick = function () {
+                modalEl.style.display = 'none';
+            };
+        }
+
+        // ---- Call the next waiting billing ticket for this counter --
+        // same RPC + same sessionStorage/event sync the persistent queue
+        // bar uses, so the bar (and the Dashboard's dispatch card) update
+        // immediately without a page reload. Used both automatically
+        // (right after a sale is sent to Dispensing, with justSentTicket
+        // set -- see showSendToDispatchPopup() above) and manually (the
+        // "Call Next Patient" button wired just below, with
+        // justSentTicket left null). ----
+        async function callNextForThisCounter(justSentTicket) {
+            const counter = sessionStorage.getItem('staffCounter');
+            const prefix = justSentTicket ? `Token #${justSentTicket.tokenNumber} sent to Dispensing. ` : '';
+
+            if (!counter) {
+                showQueueToast(justSentTicket
+                    ? `${prefix}`.trim()
+                    : `You're not logged in to a billing counter -- pick one from the queue bar at the top first.`, !justSentTicket);
+                return; // this login isn't working a billing counter -- nothing to call
+            }
+
+            try {
+                const { data: nextTicket, error } = await supabaseClient.rpc('call_next_ticket', { p_stage: 'billing', p_counter: counter });
+                if (error) throw error;
+
+                if (nextTicket) {
+                    sessionStorage.setItem('queueServingTicket_billing', JSON.stringify(nextTicket));
+                } else {
+                    sessionStorage.removeItem('queueServingTicket_billing');
+                }
+                window.dispatchEvent(new CustomEvent('queueServingChanged', { detail: { stage: 'billing', ticket: nextTicket || null } }));
+
+                if (nextTicket) {
+                    showQueueToast(`${prefix}Now serving Token #${nextTicket.token_number} -- ${nextTicket.patient_name}.`);
+                    hydrateFormFromTicket({
+                        id: nextTicket.id,
+                        tokenNumber: nextTicket.token_number,
+                        patientName: nextTicket.patient_name,
+                        customerId: nextTicket.customer_id,
+                        customerType: nextTicket.customer_type,
+                        phone: nextTicket.phone,
+                        nhimaNumber: nextTicket.nhima_number
+                    });
+                } else {
+                    showQueueToast(`${prefix}No more patients waiting for billing right now.`);
+                }
+            } catch (e) {
+                console.warn('Queue bridge: could not call next patient:', e);
+                showQueueToast(`${prefix}Could not call the next patient -- try again, or use the queue bar at the top.`, true);
+            }
+        }
+
+        // ---- Manual "Call Next Patient" button (NHIMA panel) -- see
+        // the "ADDED" note at the top of this IIFE. Wired unconditionally
+        // (not gated behind an incoming activeQueueTicket like the INIT
+        // block below), and only actually shown when this login is
+        // working a real billing counter. ----
+        (function initManualCallNextButton() {
+            const wrap = document.getElementById('retailCallNextWrap');
+            const btn = document.getElementById('retailCallNextBtn');
+            const btnLabel = document.getElementById('retailCallNextBtnLabel');
+            const waitingBadge = document.getElementById('retailCallNextWaitingBadge');
+            if (!wrap || !btn) return;
+
+            const myCounter = sessionStorage.getItem('staffCounter');
+            const isBillingCounter = myCounter === 'Counter 1' || myCounter === 'Counter 2' || myCounter === 'Counter 3';
+            if (!isBillingCounter) {
+                wrap.style.display = 'none';
+                return;
+            }
+            wrap.style.display = 'block';
+
+            async function loadBillingWaitingCount() {
+                try {
+                    const today = new Date().toISOString().split('T')[0];
+                    const { count, error } = await supabaseClient
+                        .from('queue_tickets')
+                        .select('id', { count: 'exact', head: true })
+                        .eq('queue_date', today)
+                        .eq('status', 'waiting_billing');
+                    if (error) throw error;
+                    if (waitingBadge) waitingBadge.textContent = `${count || 0} waiting`;
+                } catch (e) {
+                    console.warn('Could not load billing waiting count:', e);
+                }
+            }
+            loadBillingWaitingCount();
+
+            // Window-handler-replace pattern (same as the Dashboard's
+            // dispatch card) -- this script can be injected more than once
+            // per page load (re-navigating into Retail POS), so swap out
+            // any previous listener instead of stacking duplicates on
+            // `window`.
+            if (window.__retailCallNextWaitingHandler) {
+                window.removeEventListener('queueWaitingCountChanged', window.__retailCallNextWaitingHandler);
+            }
+            window.__retailCallNextWaitingHandler = function (e) {
+                if (e.detail && e.detail.stage === 'billing' && waitingBadge) {
+                    waitingBadge.textContent = `${e.detail.count} waiting`;
+                }
+            };
+            window.addEventListener('queueWaitingCountChanged', window.__retailCallNextWaitingHandler);
+
+            btn.addEventListener('click', async () => {
+                if (ticket) {
+                    showQueueToast(`You're already serving Token #${ticket.tokenNumber} -- send them to Dispensing or Dismiss first.`, true);
+                    return;
+                }
+                btn.disabled = true;
+                if (btnLabel) btnLabel.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Calling...';
+                try {
+                    await callNextForThisCounter(null);
+                } finally {
+                    btn.disabled = false;
+                    if (btnLabel) btnLabel.innerHTML = '<i class="fa-solid fa-forward"></i> Call Next Patient';
+                }
+            });
+        })();
+
+        // ---- INIT: only do anything if this POS session actually
+        // started from "Open in POS" on the queue bar. ----
+        const raw = sessionStorage.getItem('activeQueueTicket');
+        if (!raw) return;
+        let initialTicket;
+        try { initialTicket = JSON.parse(raw); } catch (e) { sessionStorage.removeItem('activeQueueTicket'); return; }
+        if (!initialTicket || !initialTicket.id) return;
+
+        hydrateFormFromTicket(initialTicket);
+
+        // 🔥 Generic hook core POS calls unconditionally after every
+        // completed, non-quotation save (see the save handler above) --
+        // a no-op unless there's still an active ticket at that moment
+        // (e.g. it wasn't already sent manually via the banner's own
+        // "Send to Dispensing Now" button).
+        window.__onRetailSaleSaved = function () {
+            showSendToDispatchPopup();
+        };
+    } catch (e) {
+        console.warn('Queue bridge init failed (non-fatal, POS unaffected):', e);
+    }
 })();

@@ -1,6 +1,6 @@
 <div class="sidebar-module-title"><i class="fa-solid fa-gauge-high"></i> DASHBOARD</div>
 <p class="helper-text" style="padding: 0 20px; font-size: 0.8rem;">
-    Your quick attendance and leave requests are on this page.
+    Your exchange rate, leave, advance, and attendance are all in the sidebar here.
 </p>
 
 <!-- 🔥 CHANGED: QUICK ACTIONS -->
@@ -44,6 +44,82 @@
         <span><i class="fa-solid fa-money-bill-wave"></i> Expense</span>
         <span style="opacity:0.7; font-size:0.7rem; border:1px solid rgba(255,255,255,0.5); border-radius:4px; padding:1px 5px;">E</span>
     </button>
+</div>
+
+<!-- 🔥 MOVED HERE FROM THE MAIN DASHBOARD PAGE: EXCHANGE RATE, LEAVE,
+     SALARY ADVANCE, ATTENDANCE REGISTER -->
+<!-- These four used to be full-width cards on the Dashboard's main
+     content area, which made that page feel crowded/"quite full".
+     Moved to the sidebar as compact widgets instead -- the full forms
+     are unchanged (still the SAME modals: dashLeaveModal /
+     dashAdvanceModal / dashExchangeRateModal, all still defined in
+     dashboard-view.html), just opened from here now. Populated by
+     loadExchangeRateWidget() / loadMyLeave() / loadMyAdvances() /
+     loadMonthSummary() in dashboard-view.js -- left static here for
+     the same reason as "Today at a Glance" below: this file's own
+     script (if any) would never execute, since it's injected via
+     innerHTML, not a real <script> tag. -->
+
+<!-- EXCHANGE RATE -->
+<div style="padding: 0 20px; margin-top: 24px;">
+    <div style="font-size:0.7rem; font-weight:700; color:#94a3b8; letter-spacing:0.5px; text-transform:uppercase; margin-bottom:8px;">Exchange Rate</div>
+    <div style="background:#f8fafc; border-radius:8px; padding:12px; display:flex; justify-content:space-between; align-items:center;">
+        <div>
+            <div style="font-size:1.05rem; font-weight:700; color:#0f172a;" id="dashSidebarExchangeRateValue">--</div>
+            <div style="font-size:0.68rem; color:#94a3b8;" id="dashSidebarExchangeRateUpdated">Loading...</div>
+        </div>
+        <button id="dashSidebarOpenExchangeRateModalBtn" style="background:none; border:none; color:#2563eb; cursor:pointer; font-size:0.9rem;" title="Update Rate">
+            <i class="fa-solid fa-pen"></i>
+        </button>
+    </div>
+</div>
+
+<!-- LEAVE -->
+<div style="padding: 0 20px; margin-top: 24px;">
+    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+        <div style="font-size:0.7rem; font-weight:700; color:#94a3b8; letter-spacing:0.5px; text-transform:uppercase;">Leave</div>
+        <button id="dashSidebarOpenLeaveModalBtn" style="background:none; border:none; color:#2563eb; cursor:pointer; font-size:0.78rem; font-weight:600;">
+            <i class="fa-solid fa-plus"></i> Request
+        </button>
+    </div>
+    <div id="dashSidebarMyLeaveList" style="font-size:0.78rem;">
+        <p class="helper-text" style="font-size:0.75rem; padding:4px 0;"><i class="fa-solid fa-spinner fa-spin"></i> Loading...</p>
+    </div>
+</div>
+
+<!-- SALARY ADVANCE -->
+<div style="padding: 0 20px; margin-top: 24px;">
+    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+        <div style="font-size:0.7rem; font-weight:700; color:#94a3b8; letter-spacing:0.5px; text-transform:uppercase;">Salary Advance</div>
+        <button id="dashSidebarOpenAdvanceModalBtn" style="background:none; border:none; color:#2563eb; cursor:pointer; font-size:0.78rem; font-weight:600;">
+            <i class="fa-solid fa-plus"></i> Request
+        </button>
+    </div>
+    <div id="dashSidebarMyAdvanceList" style="font-size:0.78rem;">
+        <p class="helper-text" style="font-size:0.75rem; padding:4px 0;"><i class="fa-solid fa-spinner fa-spin"></i> Loading...</p>
+    </div>
+</div>
+
+<!-- ATTENDANCE REGISTER (this month's stats + calendar) -->
+<div style="padding: 0 20px; margin-top: 24px;">
+    <div style="font-size:0.7rem; font-weight:700; color:#94a3b8; letter-spacing:0.5px; text-transform:uppercase; margin-bottom:8px;">Attendance Register</div>
+    <div style="display:grid; grid-template-columns:repeat(3,1fr); gap:6px; margin-bottom:10px;">
+        <div style="text-align:center; background:#f8fafc; border-radius:6px; padding:6px 2px;">
+            <div style="font-size:0.95rem; font-weight:700; color:#0f172a;" id="dashSidebarMonthWorkedHours">--</div>
+            <div style="font-size:0.58rem; color:#64748b; text-transform:uppercase;">Hrs</div>
+        </div>
+        <div style="text-align:center; background:#f8fafc; border-radius:6px; padding:6px 2px;">
+            <div style="font-size:0.95rem; font-weight:700; color:#dc2626;" id="dashSidebarMonthAbsent">--</div>
+            <div style="font-size:0.58rem; color:#64748b; text-transform:uppercase;">Absent</div>
+        </div>
+        <div style="text-align:center; background:#f8fafc; border-radius:6px; padding:6px 2px;">
+            <div style="font-size:0.95rem; font-weight:700; color:#8b5cf6;" id="dashSidebarMonthLeave">--</div>
+            <div style="font-size:0.58rem; color:#64748b; text-transform:uppercase;">Leave</div>
+        </div>
+    </div>
+    <div id="dashSidebarMonthCalendar" style="display:grid; grid-template-columns:repeat(7,1fr); gap:2px;">
+        <!-- Populated by JS -->
+    </div>
 </div>
 
 <!-- 🔥 ADDED: TODAY AT A GLANCE -->

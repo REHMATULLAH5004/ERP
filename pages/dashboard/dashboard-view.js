@@ -1,10 +1,18 @@
 // ============================================
-// DASHBOARD - QUICK ATTENDANCE + LEAVE REQUEST
+// DASHBOARD - LEAVE / ADVANCE / ATTENDANCE (sidebar widgets), DISPENSING
+// (labels + call-next-patient), EXCHANGE RATE, ADMIN APPROVALS
 // ============================================
-// Self-service: this page always acts on the CURRENT logged-in user's
-// own attendance and leave, resolved via user_profiles -> employees.
-// This is different from HR > Attendance, which lets an authorized
-// person administer ANY employee's attendance via a dropdown.
+// Self-service: the leave/advance/attendance widgets always act on the
+// CURRENT logged-in user's own record, resolved via
+// user_profiles -> employees. This is different from HR > Attendance,
+// which lets an authorized person administer ANY employee's attendance
+// via a dropdown.
+//
+// 🔥 Leave / Salary Advance / Exchange Rate / Attendance Register moved
+// out of full-width cards on the main page and into compact widgets in
+// the sidebar (dashboard-menu.html) -- same modals, same logic here,
+// just opened from new element ids. "My Attendance Today" was removed
+// outright (see loadMyLeave()'s comment just below) rather than moved.
 //
 // Reuses the exact same off-day/holiday detection logic already built
 // and validated in HR > Attendance (isWeeklyOffDay, isPublicHoliday) --
@@ -75,54 +83,14 @@
     }
 
     // ============================================
-    // QUICK ATTENDANCE
-    // ============================================
-    async function loadTodayAttendance() {
-        const statusEl = document.getElementById('dashAttendanceStatus');
-        if (!currentEmployeeId) {
-            statusEl.innerHTML = `<span style="color:#dc2626;">Your login isn't linked to an employee record. Contact an admin.</span>`;
-            return null;
-        }
-
-        const today = new Date().toISOString().split('T')[0];
-        const { data, error } = await supabaseClient
-            .from('employee_attendance')
-            .select('*')
-            .eq('employee_id', currentEmployeeId)
-            .eq('attendance_date', today)
-            .maybeSingle();
-
-        if (error) {
-            statusEl.innerHTML = `<span style="color:#dc2626;">Error loading attendance.</span>`;
-            return null;
-        }
-
-        renderAttendanceStatus(data);
-        return data;
-    }
-
-    // 🔥 FIX: this used to manage Clock In/Out button state (and had a
-    // real bug where it never restored button labels after a request).
-    // Both problems are now moot -- there are no clock buttons on this
-    // page anymore, attendance only comes from the QR Station. This is
-    // purely a read-only display of whatever's already recorded.
-    function renderAttendanceStatus(record) {
-        const statusEl = document.getElementById('dashAttendanceStatus');
-
-        if (!record || !record.check_in) {
-            statusEl.innerHTML = `<span style="color:#94a3b8;">Not clocked in yet today.</span>`;
-        } else if (record.check_in && !record.check_out) {
-            statusEl.innerHTML = `<span style="color:#059669;"><i class="fa-solid fa-circle-check"></i> Clocked in at ${record.check_in}</span>`;
-        } else {
-            statusEl.innerHTML = `<span style="color:#2563eb;"><i class="fa-solid fa-circle-check"></i> Done for today: ${record.check_in} - ${record.check_out}</span>`;
-        }
-    }
-
-    // ============================================
     // LEAVE REQUEST -- MY OWN
     // ============================================
+    // 🔥 REMOVED: "My Attendance Today" (loadTodayAttendance /
+    // renderAttendanceStatus) -- it was a read-only display with
+    // nothing left to actually do on this page, since self-service
+    // clock in/out was already replaced by the QR Station a while ago.
     async function loadMyLeave() {
-        const listEl = document.getElementById('dashMyLeaveList');
+        const listEl = document.getElementById('dashSidebarMyLeaveList');
         if (!currentEmployeeId) { listEl.innerHTML = ''; return; }
 
         const { data, error } = await supabaseClient
@@ -428,15 +396,15 @@
         });
 
         const set = (id, val) => { const el = document.getElementById(id); if (el) el.textContent = val; };
-        set('dashMonthWorkedHours', (totalMinutes / 60).toFixed(1));
-        set('dashMonthAbsent', absentDays);
-        set('dashMonthLeave', leaveDatesInMonth.size);
+        set('dashSidebarMonthWorkedHours', (totalMinutes / 60).toFixed(1));
+        set('dashSidebarMonthAbsent', absentDays);
+        set('dashSidebarMonthLeave', leaveDatesInMonth.size);
 
-        // ---- CALENDAR ----
-        const calEl = document.getElementById('dashMonthCalendar');
+        // ---- CALENDAR (now in the sidebar -- narrower, so smaller type) ----
+        const calEl = document.getElementById('dashSidebarMonthCalendar');
         if (!calEl) return;
 
-        let html = DAY_NAMES_SHORT.map(d => `<div style="text-align:center; font-size:0.7rem; font-weight:600; color:#94a3b8; padding-bottom:4px;">${d}</div>`).join('');
+        let html = DAY_NAMES_SHORT.map(d => `<div style="text-align:center; font-size:0.6rem; font-weight:600; color:#94a3b8; padding-bottom:2px;">${d[0]}</div>`).join('');
 
         const firstDayOfWeek = new Date(year, month, 1).getDay();
         for (let i = 0; i < firstDayOfWeek; i++) html += `<div></div>`;
@@ -467,7 +435,7 @@
 
             html += `
                 <div title="${dateStr}${holidayDates[dateStr] ? ' -- ' + holidayDates[dateStr] : ''}"
-                     style="aspect-ratio:1; display:flex; align-items:center; justify-content:center; background:${bg}; color:${color}; border:${border}; border-radius:6px; font-size:0.8rem; font-weight:500;">
+                     style="aspect-ratio:1; display:flex; align-items:center; justify-content:center; background:${bg}; color:${color}; border:${border}; border-radius:4px; font-size:0.62rem; font-weight:500;">
                     ${day}
                 </div>
             `;
@@ -479,7 +447,7 @@
     // 🔥 ADDED: ADVANCE REQUEST -- MY OWN
     // ============================================
     async function loadMyAdvances() {
-        const listEl = document.getElementById('dashMyAdvanceList');
+        const listEl = document.getElementById('dashSidebarMyAdvanceList');
         if (!currentEmployeeId) { listEl.innerHTML = ''; return; }
 
         const [empRes, requestsRes, recoveriesRes] = await Promise.all([
@@ -524,7 +492,7 @@
         }).join('');
     }
 
-    document.getElementById('dashOpenAdvanceModalBtn').addEventListener('click', () => {
+    document.getElementById('dashSidebarOpenAdvanceModalBtn').addEventListener('click', () => {
         document.getElementById('dashAdvanceModal').style.display = 'flex';
     });
     document.getElementById('dashCloseAdvanceModalBtn').addEventListener('click', () => {
@@ -564,6 +532,376 @@
     });
 
     // ============================================
+    // 🔥 ADDED: DISPENSING -- PRINT LABELS
+    // ============================================
+    // Moved here from Retail POS so label printing is decoupled from
+    // checkout -- a dispenser works through this independently of the
+    // till. Reads `sales.items` directly (a JSON snapshot already written
+    // at save time -- product_name, how_to_take, qty, pack_size,
+    // days_supplied per line) rather than joining sale_items, since that
+    // snapshot already has everything a sticker needs.
+    //
+    // buildStickerHTML() below is copied unchanged from the version that
+    // used to live in retail/index.js -- same label size (45mm x 40mm for
+    // the TSC TTP-244 Pro), same bold pharmacy name / bold Qty line, same
+    // "(Supplied for N Days)" bracket, same multi-line dosage rendering.
+    function buildStickerHTML(saleData) {
+        return `<!DOCTYPE html>
+            <html>
+            <head>
+                <title>Labels - ${saleData.sale_id}</title>
+                <style>
+                    @page { size: 45mm 40mm; margin: 0; }
+                    body { font-family: Arial, sans-serif; margin: 0; }
+                    .sticker {
+                        width: 45mm; height: 40mm; padding: 2mm; box-sizing: border-box;
+                        border: 1px dashed #94a3b8; page-break-after: always;
+                        display: flex; flex-direction: column; justify-content: center;
+                        overflow: hidden;
+                    }
+                    .sticker:last-child { page-break-after: auto; }
+                    .sticker .pharmacy { font-size: 6.5pt; color: #64748b; text-transform: uppercase; letter-spacing: 0.05em; font-weight: bold; }
+                    .sticker .item-name { font-size: 10pt; font-weight: bold; margin: 1.5mm 0 1mm 0; }
+                    .sticker .how-to-take { font-size: 8pt; white-space: pre-line; line-height: 1.3; }
+                    .sticker .qty { font-size: 7.5pt; color: #475569; margin-top: 1mm; font-weight: bold; }
+                    @media print { .sticker { border: none; } }
+                </style>
+            </head>
+            <body>
+                ${(saleData.items || []).map(item => `
+                    <div class="sticker">
+                        <div class="pharmacy">Griffins Medicals Limited</div>
+                        <div class="item-name">${item.product_name}</div>
+                        <div class="how-to-take">${item.how_to_take || 'As directed'}</div>
+                        <div class="qty">Qty: ${item.qty} ${item.pack_size}${item.days_supplied ? ` (Supplied for ${item.days_supplied} Days)` : ''}</div>
+                    </div>
+                `).join('')}
+            </body>
+            </html>
+        `;
+    }
+
+    // Opens the print window for one sale's labels and marks
+    // labels_printed_at so it drops off the pending queue everywhere --
+    // any device/terminal viewing this page sees the same state. Always
+    // callable again later for a reprint (search still finds it), it just
+    // won't show in the "Pending Labels" queue anymore.
+    async function printLabelsForSale(sale) {
+        if (!sale || !sale.items || sale.items.length === 0) {
+            alert('This sale has no items to print labels for.');
+            return;
+        }
+
+        const stickerWindow = window.open('', '_blank', 'width=400,height=500');
+        stickerWindow.document.write(buildStickerHTML({ sale_id: sale.sale_id, items: sale.items }));
+        stickerWindow.document.close();
+        stickerWindow.print();
+
+        try {
+            await supabaseClient
+                .from('sales')
+                .update({ labels_printed_at: new Date().toISOString() })
+                .eq('id', sale.id);
+        } catch (err) {
+            console.warn('Could not mark labels_printed_at:', err);
+        }
+
+        await loadDispenseQueue();
+        // Re-run the last search too, if one is showing, so its "Reprint"
+        // label/timestamp reflects the print that just happened.
+        const searchInput = document.getElementById('dashDispenseSearchInput');
+        if (searchInput && searchInput.value.trim()) {
+            await searchDispenseSales(searchInput.value.trim());
+        }
+    }
+
+    function renderDispenseRow(sale, isSearchResult) {
+        const itemCount = (sale.items || []).length;
+        const customerName = sale.customer_data?.full_name || 'Walk-in';
+        const time = new Date(sale.created_at).toLocaleString();
+        const printedBadge = sale.labels_printed_at
+            ? `<span style="margin-left:6px; background:#dcfce7; color:#166534; padding:1px 7px; border-radius:8px; font-size:0.65rem; font-weight:600;">Printed ${new Date(sale.labels_printed_at).toLocaleString()}</span>`
+            : '';
+        const btnLabel = sale.labels_printed_at
+            ? '<i class="fa-solid fa-print"></i> Reprint'
+            : '<i class="fa-solid fa-print"></i> Print Labels';
+
+        return `
+            <tr>
+                <td style="padding-left:12px;"><strong>${sale.sale_id}</strong>${isSearchResult ? printedBadge : ''}</td>
+                <td>${customerName}</td>
+                <td>${itemCount}</td>
+                <td>${time}</td>
+                <td style="text-align:right; padding-right:12px;">
+                    <button class="btn btn-primary btn-sm dash-print-labels-btn" data-sale-id="${sale.id}">${btnLabel}</button>
+                </td>
+            </tr>
+        `;
+    }
+
+    // Sales fetched for the queue/search are cached here keyed by id, so
+    // the print button (delegated click) doesn't need a second round trip
+    // just to get the items it already has in front of it.
+    const dispenseSaleCache = {};
+
+    async function loadDispenseQueue() {
+        const tbody = document.getElementById('dashDispenseQueueBody');
+        if (!tbody) return;
+
+        try {
+            const { data, error } = await supabaseClient
+                .from('sales')
+                .select('id, sale_id, customer_data, items, created_at, labels_printed_at')
+                .eq('client_type', 'RETAIL')
+                .neq('is_quotation', true)
+                .is('labels_printed_at', null)
+                .order('created_at', { ascending: false })
+                .limit(30);
+
+            if (error) throw error;
+
+            if (!data || data.length === 0) {
+                tbody.innerHTML = `<tr><td colspan="5" style="text-align:center;padding:20px;color:#22c55e;"><i class="fa-solid fa-circle-check"></i> All caught up -- no pending labels.</td></tr>`;
+                return;
+            }
+
+            data.forEach(sale => dispenseSaleCache[sale.id] = sale);
+            tbody.innerHTML = data.map(sale => renderDispenseRow(sale, false)).join('');
+        } catch (error) {
+            console.error('Error loading dispensing queue:', error);
+            tbody.innerHTML = `<tr><td colspan="5" style="text-align:center;padding:20px;color:#dc2626;">Error loading queue: ${error.message}</td></tr>`;
+        }
+    }
+
+    async function searchDispenseSales(query) {
+        const resultsEl = document.getElementById('dashDispenseSearchResults');
+        if (!resultsEl) return;
+
+        if (!query) {
+            resultsEl.innerHTML = '';
+            return;
+        }
+
+        resultsEl.innerHTML = `<p style="color:#94a3b8; padding:10px 0;"><i class="fa-solid fa-spinner fa-spin"></i> Searching...</p>`;
+
+        try {
+            const { data, error } = await supabaseClient
+                .from('sales')
+                .select('id, sale_id, customer_data, items, created_at, labels_printed_at')
+                .eq('client_type', 'RETAIL')
+                .neq('is_quotation', true)
+                .ilike('sale_id', `%${query}%`)
+                .order('created_at', { ascending: false })
+                .limit(10);
+
+            if (error) throw error;
+
+            if (!data || data.length === 0) {
+                resultsEl.innerHTML = `<p style="color:#94a3b8; padding:10px 0; font-size:0.85rem;">No matching invoice found.</p>`;
+                return;
+            }
+
+            data.forEach(sale => dispenseSaleCache[sale.id] = sale);
+            resultsEl.innerHTML = `
+                <div class="table-responsive">
+                    <table class="table-minimal" style="width:100%;">
+                        <thead>
+                            <tr>
+                                <th style="padding-left:12px;">Invoice #</th>
+                                <th>Customer</th>
+                                <th>Items</th>
+                                <th>Time</th>
+                                <th style="text-align:right; padding-right:12px;">Action</th>
+                            </tr>
+                        </thead>
+                        <tbody>${data.map(sale => renderDispenseRow(sale, true)).join('')}</tbody>
+                    </table>
+                </div>
+            `;
+        } catch (error) {
+            console.error('Error searching sales for dispensing:', error);
+            resultsEl.innerHTML = `<p style="color:#dc2626; padding:10px 0; font-size:0.85rem;">Error searching: ${error.message}</p>`;
+        }
+    }
+
+    // Delegated click covers both the queue table and the search results
+    // table -- neither is rebuilt via cloneNode, so a single listener on
+    // the shared container works for both.
+    const dispenseCard = document.getElementById('dashDispenseQueueBody')?.closest('.card');
+    if (dispenseCard) {
+        dispenseCard.addEventListener('click', (e) => {
+            const btn = e.target.closest('.dash-print-labels-btn');
+            if (!btn) return;
+            const sale = dispenseSaleCache[btn.dataset.saleId];
+            if (sale) printLabelsForSale(sale);
+        });
+    }
+
+    const dashDispenseSearchBtn = document.getElementById('dashDispenseSearchBtn');
+    const dashDispenseSearchInput = document.getElementById('dashDispenseSearchInput');
+    const dashDispenseRefreshBtn = document.getElementById('dashDispenseRefreshBtn');
+
+    if (dashDispenseSearchBtn) {
+        dashDispenseSearchBtn.addEventListener('click', () => searchDispenseSales(dashDispenseSearchInput?.value.trim() || ''));
+    }
+    if (dashDispenseSearchInput) {
+        dashDispenseSearchInput.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') searchDispenseSales(dashDispenseSearchInput.value.trim());
+        });
+    }
+    if (dashDispenseRefreshBtn) {
+        dashDispenseRefreshBtn.addEventListener('click', loadDispenseQueue);
+    }
+
+    // ============================================
+    // 🔥 ADDED: CALL NEXT PATIENT (DISPATCH ONLY)
+    // ============================================
+    // Shown only when THIS login chose "Dispatch" as their counter at
+    // login (assets/js/auth.js's counter picker, stored in
+    // sessionStorage.staffCounter) -- a role check alone isn't enough,
+    // since a Pharmacist login might not be covering dispatch today.
+    // Talks to the exact same call_next_ticket / complete_dispensing_ticket
+    // / skip_ticket RPCs (and queue_tickets table) as the always-visible
+    // top bar (assets/js/shared-queue-bar.js) -- this card is just a
+    // second, more prominent entry point to the SAME action, right here
+    // where dispatch is already working. Kept in sync with the top bar
+    // two ways: they share the same sessionStorage key for who's
+    // currently being served, and each dispatches a 'queueServingChanged'
+    // / 'queueWaitingCountChanged' window event the other listens for, so
+    // calling/completing/skipping from either place updates both
+    // immediately without a page reload.
+    function initDispatchQueueCard() {
+        const card = document.getElementById('dashDispatchQueueCard');
+        if (!card) return;
+
+        if (sessionStorage.getItem('staffCounter') !== 'Dispatch') return; // not covering dispatch today
+        card.style.display = 'block';
+
+        const SERVING_KEY = 'queueServingTicket_dispensing';
+        let serving = null;
+        try {
+            const saved = sessionStorage.getItem(SERVING_KEY);
+            if (saved) serving = JSON.parse(saved);
+        } catch (e) { /* ignore */ }
+
+        function render() {
+            const idleEl = document.getElementById('dashDispatchIdle');
+            const servingEl = document.getElementById('dashDispatchServing');
+            if (!idleEl || !servingEl) return;
+            if (serving) {
+                idleEl.style.display = 'none';
+                servingEl.style.display = 'flex';
+                document.getElementById('dashDispatchServingToken').textContent = serving.token_number;
+                document.getElementById('dashDispatchServingName').textContent = serving.patient_name;
+            } else {
+                idleEl.style.display = 'flex';
+                servingEl.style.display = 'none';
+            }
+        }
+
+        function setServing(ticket) {
+            serving = ticket;
+            if (ticket) sessionStorage.setItem(SERVING_KEY, JSON.stringify(ticket));
+            else sessionStorage.removeItem(SERVING_KEY);
+            render();
+            window.dispatchEvent(new CustomEvent('queueServingChanged', { detail: { stage: 'dispensing', ticket } }));
+        }
+
+        async function loadWaitingBadge() {
+            const badge = document.getElementById('dashDispatchWaitingBadge');
+            if (!badge) return;
+            const today = new Date().toISOString().split('T')[0];
+            const { count, error } = await supabaseClient
+                .from('queue_tickets')
+                .select('id', { count: 'exact', head: true })
+                .eq('queue_date', today)
+                .eq('status', 'waiting_dispensing');
+            if (error) { console.warn('Error loading dispatch waiting count:', error); return; }
+            badge.textContent = `${count || 0} waiting`;
+        }
+
+        // 🔥 Window-level listeners are replaced (not stacked) on every
+        // Dashboard revisit -- this script re-runs each time the module
+        // loads, and a plain addEventListener here would otherwise add
+        // one more listener per visit forever. The top bar's own
+        // 'queueServingChanged' listener is safe without this because it
+        // (and its setInterval/realtime channel) is only ever mounted
+        // once for the whole session, outside the SPA content this
+        // script lives in.
+        if (window.__dispatchServingHandler) {
+            window.removeEventListener('queueServingChanged', window.__dispatchServingHandler);
+        }
+        window.__dispatchServingHandler = (e) => {
+            if (!e.detail || e.detail.stage !== 'dispensing') return;
+            serving = e.detail.ticket;
+            render();
+        };
+        window.addEventListener('queueServingChanged', window.__dispatchServingHandler);
+
+        if (window.__dispatchWaitingHandler) {
+            window.removeEventListener('queueWaitingCountChanged', window.__dispatchWaitingHandler);
+        }
+        window.__dispatchWaitingHandler = (e) => {
+            if (!e.detail || e.detail.stage !== 'dispensing') return;
+            const badge = document.getElementById('dashDispatchWaitingBadge');
+            if (badge) badge.textContent = `${e.detail.count} waiting`;
+        };
+        window.addEventListener('queueWaitingCountChanged', window.__dispatchWaitingHandler);
+
+        document.getElementById('dashDispatchNextBtn').addEventListener('click', async () => {
+            const btn = document.getElementById('dashDispatchNextBtn');
+            btn.disabled = true;
+            btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Calling...';
+            try {
+                const { data, error } = await supabaseClient.rpc('call_next_ticket', { p_stage: 'dispensing', p_counter: 'Dispatch' });
+                if (error) throw error;
+                if (!data) {
+                    alert('No patients waiting for dispensing right now.');
+                } else {
+                    setServing(data);
+                }
+                loadWaitingBadge();
+            } catch (err) {
+                console.error('Error calling next ticket:', err);
+                alert('Error calling next patient: ' + (err.message || err));
+            } finally {
+                btn.disabled = false;
+                btn.innerHTML = '<i class="fa-solid fa-forward"></i> Call Next Patient';
+            }
+        });
+
+        document.getElementById('dashDispatchCompleteBtn').addEventListener('click', async () => {
+            if (!serving) return;
+            try {
+                const { error } = await supabaseClient.rpc('complete_dispensing_ticket', { p_ticket_id: serving.id });
+                if (error) throw error;
+                setServing(null);
+                loadWaitingBadge();
+            } catch (err) {
+                console.error('Error completing dispensing:', err);
+                alert('Error: ' + (err.message || err));
+            }
+        });
+
+        document.getElementById('dashDispatchSkipBtn').addEventListener('click', async () => {
+            if (!serving) return;
+            if (!confirm(`Mark token #${serving.token_number} (${serving.patient_name}) as skipped?`)) return;
+            try {
+                const { error } = await supabaseClient.rpc('skip_ticket', { p_ticket_id: serving.id });
+                if (error) throw error;
+                setServing(null);
+                loadWaitingBadge();
+            } catch (err) {
+                console.error('Error skipping ticket:', err);
+                alert('Error: ' + (err.message || err));
+            }
+        });
+
+        render();
+        loadWaitingBadge(); // one-off -- live updates after this come via 'queueWaitingCountChanged' from the top bar's own polling/realtime, so this card doesn't need its own interval or channel subscription (which would otherwise stack up on every Dashboard revisit).
+    }
+
+    // ============================================
     // 🔥 ADDED: SHARED EXCHANGE RATE WIDGET
     // ============================================
     // Reads/writes the same `exchange_rates` table Account > Cash & Bank
@@ -572,8 +910,8 @@
     // up the same default rate for the rest of the day instead of each
     // needing it re-typed separately.
     async function loadExchangeRateWidget() {
-        const valueEl = document.getElementById('dashExchangeRateValue');
-        const updatedEl = document.getElementById('dashExchangeRateUpdated');
+        const valueEl = document.getElementById('dashSidebarExchangeRateValue');
+        const updatedEl = document.getElementById('dashSidebarExchangeRateUpdated');
         if (!valueEl) return;
 
         try {
@@ -715,7 +1053,7 @@
     // ============================================
     // MODAL WIRING
     // ============================================
-    document.getElementById('dashOpenLeaveModalBtn').addEventListener('click', () => {
+    document.getElementById('dashSidebarOpenLeaveModalBtn').addEventListener('click', () => {
         document.getElementById('dashLeaveModal').style.display = 'flex';
     });
     document.getElementById('dashCloseLeaveModalBtn').addEventListener('click', () => {
@@ -725,7 +1063,7 @@
         document.getElementById('dashLeaveModal').style.display = 'none';
     });
 
-    document.getElementById('dashOpenExchangeRateModalBtn').addEventListener('click', async () => {
+    document.getElementById('dashSidebarOpenExchangeRateModalBtn').addEventListener('click', async () => {
         const current = await getSharedExchangeRate();
         document.getElementById('dashExchangeRateInput').value = current;
         document.getElementById('dashExchangeRateModal').style.display = 'flex';
@@ -803,11 +1141,12 @@
     // INIT
     // ============================================
     await resolveCurrentEmployee();
-    await loadTodayAttendance();
     await loadMyLeave();
     await loadMyAdvances();
     await loadMonthSummary();
     await loadAdminApprovals();
+    await loadDispenseQueue();
+    initDispatchQueueCard();
     await loadExchangeRateWidget();
     await loadSidebarStats();
     await loadSidebarNotices();

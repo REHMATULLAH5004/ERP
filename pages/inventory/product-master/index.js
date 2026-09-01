@@ -268,12 +268,117 @@
     const csvCloseBtn = document.getElementById('csvCloseModalBtn');
     const csvCancelBtn = document.getElementById('csvCancelModalBtn');
     const csvFileInput = document.getElementById('csvFileInput');
-    const csvUploadBtn = document.getElementById('csvUploadBtn');
+    // 🔥 FIX: this used to read id="csvUploadBtn" -- but the toolbar
+    // "Import CSV" button up top had that exact same id. Duplicate IDs
+    // aren't valid HTML, and getElementById() silently returns whichever
+    // element comes first in the DOM (the toolbar button), so this
+    // variable never actually pointed at the modal's submit button. Fixed
+    // by giving the submit button its own id (csvImportSubmitBtn) in the
+    // HTML, and now this reference is used below to disable it during
+    // the import instead of sitting unused.
+    const csvUploadBtn = document.getElementById('csvImportSubmitBtn');
+    const csvDropZone = document.getElementById('csvDropZone');
+    const csvFileNameDisplay = document.getElementById('csvFileName');
     const csvProgressContainer = document.getElementById('csvProgressContainer');
     const csvProgressBar = document.getElementById('csvProgressBar');
     const csvProgressText = document.getElementById('csvProgressText');
     const csvStatusContainer = document.getElementById('csvStatusContainer');
     const csvStatusText = document.getElementById('csvStatusText');
+
+    // ============================================
+    // 🔥 FIX: CSV DROP ZONE FUNCTIONALITY
+    // This used to live in an inline <script> tag at the bottom of
+    // index.html. Sub-module pages get their HTML injected via
+    // `.innerHTML = html`, and browsers silently discard (never execute)
+    // any <script> tags inserted that way -- app.js's own loadSubModule()
+    // comments call this out explicitly. So none of this ever ran: the
+    // "Click to select CSV file" zone did nothing, drag-and-drop did
+    // nothing, and the hidden required file input could never be filled
+    // in -- which is exactly what caused the browser's native validation
+    // to block the form with "invalid form control ... not focusable"
+    // when Import Products was clicked. Moved here, into the real script
+    // file that app.js actually injects and executes.
+    // ============================================
+    if (csvDropZone && csvFileInput) {
+        csvDropZone.addEventListener('click', () => csvFileInput.click());
+
+        csvDropZone.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            csvDropZone.style.borderColor = '#2563eb';
+            csvDropZone.style.background = '#f8fafc';
+        });
+
+        csvDropZone.addEventListener('dragleave', (e) => {
+            e.preventDefault();
+            csvDropZone.style.borderColor = '#e2e8f0';
+            csvDropZone.style.background = 'transparent';
+        });
+
+        csvDropZone.addEventListener('drop', (e) => {
+            e.preventDefault();
+            csvDropZone.style.borderColor = '#e2e8f0';
+            csvDropZone.style.background = 'transparent';
+
+            if (e.dataTransfer.files.length > 0) {
+                csvFileInput.files = e.dataTransfer.files;
+                const file = e.dataTransfer.files[0];
+                csvFileNameDisplay.textContent = '📄 ' + file.name;
+                csvFileNameDisplay.style.display = 'block';
+                showToast('File selected: ' + file.name, 'success');
+            }
+        });
+
+        csvFileInput.addEventListener('change', function () {
+            if (this.files.length > 0) {
+                const file = this.files[0];
+                csvFileNameDisplay.textContent = '📄 ' + file.name;
+                csvFileNameDisplay.style.display = 'block';
+                showToast('File selected: ' + file.name, 'success');
+            } else {
+                csvFileNameDisplay.style.display = 'none';
+            }
+        });
+    }
+
+    // ============================================
+    // 🔥 FIX: DOWNLOAD CSV TEMPLATE
+    // Same root cause as above -- this was defined as window.downloadCSVTemplate
+    // inside the dead inline <script>, so the "Download Template" button's
+    // onclick="downloadCSVTemplate()" had nothing to call and silently failed.
+    // ============================================
+    window.downloadCSVTemplate = function () {
+        const headers = [
+            'product_name', 'sku', 'generic_name', 'category', 'sub_category',
+            'dosage_form', 'brand', 'supplier', 'tax_percent', 'conversion_rate',
+            'min_order_qty', 'nhima_price_fixed', 'wholesale_internal_percent',
+            'wholesale_regular_percent', 'retail_online_percent', 'retail_regular_percent',
+            'retail_staff_percent', 'opening_qty', 'batch_number', 'expiry_date',
+            'cost_price', 'currency'
+        ];
+
+        const sampleRow = [
+            'Paracetamol 500mg', 'PRD-0001', 'Paracetamol', 'Pharmaceuticals', 'Pain Relief',
+            'Tablet', 'BrandX', 'SupplierCo', '16', '30',
+            '10', '75.00', '25',
+            '30', '35', '40',
+            '20', '100', 'B-2026-001', '2027-12-31',
+            '50.00', 'ZMW'
+        ];
+
+        let csv = headers.join(',') + '\n';
+        csv += sampleRow.join(',') + '\n';
+
+        const blob = new Blob(['﻿' + csv], { type: 'text/csv;charset=utf-8;' });
+        const link = document.createElement('a');
+        link.href = URL.createObjectURL(blob);
+        link.download = 'product_import_template.csv';
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        URL.revokeObjectURL(link.href);
+
+        showToast('Template downloaded successfully!', 'success');
+    };
 
     // Open CSV Upload Modal
     if (csvBtn) {
@@ -308,6 +413,51 @@
     }
 
     // ============================================
+    // 🔥 FIX: PROPER CSV FIELD PARSER
+    // The import used to split each line on a bare `,` and then strip
+    // every quote character from the result. That works only as long as
+    // no field's own text ever contains a comma -- but real category
+    // names do (e.g. "Vitamins, Supplements & Herbals - OTC - Solid"),
+    // and a bare split() has no idea that comma is INSIDE a quoted
+    // field, not a column separator. The result: that one field split
+    // into two, and every column after it shifted over by one for the
+    // rest of the row -- batch numbers landing in the expiry_date
+    // column, prices landing in currency, etc. (exactly what caused
+    // "invalid input syntax for type date: P-793": that's a batch
+    // number, shifted into the expiry_date slot). This is a real
+    // (minimal) CSV tokenizer instead: it tracks whether it's inside a
+    // quoted field and only treats `,` as a separator outside quotes,
+    // and unescapes doubled quotes ("" -> ") per the CSV spec -- so it
+    // also stops stripping the inch-mark quotes out of instrument names
+    // like Crile Forcep 5" Straight as a side effect.
+    // ============================================
+    function parseCSVLine(line) {
+        const result = [];
+        let cur = '';
+        let inQuotes = false;
+        for (let i = 0; i < line.length; i++) {
+            const ch = line[i];
+            if (inQuotes) {
+                if (ch === '"') {
+                    if (line[i + 1] === '"') { cur += '"'; i++; }
+                    else { inQuotes = false; }
+                } else {
+                    cur += ch;
+                }
+            } else if (ch === '"') {
+                inQuotes = true;
+            } else if (ch === ',') {
+                result.push(cur);
+                cur = '';
+            } else {
+                cur += ch;
+            }
+        }
+        result.push(cur);
+        return result;
+    }
+
+    // ============================================
     // PROCESS CSV UPLOAD
     // ============================================
     document.getElementById('csvUploadForm')?.addEventListener('submit', async (e) => {
@@ -320,6 +470,13 @@
         }
 
         try {
+            // Disable the submit button for the duration of the import
+            // so it can't be double-clicked mid-run.
+            if (csvUploadBtn) {
+                csvUploadBtn.disabled = true;
+                csvUploadBtn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Importing...';
+            }
+
             // Show progress
             csvProgressContainer.style.display = 'block';
             csvProgressBar.style.width = '10%';
@@ -336,7 +493,7 @@
             }
 
             // Parse headers
-            const headers = lines[0].split(',').map(h => h.trim().toLowerCase().replace(/['"]/g, ''));
+            const headers = parseCSVLine(lines[0]).map(h => h.trim().toLowerCase());
             
             // Validate required columns
             const requiredColumns = ['product_name', 'cost_price'];
@@ -352,7 +509,7 @@
             const errors = [];
             
             for (let i = 1; i < lines.length; i++) {
-                const values = lines[i].split(',').map(v => v.trim().replace(/['"]/g, ''));
+                const values = parseCSVLine(lines[i]).map(v => v.trim());
                 
                 if (values.length < headers.length) {
                     errors.push(`Row ${i}: Missing columns`);
@@ -363,6 +520,21 @@
                 headers.forEach((header, index) => {
                     product[header] = values[index] || '';
                 });
+
+                // 🔥 FIX: this is what was actually breaking the import.
+                // Your template uses a literal "-" as the placeholder for
+                // "doesn't apply" (e.g. surgical instruments have no batch
+                // number or expiry date), but batches.expiry_date is a real
+                // Postgres `date` column -- it rejects "-" outright
+                // ("invalid input syntax for type date"). Every row with
+                // batch_number/expiry_date set to "-" was failing at the
+                // batch-insert step (the product itself got created, just
+                // with no stock, and the row was reported as an error).
+                // Treat a bare "-" the same as an empty value from here on,
+                // so it falls through to the existing null/auto-generated
+                // fallbacks below instead of being sent to Postgres as-is.
+                if (product.batch_number === '-') product.batch_number = '';
+                if (product.expiry_date === '-') product.expiry_date = '';
 
                 // Validate required fields
                 if (!product.product_name || !product.cost_price) {
@@ -414,46 +586,87 @@
                     const brandId = await findOrCreate('brands', p.brand);
                     const supplierId = await findOrCreate('suppliers', p.supplier);
 
-                    // Generate SKU if not provided
-                    const sku = p.sku || `PRD-${String(Math.floor(Math.random() * 10000)).padStart(4, '0')}`;
+                    // Generate SKU if not provided.
+                    // 🔥 FIX: a plain random 4-digit number (0000-9999)
+                    // collides constantly on a batch of this size -- with
+                    // ~90 rows each drawing independently from only 10,000
+                    // possibilities, a duplicate is likely (birthday
+                    // paradox), and products.sku has a UNIQUE constraint,
+                    // so the insert for whichever row lost the coin flip
+                    // failed outright with "duplicate key value violates
+                    // unique constraint products_sku_key" -- that product
+                    // never got created at all. Combining the millisecond
+                    // timestamp with this row's own loop index guarantees
+                    // no two rows in the same import can ever collide with
+                    // each other, and makes a collision with any
+                    // previously-imported SKU astronomically unlikely.
+                    const sku = p.sku || `PRD-${Date.now().toString(36).toUpperCase()}${i}`;
 
                     // Convert cost price to ZMW
                     let costInZMW = p.cost_price;
                     if (p.currency !== 'ZMW' && p.currency === 'USD') {
-                        // If USD, use exchange rate from form or default
-                        const rate = 25.00; // Default rate - you might want to get this from settings
+                        // If USD, use exchange rate from form or default.
+                        // 🔥 Set to 20.00 ZMW/USD per instruction -- there's
+                        // no stored rate in exchange_rates yet, so this is
+                        // the fallback used for every USD-priced CSV row's
+                        // opening-stock accounting entry.
+                        const rate = 20.00;
                         costInZMW = p.cost_price * rate;
                     }
 
-                    // Create product
-                    const { data: productData, error: productError } = await supabaseClient
+                    // 🔥 FIX: the same product commonly appears on more than
+                    // one CSV row -- one row per delivery/batch (e.g. three
+                    // rows for "Ahabir 500Mg 60S Tablet", each with its own
+                    // batch_number/expiry_date/opening_qty). This used to
+                    // unconditionally INSERT a brand-new product for every
+                    // row, so that single product ended up duplicated three
+                    // times in Product Master (with its stock split across
+                    // the duplicates) instead of one product with three
+                    // batches. Look up an existing product by name first --
+                    // same case-insensitive exact-match pattern findOrCreate()
+                    // already uses below -- and reuse it if found.
+                    const { data: existingProductRows, error: existingProductError } = await supabaseClient
                         .from('products')
-                        .insert([{
-                            sku: sku,
-                            product_name: p.product_name,
-                            generic_name_id: genericId,
-                            category_id: categoryId,
-                            sub_category_id: subCategoryId,
-                            dosage_form_id: dosageFormId,
-                            brand_id: brandId,
-                            supplier_id: supplierId,
-                            tax_percent: p.tax_percent,
-                            conversion_rate: p.conversion_rate,
-                            min_order_qty: p.min_order_qty,
-                            nhima_price_fixed: p.nhima_price_fixed,
-                            wholesale_internal_percent: p.wholesale_internal_percent,
-                            wholesale_regular_percent: p.wholesale_regular_percent,
-                            retail_online_percent: p.retail_online_percent,
-                            retail_regular_percent: p.retail_regular_percent,
-                            retail_staff_percent: p.retail_staff_percent,
-                        }])
-                        .select();
+                        .select('id')
+                        .ilike('product_name', p.product_name.trim())
+                        .limit(1);
 
-                    if (productError) throw productError;
+                    if (existingProductError) throw existingProductError;
+
+                    let productId;
+                    if (existingProductRows && existingProductRows.length > 0) {
+                        productId = existingProductRows[0].id;
+                    } else {
+                        // Create product
+                        const { data: productData, error: productError } = await supabaseClient
+                            .from('products')
+                            .insert([{
+                                sku: sku,
+                                product_name: p.product_name,
+                                generic_name_id: genericId,
+                                category_id: categoryId,
+                                sub_category_id: subCategoryId,
+                                dosage_form_id: dosageFormId,
+                                brand_id: brandId,
+                                supplier_id: supplierId,
+                                tax_percent: p.tax_percent,
+                                conversion_rate: p.conversion_rate,
+                                min_order_qty: p.min_order_qty,
+                                nhima_price_fixed: p.nhima_price_fixed,
+                                wholesale_internal_percent: p.wholesale_internal_percent,
+                                wholesale_regular_percent: p.wholesale_regular_percent,
+                                retail_online_percent: p.retail_online_percent,
+                                retail_regular_percent: p.retail_regular_percent,
+                                retail_staff_percent: p.retail_staff_percent,
+                            }])
+                            .select();
+
+                        if (productError) throw productError;
+                        productId = productData[0].id;
+                    }
 
                     // Create batch if opening quantity > 0
-                    if (p.opening_qty > 0 && productData && productData.length > 0) {
-                        const productId = productData[0].id;
+                    if (p.opening_qty > 0) {
                         const totalCost = costInZMW * p.opening_qty;
 
                         // Create batch
@@ -511,6 +724,15 @@ ${errorMessages.length > 5 ? `\n... and ${errorMessages.length - 5} more errors`
             console.error('Error processing CSV:', error);
             showToast('Error processing CSV: ' + error.message, 'error');
             csvProgressContainer.style.display = 'none';
+        } finally {
+            // Runs on every exit path -- success, the early validation
+            // returns above (empty file, missing columns, no valid rows),
+            // and the catch block -- so the button never gets stuck
+            // showing "Importing...".
+            if (csvUploadBtn) {
+                csvUploadBtn.disabled = false;
+                csvUploadBtn.innerHTML = '<i class="fa-solid fa-upload"></i> Import Products';
+            }
         }
     });
 

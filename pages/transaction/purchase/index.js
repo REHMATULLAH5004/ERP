@@ -35,6 +35,11 @@
         currentGRNExchangeRate: 1,
         isEditing: false,
         reorderItems: [],
+        // 🔥 ADDED: products sharing a generic_name_id with something
+        // that IS due for reorder, but aren't themselves below min level
+        // yet -- surfaced as optional "you might consider this too"
+        // suggestions in the Reorder Report (see generateReorderReport()).
+        reorderSuggestedItems: [],
         selectedReorderItems: [],
         pendingCancelIndex: null,
         // 🔥 ADDED (issue #2): existing batches per product, keyed by
@@ -307,6 +312,11 @@
                     generic_name: genericMap[p.generic_name_id] || '',
                     conversion_rate: p.conversion_rate || 1
                 }));
+
+                // 🔥 ADDED: last purchase cost, shown in the dropdown so
+                // you can eyeball pricing before deciding what to add.
+                const lastPurchaseMap = await fetchLastPurchaseCosts(allProducts.map(p => p.id));
+                allProducts = allProducts.map(p => ({ ...p, last_purchase: lastPurchaseMap[p.id] || null }));
             }
 
             displaySearchResults(allProducts);
@@ -331,6 +341,7 @@
                 <div>
                     <strong>${p.product_name}</strong>
                     <div style="font-size: 0.75rem; color: #94a3b8;">${p.generic_name || 'No generic'}</div>
+                    ${p.last_purchase ? `<div style="font-size: 0.7rem; color: #059669;">Last paid: ${p.last_purchase.currency === 'ZMW' ? 'ZK' : '$'}${Number(p.last_purchase.rate).toFixed(2)} &middot; ${formatDate(p.last_purchase.date)}</div>` : ''}
                 </div>
                 <span style="color: #94a3b8; font-size: 0.8rem; background: #f1f5f9; padding: 2px 8px; border-radius: 4px;">Pack: ${p.conversion_rate || 1}</span>
             </div>
@@ -366,10 +377,18 @@
                 }
             }
 
+            // 🔥 ADDED: last purchase cost for this specific product, so
+            // it's available to show right next to the Purchase Rate
+            // input once the line is on the PO, not just in the search
+            // dropdown.
+            const lastPurchaseMap = await fetchLastPurchaseCosts([productId]);
+            const lastPurchase = lastPurchaseMap[productId] || null;
+
             const existing = state.poLines.find(l => l.product_id === productId);
             if (existing) {
                 existing.order_quantity = (existing.order_quantity || 0) + 1;
                 existing.total_amount = (existing.order_quantity || 0) * (existing.purchase_rate || 0);
+                if (!existing.last_purchase && lastPurchase) existing.last_purchase = lastPurchase;
                 renderPOLines();
                 updatePOTotal();
                 clearSearchResults();
@@ -383,7 +402,8 @@
                 pack_size: product.conversion_rate || 1,
                 order_quantity: 1,
                 purchase_rate: 0,
-                total_amount: 0
+                total_amount: 0,
+                last_purchase: lastPurchase
             });
 
             renderPOLines();
@@ -474,17 +494,61 @@
                 return stock < minQty;
             });
 
-            state.reorderItems = reorderItems.map(p => ({
-                ...p,
-                generic_name: genericMap[p.generic_name_id] || '',
-                supplier_name: supplierMap[p.supplier_id] || '',
-                category_name: categoryMap[p.category_id] || '',
-                current_stock: stockMap[p.id] || 0,
-                min_qty: p.min_order_qty || 1,
-                reorder_qty: Math.max(1, (p.min_order_qty || 1) - (stockMap[p.id] || 0))
-            }));
+            // 🔥 ADDED: "same generic name" suggestions. For every product
+            // that IS due for reorder, also surface sibling products that
+            // share its generic_name_id but aren't below min level yet --
+            // so staff can optionally top them up while already ordering
+            // from that supplier, or ignore them this time. Scoped to
+            // whatever the current Supplier/Category filters already
+            // pulled into `products` -- no extra query needed.
+            const dueGenericIds = new Set(reorderItems.map(p => p.generic_name_id).filter(Boolean));
+            const dueIds = new Set(reorderItems.map(p => p.id));
+            const suggestedItems = dueGenericIds.size > 0
+                ? products.filter(p => p.generic_name_id && dueGenericIds.has(p.generic_name_id) && !dueIds.has(p.id))
+                : [];
 
-            console.log(`✅ Found ${state.reorderItems.length} items below reorder level`);
+            // 🔥 ADDED: last purchase cost for everything on screen, so
+            // staff can compare today's rate against what was actually
+            // paid last time before committing to a quantity/price.
+            const relevantIds = [...new Set([...reorderItems, ...suggestedItems].map(p => p.id))];
+            const lastPurchaseMap = await fetchLastPurchaseCosts(relevantIds);
+
+            // 🔥 FIX: reorder_qty used to just top current_stock back up
+            // to min_order_qty (e.g. min 300, stock 290 -> reorder 10).
+            // Since min_order_qty is ALSO the trigger threshold, an order
+            // that small lands right back below it after almost no sales,
+            // so the same product reappears on this report almost
+            // immediately. Order enough to cover actual trailing 3-month
+            // demand instead, so one order lasts a full reorder cycle.
+            // Falls back to the old top-up-to-min behavior only when
+            // there's no 3-month sales history to go on (e.g. a brand new
+            // product), since "0" would be a worse suggestion than that.
+            const salesMap = await fetchLast3MonthSales(relevantIds);
+
+            const mapReorderItem = (p) => {
+                const stock = stockMap[p.id] || 0;
+                const minQty = p.min_order_qty || 1;
+                const threeMonthSales = salesMap[p.id]; // undefined = no sales history in the window
+
+                return {
+                    ...p,
+                    generic_name: genericMap[p.generic_name_id] || '',
+                    supplier_name: supplierMap[p.supplier_id] || '',
+                    category_name: categoryMap[p.category_id] || '',
+                    current_stock: stock,
+                    min_qty: minQty,
+                    three_month_sales: threeMonthSales,
+                    reorder_qty: (threeMonthSales !== undefined)
+                        ? Math.max(1, threeMonthSales - stock)
+                        : Math.max(1, minQty - stock),
+                    last_purchase: lastPurchaseMap[p.id] || null
+                };
+            };
+
+            state.reorderItems = reorderItems.map(mapReorderItem);
+            state.reorderSuggestedItems = suggestedItems.map(mapReorderItem);
+
+            console.log(`✅ Found ${state.reorderItems.length} items below reorder level, ${state.reorderSuggestedItems.length} related suggestions`);
             renderReorderReport();
         } catch (error) {
             console.error('Error generating reorder report:', error);
@@ -571,38 +635,166 @@
         return stockMap;
     }
 
+    // ============================================
+    // 🔥 ADDED: LAST 3-MONTH SALES (for reorder qty)
+    // ============================================
+    // Returns { [product_id]: totalQtySold } summed over completed
+    // RETAIL/WHOLESALE sales in the trailing 3 months. Quotations,
+    // donations, and write-offs are deliberately excluded -- this is
+    // meant to reflect real customer demand, not every movement that
+    // touched stock. A product with no matching rows simply won't have a
+    // key in the returned map (see reorder_qty fallback below), rather
+    // than showing as a misleading 0.
+    async function fetchLast3MonthSales(productIds) {
+        const salesMap = {};
+        if (!productIds || productIds.length === 0) return salesMap;
+
+        try {
+            const threeMonthsAgo = new Date();
+            threeMonthsAgo.setMonth(threeMonthsAgo.getMonth() - 3);
+
+            const { data, error } = await supabaseClient
+                .from('sale_items')
+                .select('product_id, quantity, sales!inner(client_type, is_quotation, created_at)')
+                .in('product_id', productIds)
+                .in('sales.client_type', ['RETAIL', 'WHOLESALE'])
+                .neq('sales.is_quotation', true)
+                .gte('sales.created_at', threeMonthsAgo.toISOString());
+
+            if (error) throw error;
+
+            (data || []).forEach(row => {
+                salesMap[row.product_id] = (salesMap[row.product_id] || 0) + (row.quantity || 0);
+            });
+        } catch (error) {
+            console.warn('Could not load last 3-month sales:', error);
+        }
+
+        return salesMap;
+    }
+
+    // ============================================
+    // 🔥 ADDED: LAST PURCHASE COST
+    // ============================================
+    // "Generic name" was already tracked on products but never actually
+    // used for anything -- this, and the reorder-suggestion logic below,
+    // are the first real uses of it.
+    //
+    // Returns { [product_id]: { rate, currency, date } } for whichever
+    // product IDs are passed in, based on actual goods received (not
+    // just ordered) -- goods_receipt_lines is what was really paid for,
+    // joined to its parent GRN for currency/date, since GRN lines don't
+    // carry their own currency column. Ordered most-recent-first and we
+    // only keep the first row seen per product, so this always reflects
+    // the LAST purchase, not an average or a random one.
+    //
+    // Deliberately does not fall back to purchase_order_lines (the
+    // ordered rate) when there's no GRN history -- an order that hasn't
+    // actually been received yet isn't a "last cost paid", and showing
+    // it as one would be misleading.
+    async function fetchLastPurchaseCosts(productIds) {
+        const lastPurchaseMap = {};
+        if (!productIds || productIds.length === 0) return lastPurchaseMap;
+
+        try {
+            const { data, error } = await supabaseClient
+                .from('goods_receipt_lines')
+                .select('product_id, purchase_rate, created_at, goods_receipt_notes(currency, exchange_rate, received_date, entry_date)')
+                .in('product_id', productIds)
+                .order('created_at', { ascending: false });
+
+            if (error) throw error;
+
+            (data || []).forEach(line => {
+                if (lastPurchaseMap[line.product_id]) return; // already have a more recent row
+                const grn = line.goods_receipt_notes || {};
+                lastPurchaseMap[line.product_id] = {
+                    rate: line.purchase_rate || 0,
+                    currency: grn.currency || 'USD',
+                    date: grn.received_date || grn.entry_date || line.created_at
+                };
+            });
+        } catch (error) {
+            console.warn('Could not load last purchase costs:', error);
+        }
+
+        return lastPurchaseMap;
+    }
+
     function renderReorderReport() {
         const tbody = document.getElementById('reorderTableBody');
         if (!tbody) return;
-        
-        if (state.reorderItems.length === 0) {
+
+        if (state.reorderItems.length === 0 && state.reorderSuggestedItems.length === 0) {
             tbody.innerHTML = `<tr><td colspan="7" style="text-align: center; padding: 40px; color: #22c55e;">
                 <i class="fa-regular fa-circle-check" style="font-size: 2rem; display: block; margin-bottom: 10px;"></i>
                 All products are above reorder level
             </td></tr>`;
+            state.selectedReorderItems = [];
             return;
         }
 
-        tbody.innerHTML = state.reorderItems.map((item) => `
-            <tr>
-                <td><input type="checkbox" class="reorder-checkbox" data-id="${item.id}" onchange="updateReorderSelection()"></td>
-                <td><strong>${item.product_name}</strong></td>
-                <td>${item.generic_name || '-'}</td>
-                <td style="color: #dc2626; font-weight: 600;">${item.current_stock}</td>
-                <td>${item.min_qty}</td>
-                <td>${item.supplier_name || '-'}</td>
-                <td>
-                    <input type="number" class="form-control reorder-qty-input" 
-                        data-id="${item.id}" value="${item.reorder_qty || 1}" 
-                        style="width: 80px; padding: 4px 8px;" min="1"
-                        onchange="updateReorderSelection()">
-                </td>
-            </tr>
-        `).join('');
+        let rowsHtml = state.reorderItems.length > 0
+            ? state.reorderItems.map((item) => renderReorderRow(item, false)).join('')
+            : `<tr><td colspan="7" style="text-align: center; padding: 20px; color: #22c55e;">
+                   No items below reorder level right now
+               </td></tr>`;
+
+        // 🔥 ADDED: "same generic name" suggestions -- rendered as a
+        // visually distinct group below the items actually due, so it
+        // reads as optional rather than as more of the same list.
+        if (state.reorderSuggestedItems.length > 0) {
+            rowsHtml += `<tr><td colspan="7" style="padding: 10px 12px; background: #f8fafc; color: #64748b; font-size: 0.75rem; font-weight: 600; border-top: 2px dashed #e2e8f0;">
+                <i class="fa-solid fa-link"></i> Same generic name as an item above -- not yet due, but worth considering while you're ordering
+            </td></tr>`;
+            rowsHtml += state.reorderSuggestedItems.map((item) => renderReorderRow(item, true)).join('');
+        }
+
+        tbody.innerHTML = rowsHtml;
 
         state.selectedReorderItems = [];
         const selectAll = document.getElementById('selectAllReorder');
         if (selectAll) selectAll.checked = false;
+    }
+
+    // 🔥 ADDED: shared row renderer for both the "due" list and the
+    // "same generic name" suggestions below it -- isSuggested only
+    // changes the visual treatment (badge + muted stock color), not the
+    // underlying behavior; both kinds of row use the same checkbox/qty
+    // mechanism so they flow through updateReorderSelection() identically.
+    function renderReorderRow(item, isSuggested) {
+        const lastPurchaseHtml = item.last_purchase
+            ? `<br><span style="font-size: 0.68rem; color: #059669;">Last: ${item.last_purchase.currency === 'ZMW' ? 'ZK' : '$'}${Number(item.last_purchase.rate).toFixed(2)} &middot; ${formatDate(item.last_purchase.date)}</span>`
+            : '';
+        const suggestedBadge = isSuggested
+            ? `<span style="margin-left: 6px; background: #dbeafe; color: #1d4ed8; padding: 1px 7px; border-radius: 8px; font-size: 0.65rem; font-weight: 600;">Suggested</span>`
+            : '';
+        const stockStyle = isSuggested ? 'color: #475569; font-weight: 500;' : 'color: #dc2626; font-weight: 600;';
+
+        return `
+            <tr ${isSuggested ? 'style="background: #fafbfc;"' : ''}>
+                <td><input type="checkbox" class="reorder-checkbox" data-id="${item.id}" onchange="updateReorderSelection()"></td>
+                <td>
+                    <strong>${item.product_name}</strong>${suggestedBadge}
+                    ${lastPurchaseHtml}
+                </td>
+                <td>${item.generic_name || '-'}</td>
+                <td style="${stockStyle}">${item.current_stock}</td>
+                <td>${item.min_qty}</td>
+                <td>${item.supplier_name || '-'}</td>
+                <td>
+                    <input type="number" class="form-control reorder-qty-input"
+                        data-id="${item.id}" value="${item.reorder_qty || 1}"
+                        style="width: 80px; padding: 4px 8px;" min="1"
+                        onchange="updateReorderSelection()">
+                    <br><span style="font-size: 0.68rem; color: #64748b;">${
+                        item.three_month_sales !== undefined
+                            ? `3-mo sales: ${item.three_month_sales}`
+                            : 'No sales history -- topped up to min'
+                    }</span>
+                </td>
+            </tr>
+        `;
     }
 
     function toggleAllReorderItems() {
@@ -615,7 +807,11 @@
         state.selectedReorderItems = [];
         document.querySelectorAll('.reorder-checkbox:checked').forEach(cb => {
             const id = cb.dataset.id;
-            const item = state.reorderItems.find(p => p.id === id);
+            // 🔥 CHANGED: a checked row can now come from either the
+            // "due" list or the "same generic name" suggestions -- look
+            // in both.
+            const item = state.reorderItems.find(p => p.id === id)
+                || state.reorderSuggestedItems.find(p => p.id === id);
             if (item) {
                 const qtyInput = document.querySelector(`.reorder-qty-input[data-id="${id}"]`);
                 const qty = parseInt(qtyInput?.value) || item.reorder_qty || 1;
@@ -670,7 +866,8 @@
                     pack_size: item.conversion_rate || 1,
                     order_quantity: item.reorder_qty || 1,
                     purchase_rate: 0,
-                    total_amount: 0
+                    total_amount: 0,
+                    last_purchase: item.last_purchase || null // 🔥 ADDED -- carried over from the reorder report, already fetched
                 });
             }
         });
@@ -1189,10 +1386,13 @@
                 </td>
                 <td><strong>${totalQty}</strong></td>
                 <td>
-                    <input type="number" class="form-control" value="${line.purchase_rate || 0}" 
-                        style="width: 100px; padding: 4px 8px;" 
+                    <input type="number" class="form-control" value="${line.purchase_rate || 0}"
+                        style="width: 100px; padding: 4px 8px;"
                         onchange="updatePOLine(${index}, 'purchase_rate', this.value)" step="0.01" min="0">
                     <span style="font-size: 0.65rem; color: #94a3b8;">(per pack)</span>
+                    ${line.last_purchase
+                        ? `<br><span style="font-size: 0.65rem; color: #059669;">Last: ${line.last_purchase.currency === 'ZMW' ? 'ZK' : '$'}${Number(line.last_purchase.rate).toFixed(2)} &middot; ${formatDate(line.last_purchase.date)}</span>`
+                        : ''}
                 </td>
                 <td style="text-align: right;">${symbol} ${formatNumber(line.total_amount || 0)}</td>
                 <td style="text-align: center;">
