@@ -323,10 +323,43 @@
         // ============================================
         let audioCtx = null;
         document.getElementById('soundGateBtn').addEventListener('click', () => {
-            try { audioCtx = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) { /* ignore */ }
+            let audioFailed = false;
+            let speechFailed = false;
+            try {
+                audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+            } catch (e) {
+                console.error('Could not unlock chime audio:', e);
+                audioFailed = true;
+            }
             document.getElementById('soundGate').style.display = 'none';
-            speak('Queue display ready.'); // also unlocks SpeechSynthesis for later, unprompted calls
+            try {
+                speak('Queue display ready.'); // also unlocks SpeechSynthesis for later, unprompted calls
+            } catch (e) {
+                console.error('Could not unlock voice:', e);
+                speechFailed = true;
+            }
+            if (!('speechSynthesis' in window)) speechFailed = true;
             loadAll();
+
+            // 🔥 FIX: previously, if either unlock silently failed (the try/
+            // catch above just swallowed the error), the gate still
+            // vanished and the display looked completely normal from then
+            // on -- exactly what happened here: "everything is okay but
+            // voice is not coming", with no way to tell from the screen
+            // itself that sound never actually unlocked. This makes that
+            // failure visible instead of invisible, right where staff are
+            // already looking, so it's obvious this device/browser needs
+            // attention rather than looking like a mystery.
+            if (audioFailed || speechFailed) {
+                const warn = document.createElement('div');
+                warn.style.cssText = 'position:fixed; top:70px; right:20px; background:#7f1d1d; color:#fecaca; padding:8px 14px; border-radius:8px; font-size:0.8rem; z-index:998; max-width:300px;';
+                warn.textContent = audioFailed && speechFailed
+                    ? '⚠ Sound and voice could not start on this device/browser.'
+                    : audioFailed
+                        ? '⚠ Chime could not start on this device/browser.'
+                        : '⚠ Voice could not start on this device/browser.';
+                document.body.appendChild(warn);
+            }
         });
 
         function chime() {
