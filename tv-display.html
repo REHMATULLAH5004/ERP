@@ -288,6 +288,12 @@
         const TTS_TIMEOUT_MS = 6000;
 
         function speakCloud(text) {
+            // 🔎 TEMPORARY DIAGNOSTIC LOGGING -- tracing every step of a
+            // REAL announcement (not the one-off manual console test) to
+            // find exactly where a live call differs from that working
+            // manual test. Safe to leave in; remove once voice is
+            // confirmed reliable on real queue calls.
+            console.log('[voice] speakCloud() called with:', JSON.stringify(text));
             return new Promise((resolve, reject) => {
                 const controller = new AbortController();
                 const timeout = setTimeout(() => controller.abort(), TTS_TIMEOUT_MS);
@@ -304,18 +310,24 @@
                 })
                 .then(res => {
                     clearTimeout(timeout);
+                    console.log('[voice] fetch responded, status:', res.status);
                     if (!res.ok) throw new Error('tts-polly returned HTTP ' + res.status);
                     return res.blob();
                 })
                 .then(blob => {
+                    console.log('[voice] got blob, size:', blob.size, 'type:', blob.type);
                     const url = URL.createObjectURL(blob);
-                    ttsAudioEl.onended = () => { URL.revokeObjectURL(url); resolve(); };
-                    ttsAudioEl.onerror = () => { URL.revokeObjectURL(url); reject(new Error('Audio playback failed')); };
+                    ttsAudioEl.onended = () => { console.log('[voice] ttsAudioEl onended fired'); URL.revokeObjectURL(url); resolve(); };
+                    ttsAudioEl.onerror = () => { console.log('[voice] ttsAudioEl onerror fired:', ttsAudioEl.error); URL.revokeObjectURL(url); reject(new Error('Audio playback failed')); };
                     ttsAudioEl.src = url;
-                    ttsAudioEl.play().catch(reject);
+                    console.log('[voice] calling ttsAudioEl.play() ...');
+                    ttsAudioEl.play()
+                        .then(() => console.log('[voice] ttsAudioEl.play() promise RESOLVED (should be audible now)'))
+                        .catch(err => { console.log('[voice] ttsAudioEl.play() promise REJECTED:', err.name, err.message); reject(err); });
                 })
                 .catch(err => {
                     clearTimeout(timeout);
+                    console.log('[voice] speakCloud() failed before playback:', err);
                     reject(err);
                 });
             });
@@ -348,6 +360,10 @@
                 const voice = pickVoice();
                 if (voice) utterance.voice = voice;
                 utterance.rate = 0.95;
+                console.log('[voice] speakBrowser: speaking with voice =', voice ? voice.name : '(default)');
+                utterance.onstart = () => console.log('[voice] speakBrowser: utterance STARTED');
+                utterance.onend = () => console.log('[voice] speakBrowser: utterance ENDED');
+                utterance.onerror = (e) => console.log('[voice] speakBrowser: utterance ERROR:', e.error);
                 speechSynthesis.speak(utterance);
                 return true;
             } catch (e) {
@@ -362,10 +378,12 @@
         // its own copy of this logic that reports failures on-screen,
         // since that's the one moment staff are actually watching).
         function speak(text) {
+            console.log('[voice] speak() called, voiceEnabled =', voiceEnabled, 'text:', JSON.stringify(text));
             if (!voiceEnabled) return;
             speakCloud(text).catch(err => {
-                console.warn('Cloud voice (Polly) failed, falling back to browser voice:', err);
-                speakBrowser(text);
+                console.log('[voice] speak(): cloud failed, falling back to browser voice. Reason:', err);
+                const ok = speakBrowser(text);
+                console.log('[voice] speakBrowser() returned:', ok);
             });
         }
 
