@@ -6,7 +6,17 @@
        delegates events to (by class, see index.js's posTableBody
        listeners) keeps its exact name, just re-arranged and restyled.
        Scoped under #retailPosContainer so nothing here leaks into the
-       rest of the app. */
+       rest of the app.
+
+       🔥 CHANGED (stacked layout): the old 3-column layout (customer |
+       items | summary side by side) squeezed the items table into a
+       flex:1 middle column between two ~300px sidebars, which looked
+       cramped and rushed on anything but a very wide screen. Now the
+       page stacks top-to-bottom -- Patient Details, then Items (full
+       width, no sidebars competing for room), then a Checkout footer
+       -- so the billing table finally gets the space it needs. Patient
+       fields move from a single narrow vertical column into a
+       responsive grid so that section stays compact instead of tall. */
     #retailPosContainer { color: #0f172a; }
     #retailPosContainer .pos-card { background: white; border: 1px solid #e8edf3; border-radius: 12px; box-shadow: 0 1px 3px rgba(15,23,42,0.06); }
 
@@ -27,20 +37,25 @@
     #retailPosContainer .pos-invoice-meta .pos-meta-value { font-size: 0.85rem; font-weight: 700; color: #0f172a; }
     #retailPosContainer #invoiceDateTime.pos-meta-value { border: none; background: transparent; padding: 0; font-weight: 600; color: #0f172a; width: auto; }
 
-    #retailPosContainer .pos-grid { display: flex; gap: 16px; align-items: flex-start; }
-    #retailPosContainer .pos-col-left { width: 300px; flex-shrink: 0; display: flex; flex-direction: column; gap: 14px; }
-    #retailPosContainer .pos-col-items { flex: 1; min-width: 0; }
-    #retailPosContainer .pos-col-summary { width: 320px; flex-shrink: 0; position: sticky; top: 0; }
+    /* Stacked sections: patient (top) -> items (middle) -> footer (bottom) */
+    #retailPosContainer .pos-grid { display: flex; flex-direction: column; gap: 16px; }
+    #retailPosContainer .pos-section-patient { width: 100%; }
+    #retailPosContainer .pos-section-items { width: 100%; }
+    #retailPosContainer .pos-section-footer { width: 100%; }
 
     #retailPosContainer .pos-card-pad { padding: 18px; }
     #retailPosContainer .pos-section-label { font-weight: 700; color: #0f172a; font-size: 0.92rem; display: flex; align-items: center; gap: 8px; }
-    #retailPosContainer .pos-form-group { margin-top: 10px; }
-    #retailPosContainer .pos-form-group:first-of-type { margin-top: 0; }
+    #retailPosContainer .pos-form-group { margin-top: 0; }
     #retailPosContainer .pos-label { display: block; font-weight: 600; color: #475569; margin-bottom: 4px; font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.03em; }
     #retailPosContainer .pos-input, #retailPosContainer .pos-select {
         width: 100%; padding: 8px 10px; border: 1px solid #e2e8f0; border-radius: 6px; background: white; font-size: 0.85rem; color: #0f172a;
     }
     #retailPosContainer .pos-input:focus, #retailPosContainer .pos-select:focus { outline: none; border-color: #2563eb; box-shadow: 0 0 0 3px rgba(37,99,235,0.12); }
+
+    /* Patient detail fields: compact responsive grid instead of one tall column */
+    #retailPosContainer #retailNhimaFields,
+    #retailPosContainer #retailRegularFields { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px 16px; align-items: start; }
+    #retailPosContainer .pos-patient-top-row { display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px; flex-wrap: wrap; gap: 10px; }
 
     #retailPosContainer .pos-items-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
     #retailPosContainer .pos-item-count-badge { background: #eff6ff; color: #2563eb; font-size: 0.7rem; font-weight: 700; padding: 2px 9px; border-radius: 10px; margin-left: 8px; }
@@ -61,9 +76,10 @@
     #retailPosContainer .retail-pos-item { width: 100%; min-width: 150px; padding: 6px 8px; border: 1px solid #e2e8f0; border-radius: 5px; background: white; font-size: 0.83rem; font-weight: 500; color: #0f172a; }
     #retailPosContainer .retail-pos-batch { width: 100%; min-width: 110px; padding: 6px 6px; border: 1px solid #e2e8f0; border-radius: 5px; background: white; font-size: 0.76rem; color: #475569; }
     #retailPosContainer .retail-pos-expiry { width: 84px; border: none; background: transparent; color: #64748b; font-size: 0.76rem; padding: 0; }
-    #retailPosContainer .retail-pos-qty-wrap { display: inline-flex; align-items: center; gap: 2px; border: 1px solid #e2e8f0; border-radius: 6px; padding: 2px; }
-    #retailPosContainer .qty-step-dec, #retailPosContainer .qty-step-inc { width: 22px; height: 22px; border: none; background: none; color: #475569; cursor: pointer; font-size: 0.85rem; border-radius: 4px; line-height: 1; }
-    #retailPosContainer .retail-pos-qty { width: 32px; border: none; text-align: center; font-size: 0.82rem; font-weight: 600; background: transparent; }
+    /* 🔥 CHANGED: qty +/- stepper removed -- nobody used it, everyone types
+       the quantity directly. Just a plain box now, given its own border
+       since it's no longer nested inside the stepper's wrapper div. */
+    #retailPosContainer .retail-pos-qty { width: 48px; padding: 6px 4px; border: 1px solid #e2e8f0; border-radius: 5px; text-align: center; font-size: 0.82rem; font-weight: 600; background: white; }
     #retailPosContainer .retail-pos-days { width: 44px; padding: 6px 4px; border: 1px solid #e2e8f0; border-radius: 5px; text-align: center; font-size: 0.78rem; }
     #retailPosContainer .pos-dose-cell { display: flex; gap: 4px; align-items: center; min-width: 170px; }
     #retailPosContainer .retail-pos-how-to-take { flex: 1; min-width: 0; padding: 6px 8px; border: 1px solid #e2e8f0; border-radius: 5px; background: #f8fafc; font-size: 0.74rem; cursor: pointer; color: #475569; }
@@ -72,7 +88,13 @@
     #retailPosContainer .retail-pos-pack-size { display: none; } /* value still used by JS (currentClientType==='NHIMA' -> 'EACH'), just not worth its own column here */
     #retailPosContainer .retail-pos-total { border: none; background: transparent; text-align: right; font-weight: 700; color: #0f172a; font-size: 0.85rem; width: 100%; padding: 0; }
 
-    #retailPosContainer .pos-summary-title { font-size: 0.95rem; font-weight: 700; color: #0f172a; }
+    /* Footer: order summary | payment | actions, side by side across the bottom */
+    #retailPosContainer .pos-footer-row { display: flex; gap: 22px; flex-wrap: wrap; align-items: stretch; }
+    #retailPosContainer .pos-footer-summary { flex: 1 1 220px; min-width: 220px; }
+    #retailPosContainer .pos-footer-payment { flex: 1 1 240px; min-width: 240px; display: flex; flex-direction: column; gap: 10px; justify-content: center; }
+    #retailPosContainer .pos-footer-actions { flex: 1.15 1 260px; min-width: 260px; display: flex; flex-direction: column; gap: 8px; justify-content: center; }
+    #retailPosContainer .pos-footer-divider { width: 1px; background: #e8edf3; align-self: stretch; }
+    #retailPosContainer .pos-summary-title { font-size: 0.95rem; font-weight: 700; color: #0f172a; margin-bottom: 8px; }
     #retailPosContainer .pos-summary-row { display: flex; justify-content: space-between; font-size: 0.85rem; padding: 3px 0; }
     #retailPosContainer .pos-summary-row .pos-summary-label { color: #64748b; }
     #retailPosContainer .pos-summary-row .pos-summary-value { font-weight: 600; color: #0f172a; }
@@ -83,6 +105,10 @@
     #retailPosContainer .pos-complete-btn { background: #10b981; color: white; border: none; padding: 13px 16px; border-radius: 8px; cursor: pointer; font-size: 0.92rem; font-weight: 700; display: flex; align-items: center; justify-content: center; gap: 8px; width: 100%; }
     #retailPosContainer .pos-secondary-btn-row { display: flex; gap: 8px; }
     #retailPosContainer .pos-outline-btn { flex: 1; background: white; padding: 9px; border-radius: 7px; cursor: pointer; font-size: 0.78rem; font-weight: 600; }
+
+    @media (max-width: 860px) {
+        #retailPosContainer .pos-footer-divider { display: none; }
+    }
 </style>
 
 <div id="retailPosContainer">
@@ -132,40 +158,40 @@
     <!-- Redundant with saleIdDisplay above (same value) -- kept only so getSaleData()'s sale_id read still has an element to read from. -->
     <input type="hidden" id="invoiceNumber" value="">
 
-    <!-- Main Content: Three Columns -- Customer/History (left) | Items (center) | Summary/Payment (right) -->
+    <!-- Stacked sections: Patient Details (top) -> Items (middle) -> Checkout footer (bottom) -->
     <div class="pos-grid">
 
-        <!-- LEFT: Who -- client type, customer lookup, and their history (history is also how items get
-             quick-re-added, so it lives right next to customer details instead of at the bottom of the page). -->
-        <div class="pos-col-left">
+        <!-- TOP: Who -- client type, customer lookup, and their history. Laid out as a compact
+             responsive grid instead of a tall narrow column, so it doesn't eat vertical space. -->
+        <div class="pos-section-patient">
 
             <div class="pos-card pos-card-pad">
-                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px;">
+                <div class="pos-patient-top-row">
                     <span class="pos-section-label">
                         <i class="fa-solid fa-user" style="color: #94a3b8; font-size: 0.85rem;"></i>
-                        Customer Details
+                        Patient / Customer Details
                     </span>
                     <span id="historyBadge" style="display: none; background: #2563eb; color: white; padding: 1px 8px; border-radius: 10px; font-size: 0.6rem;">
                         <i class="fa-solid fa-circle" style="font-size: 0.4rem;"></i> History
                     </span>
                 </div>
 
-                <div id="retailNhimaFields">
-                    <!-- 🔥 ADDED: manual "Call Next Patient" trigger, so a
-                         cashier already sitting on this screen can pull the
-                         next waiting billing ticket straight into this form
-                         -- no need to use the top queue bar's separate
-                         "Call Next -> Open in POS" round trip. Hidden
-                         entirely unless this login is actually working a
-                         billing counter (Counter 1/2/3) -- see
-                         initQueueBridge() in index.js. -->
-                    <div id="retailCallNextWrap" style="display:none; margin-bottom:12px;">
-                        <button id="retailCallNextBtn" type="button" style="width:100%; background:#2563eb; color:white; border:none; padding:10px 10px; border-radius:7px; font-weight:600; font-size:0.82rem; cursor:pointer; display:flex; align-items:center; justify-content:center; gap:8px;">
-                            <span id="retailCallNextBtnLabel"><i class="fa-solid fa-forward"></i> Call Next Patient</span>
-                            <span id="retailCallNextWaitingBadge" style="background:rgba(255,255,255,0.25); padding:1px 8px; border-radius:10px; font-size:0.72rem;">0 waiting</span>
-                        </button>
-                    </div>
+                <!-- 🔥 ADDED: manual "Call Next Patient" trigger, so a
+                     cashier already sitting on this screen can pull the
+                     next waiting billing ticket straight into this form
+                     -- no need to use the top queue bar's separate
+                     "Call Next -> Open in POS" round trip. Hidden
+                     entirely unless this login is actually working a
+                     billing counter (Counter 1/2/3) -- see
+                     initQueueBridge() in index.js. -->
+                <div id="retailCallNextWrap" style="display:none; margin-bottom:14px;">
+                    <button id="retailCallNextBtn" type="button" style="width:100%; background:#2563eb; color:white; border:none; padding:10px 10px; border-radius:7px; font-weight:600; font-size:0.82rem; cursor:pointer; display:flex; align-items:center; justify-content:center; gap:8px;">
+                        <span id="retailCallNextBtnLabel"><i class="fa-solid fa-forward"></i> Call Next Patient</span>
+                        <span id="retailCallNextWaitingBadge" style="background:rgba(255,255,255,0.25); padding:1px 8px; border-radius:10px; font-size:0.72rem;">0 waiting</span>
+                    </button>
+                </div>
 
+                <div id="retailNhimaFields">
                     <!-- NHIMA Number & NRC -->
                     <div class="pos-form-group">
                         <label class="pos-label">NHIMA Number</label>
@@ -225,7 +251,7 @@
 
             <!-- Client History -- toggled by the History button in the top bar; also how previous
                  items get quick-re-added to the current sale (see quickFillItem/addAllItemsFromSale). -->
-            <div id="clientHistoryContainer" class="pos-card" style="display: none; overflow: hidden;">
+            <div id="clientHistoryContainer" class="pos-card" style="display: none; overflow: hidden; margin-top: 14px;">
                 <div style="padding: 12px 16px; background: #f8fafc; border-bottom: 1px solid #e8edf3; display: flex; justify-content: space-between; align-items: center;">
                     <span style="font-weight: 600; color: #0f172a; font-size: 0.82rem;">
                         <i class="fa-solid fa-clock-rotate-left" style="color: #2563eb;"></i> Client History
@@ -248,8 +274,9 @@
             </div>
         </div>
 
-        <!-- CENTER: What -- the item table -->
-        <div class="pos-col-items">
+        <!-- MIDDLE: What -- the item table. Full width now that it isn't squeezed between two
+             side columns, so there's real room for the billing/items area. -->
+        <div class="pos-section-items">
             <div class="pos-card pos-card-pad">
                 <div class="pos-items-header">
                     <span class="pos-section-label">Items <span class="pos-item-count-badge" id="retailItemCountBadge">0</span></span>
@@ -300,11 +327,9 @@
                                     <input type="text" class="retail-pos-expiry" readonly tabindex="-1" placeholder="&mdash;">
                                 </td>
                                 <td style="text-align:center;">
-                                    <div class="retail-pos-qty-wrap">
-                                        <button type="button" class="qty-step-dec" title="Decrease quantity">&minus;</button>
-                                        <input type="number" class="retail-pos-qty" min="1" value="1">
-                                        <button type="button" class="qty-step-inc" title="Increase quantity">+</button>
-                                    </div>
+                                    <!-- 🔥 CHANGED: +/- stepper removed -- just a plain box for
+                                         direct typing now (see .retail-pos-qty in the style block). -->
+                                    <input type="number" class="retail-pos-qty" min="1" value="1">
                                 </td>
                                 <td style="text-align:center;">
                                     <input type="number" class="retail-pos-days" min="0" value="0" title="Days supplied">
@@ -330,13 +355,12 @@
             </div>
         </div>
 
-        <!-- RIGHT: How -- order summary / payment (sticky) -->
-        <div class="pos-col-summary">
-            <div class="pos-card pos-card-pad" style="display: flex; flex-direction: column; gap: 14px;">
+        <!-- BOTTOM: How -- order summary / payment / actions, laid out across the footer. -->
+        <div class="pos-section-footer">
+            <div class="pos-card pos-card-pad pos-footer-row">
 
-                <div class="pos-summary-title">Order Summary</div>
-
-                <div>
+                <div class="pos-footer-summary">
+                    <div class="pos-summary-title">Order Summary</div>
                     <div class="pos-summary-row">
                         <span class="pos-summary-label">Subtotal</span>
                         <span id="retailSubtotal" class="pos-summary-value">K0.00</span>
@@ -351,40 +375,48 @@
                     </div>
                 </div>
 
-                <div>
-                    <label class="pos-label" style="margin-bottom: 6px;">Payment Method</label>
-                    <div class="pos-payment-row">
-                        <i class="fa-solid fa-credit-card" style="color: #94a3b8; font-size: 0.85rem;"></i>
-                        <select id="retailPaymentType" style="flex: 1; border: none; padding: 10px 4px; background: transparent; font-size: 0.85rem; color: #0f172a;">
-                            <option value="Credit">Credit</option>
-                            <option value="Cash">Cash</option>
-                            <option value="Airtel Money">Airtel Money</option>
-                            <option value="Bank Transfer">Bank Transfer</option>
-                        </select>
+                <div class="pos-footer-divider"></div>
+
+                <div class="pos-footer-payment">
+                    <div>
+                        <label class="pos-label" style="margin-bottom: 6px;">Payment Method</label>
+                        <div class="pos-payment-row">
+                            <i class="fa-solid fa-credit-card" style="color: #94a3b8; font-size: 0.85rem;"></i>
+                            <select id="retailPaymentType" style="flex: 1; border: none; padding: 10px 4px; background: transparent; font-size: 0.85rem; color: #0f172a;">
+                                <option value="Credit">Credit</option>
+                                <option value="Cash">Cash</option>
+                                <option value="Airtel Money">Airtel Money</option>
+                                <option value="Bank Transfer">Bank Transfer</option>
+                            </select>
+                        </div>
+                    </div>
+
+                    <div id="retailPaymentNoteBox" style="display: none; border: 1px solid #f59e0b; padding: 8px 10px; border-radius: 6px; background: #fffbeb;">
+                        <label style="display: block; font-weight: 500; color: #475569; margin-bottom: 4px; font-size: 0.72rem;">Reference / Note</label>
+                        <input type="text" id="retailPaymentNote" placeholder="e.g. Airtel Ref #12345" class="pos-input">
                     </div>
                 </div>
 
-                <div id="retailPaymentNoteBox" style="display: none; border: 1px solid #f59e0b; padding: 8px 10px; border-radius: 6px; background: #fffbeb;">
-                    <label style="display: block; font-weight: 500; color: #475569; margin-bottom: 4px; font-size: 0.72rem;">Reference / Note</label>
-                    <input type="text" id="retailPaymentNote" placeholder="e.g. Airtel Ref #12345" class="pos-input">
-                </div>
+                <div class="pos-footer-divider"></div>
 
-                <button id="saveTransactionBtn" type="button" class="pos-complete-btn">
-                    <i class="fa-solid fa-floppy-disk"></i> <span class="btn-label">Complete Sale</span>
-                </button>
-
-                <div class="pos-secondary-btn-row">
-                    <button id="searchSalesBtn" type="button" class="pos-outline-btn" style="border: 1px solid #2563eb; color: #2563eb;">
-                        <i class="fa-solid fa-magnifying-glass"></i> Search
+                <div class="pos-footer-actions">
+                    <button id="saveTransactionBtn" type="button" class="pos-complete-btn">
+                        <i class="fa-solid fa-floppy-disk"></i> <span class="btn-label">Complete Sale</span>
                     </button>
-                    <button id="makeQuotationBtn" type="button" class="pos-outline-btn" style="border: 1px solid #f59e0b; color: #b45309;">
-                        <i class="fa-solid fa-file-lines"></i> <span class="btn-label">Quotation</span>
+
+                    <div class="pos-secondary-btn-row">
+                        <button id="searchSalesBtn" type="button" class="pos-outline-btn" style="border: 1px solid #2563eb; color: #2563eb;">
+                            <i class="fa-solid fa-magnifying-glass"></i> Search
+                        </button>
+                        <button id="makeQuotationBtn" type="button" class="pos-outline-btn" style="border: 1px solid #f59e0b; color: #b45309;">
+                            <i class="fa-solid fa-file-lines"></i> <span class="btn-label">Quotation</span>
+                        </button>
+                    </div>
+
+                    <button id="clearSaleBtn" type="button" style="background: none; border: none; color: #94a3b8; padding: 4px; cursor: pointer; font-size: 0.78rem; display: flex; align-items: center; justify-content: center; gap: 6px;">
+                        <i class="fa-solid fa-rotate-right"></i> Reset Sale
                     </button>
                 </div>
-
-                <button id="clearSaleBtn" type="button" style="background: none; border: none; color: #94a3b8; padding: 4px; cursor: pointer; font-size: 0.78rem; display: flex; align-items: center; justify-content: center; gap: 6px;">
-                    <i class="fa-solid fa-rotate-right"></i> Reset Sale
-                </button>
             </div>
         </div>
     </div>
