@@ -404,17 +404,25 @@
                 audioFailed = true;
             }
 
-            // 🔥 ADDED: unlock the <audio> element used for cloud (Polly)
-            // playback the same way audioCtx is unlocked above -- a muted
-            // play()/pause() inside this real click satisfies the
-            // browser's autoplay policy for every later, unprompted
-            // .play() call this session, including ones triggered from
-            // inside an async fetch callback (speakCloud() above), which
-            // wouldn't otherwise count as "user-initiated" on their own.
+            // 🔥 FIX: prime the browser's SpeechSynthesis engine with a
+            // real call made directly and immediately inside this click
+            // handler -- Chrome/Edge only reliably unlock
+            // speechSynthesis.speak() when the very first call happens
+            // synchronously inside a genuine user gesture like this one.
+            // The cloud voice call further down has to wait on a network
+            // round-trip to Amazon Polly first, so if the ONLY speech call
+            // ever made were the browser-voice fallback inside that later
+            // async failure handler, it can silently produce no sound at
+            // all even though nothing throws an error -- exactly what was
+            // happening here (first tap: nothing; a later, separate click
+            // worked fine). Speaking a single space keeps this priming
+            // call essentially inaudible while still fully unlocking the
+            // engine for every real announcement afterward.
             try {
-                ttsAudioEl.muted = true;
-                ttsAudioEl.play().then(() => { ttsAudioEl.pause(); ttsAudioEl.muted = false; }).catch(() => {});
-            } catch (e) { /* non-fatal -- falls back to browser voice below if genuinely broken */ }
+                if ('speechSynthesis' in window) {
+                    speechSynthesis.speak(new SpeechSynthesisUtterance(' '));
+                }
+            } catch (e) { /* non-fatal */ }
 
             document.getElementById('soundGate').style.display = 'none';
             loadAll();
