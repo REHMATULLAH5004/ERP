@@ -1376,14 +1376,16 @@
             }
 
             console.log(`✅ All accounting entries created for ${saleId}`);
+            return true;
 
         } catch (error) {
             console.error('Error creating accounting entries:', error);
             console.warn('⚠️ Accounting entries failed but sale was saved successfully.');
             try {
-                await createSaleAccountingEntriesFallback(saleData, saleRecord);
+                return await createSaleAccountingEntriesFallback(saleData, saleRecord);
             } catch (fallbackError) {
                 console.error('Fallback also failed:', fallbackError);
+                return false;
             }
         }
     }
@@ -1527,9 +1529,11 @@
             }
 
             console.log(`✅ Fallback accounting entries created for ${saleId}`);
+            return true;
 
         } catch (error) {
             console.error('Fallback accounting failed:', error);
+            return false;
         }
     }
 
@@ -3891,9 +3895,34 @@
                 })();
 
                 const accountingPromise = createSaleAccountingEntries(saleData, savedData)
-                    .catch(accError => console.error('Accounting entry error:', accError));
+                    .catch(accError => {
+                        console.error('Accounting entry error:', accError);
+                        return false;
+                    });
 
-                await Promise.all([stockUpdatePromise, accountingPromise]);
+                const [, accountingOk] = await Promise.all([stockUpdatePromise, accountingPromise]);
+
+                // 🔥 ADDED: a failed accounting post used to be logged to
+                // the console ONLY -- the sale saved and stock deducted
+                // normally, but zero journal entries were created and
+                // nothing on screen ever showed it. This happened for real
+                // (3 NHIMA sales, Sep 2026 -- traced to journal_entries'
+                // row-level-security policy rejecting the insert whenever
+                // the login session had gone stale/expired) and went
+                // unnoticed until a mismatch turned up in the financial
+                // statements. Now: an impossible-to-miss alert so whoever
+                // is at the till knows to flag it, instead of it silently
+                // vanishing.
+                if (accountingOk === false) {
+                    alert(
+                        '⚠️ Sale saved, but the accounting entries FAILED to post.\n\n' +
+                        `Sale ${saleData.sale_id} is saved and stock has been deducted, ` +
+                        'but no journal entries were created for it (often caused by an ' +
+                        'expired login session -- try logging out and back in).\n\n' +
+                        'Please tell an admin/accountant so the journal entries can be ' +
+                        'posted manually for this sale.'
+                    );
+                }
             } else {
                 console.log('Quotation saved - stock not affected');
             }
