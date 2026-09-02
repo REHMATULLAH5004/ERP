@@ -10,6 +10,40 @@
         return;
     }
 
+    // 🔥 CHANGED: the shared window-level getCompanySettings() helper
+    // (assets/js/shared-company-settings.js) no longer exists on the site,
+    // so calling it here threw "getCompanySettings is not defined" and
+    // aborted this entire module's init. Self-contained now: reads the
+    // same single `company_settings` row directly, with a hardcoded
+    // fallback if that fails for any reason.
+    const companySettings = await (async function loadCompanySettingsInline() {
+        const fallback = {
+            company_name: 'GRIFFINS MEDICALS LIMITED',
+            address: 'Plot 3534, Freedomway, Lusaka',
+            phone: '+260 97 000 0000',
+            zamra_number: 'ZAMRA-123456',
+            purchase_order_prefix: 'PO'
+        };
+        try {
+            const { data, error } = await supabaseClient
+                .from('company_settings')
+                .select('company_name, address, phone, zamra_number, purchase_order_prefix')
+                .eq('id', 1)
+                .maybeSingle();
+            if (error || !data) return fallback;
+            return {
+                company_name: data.company_name || fallback.company_name,
+                address: data.address || fallback.address,
+                phone: data.phone || fallback.phone,
+                zamra_number: data.zamra_number || fallback.zamra_number,
+                purchase_order_prefix: data.purchase_order_prefix || fallback.purchase_order_prefix
+            };
+        } catch (e) {
+            console.warn('Could not load company_settings, using defaults:', e);
+            return fallback;
+        }
+    })();
+
     // ============================================
     // GLOBAL STATE
     // ============================================
@@ -1879,7 +1913,7 @@
     }
 
     function generatePONumber() {
-        return `PO-${new Date().getFullYear()}-${String(Math.floor(Math.random() * 10000)).padStart(4, '0')}`;
+        return `${companySettings.purchase_order_prefix}-${new Date().getFullYear()}-${String(Math.floor(Math.random() * 10000)).padStart(4, '0')}`;
     }
 
     function validatePO() {
@@ -3756,9 +3790,9 @@
     function getPrintHeader() {
         return `
             <div class="header">
-                <h1>GRIFFINS MEDICALS LIMITED</h1>
-                <p>Plot 3534, Freedomway, Lusaka | Phone: +260 97 000 0000</p>
-                <p>ZAMRA #: ZAMRA-123456</p>
+                <h1>${companySettings.company_name}</h1>
+                <p>${companySettings.address} | Phone: ${companySettings.phone}</p>
+                <p>ZAMRA #: ${companySettings.zamra_number}</p>
             </div>
         `;
     }

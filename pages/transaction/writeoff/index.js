@@ -10,6 +10,28 @@
         return;
     }
 
+    // 🔥 CHANGED: the shared window-level getCompanySettings() helper
+    // (assets/js/shared-company-settings.js) no longer exists on the site,
+    // so calling it here threw "getCompanySettings is not defined" and
+    // aborted this entire module's init. Self-contained now: reads the
+    // WO- prefix straight from the `company_settings` row, with a
+    // hardcoded fallback if that fails for any reason.
+    const companySettings = await (async function loadCompanySettingsInline() {
+        const fallback = { writeoff_prefix: 'WO' };
+        try {
+            const { data, error } = await supabaseClient
+                .from('company_settings')
+                .select('writeoff_prefix')
+                .eq('id', 1)
+                .maybeSingle();
+            if (error || !data) return fallback;
+            return { writeoff_prefix: data.writeoff_prefix || fallback.writeoff_prefix };
+        } catch (e) {
+            console.warn('Could not load company_settings, using defaults:', e);
+            return fallback;
+        }
+    })();
+
     // ============================================
     // DOM REFERENCES
     // ============================================
@@ -31,6 +53,36 @@
     let selectedProductBatches = [];
     let writeOffItems = [];
     let isLoading = false;
+
+    // 🔥 FIX: same issue as retail.js/wholesale.js/donation.js -- this
+    // used to not exist at all, so loadWriteOffForEdit() populated the
+    // form from an existing write-off but saveWriteOff() had no way to
+    // know it was an edit rather than a brand-new write-off, so it
+    // ALWAYS inserted a new write_offs row (plus a new audit sales row,
+    // a second stock deduction, and a second accounting entry) instead
+    // of correcting the original. Set by loadWriteOffForEdit(), cleared
+    // by generateReference() (Reset / post-save), read by saveWriteOff()
+    // to decide update vs insert.
+    let editingWriteOffId = null;
+
+    // 🔥 ADDED: same as retail.js/wholesale.js/donation.js -- current
+    // user's role, needed to gate the Delete button in search results to
+    // Admin only. Fetched once in the background.
+    let currentUserRole = null;
+    (async function fetchCurrentUserRole() {
+        try {
+            const { data: { session } } = await supabaseClient.auth.getSession();
+            if (!session) return;
+            const { data: profile } = await supabaseClient
+                .from('user_profiles')
+                .select('role')
+                .eq('id', session.user.id)
+                .maybeSingle();
+            currentUserRole = profile?.role || null;
+        } catch (e) {
+            console.warn("Could not fetch current user role:", e);
+        }
+    })();
 
     // ============================================
     // 🔥 CHART OF ACCOUNTS - AUTO CREATE MISSING ACCOUNTS
@@ -171,6 +223,12 @@
     // GENERATE REFERENCE NUMBER
     // ============================================
     function generateReference() {
+        // 🔥 FIX: a fresh generated reference means this is a NEW write-off
+        // from here on, not an edit of an existing one -- clear the edit
+        // tracker so Save inserts instead of updating. Same pattern as
+        // retail.js/wholesale.js/donation.js.
+        editingWriteOffId = null;
+
         const display = document.getElementById('writeOffIdDisplay');
         const date = new Date();
         const year = date.getFullYear();
@@ -179,7 +237,7 @@
         // here to retail/wholesale/donation's timestamp+random scheme.
         const timestamp = date.getTime().toString().slice(-6);
         const random = Math.floor(Math.random() * 10000).toString().padStart(4, '0');
-        const ref = `WO-${year}-${timestamp}-${random}`;
+        const ref = `${companySettings.writeoff_prefix}-${year}-${timestamp}-${random}`;
         if (display) display.textContent = ref;
         return ref;
     }
@@ -569,10 +627,58 @@
     // ============================================
     // LOAD WRITE-OFF FOR EDIT
     // ============================================
-    function loadWriteOffForEdit(saleData) {
+    async function loadWriteOffForEdit(saleData) {
         try {
             console.log('Loading write-off for edit:', saleData);
-            
+
+            // 🔥 FIX: the write_offs table itself has no `items` column --
+            // items only ever lived in write_off_items, joined by
+            // write_off_id. saleData here is the RAW write_offs row (as
+            // passed by transaction-view.js), so saleData.items was always
+            // undefined and this whole "Add items to table" step was a
+            // silent no-op: editing a write-off never actually loaded any
+            // items to edit. Fetch them explicitly when they weren't
+            // already provided some other way.
+            const writeOffId = saleData.db_id || saleData.id || null;
+            let sourceItems = saleData.items;
+            if ((!sourceItems || sourceItems.length === 0) && writeOffId) {
+                const { data: woItems, error: woItemsError } = await supabaseClient
+                    .from('write_off_items')
+                    .select('*')
+                    .eq('write_off_id', writeOffId);
+
+                if (woItemsError) {
+                    console.error('Error loading write-off items for edit:', woItemsError);
+                    alert('Error loading write-off items: ' + woItemsError.message);
+                    return;
+                }
+
+                // available_qty must reflect what will actually be
+                // available once this write-off's original deduction is
+                // restored at save time (saveWriteOff() does that
+                // restoration first) -- so it's the batch's CURRENT stock
+                // plus the quantity this same write-off already took out,
+                // not just the current stock on its own (which would make
+                // the max="" cap on the qty input, and the newQty math at
+                // save time, both understate what's really available).
+                const batchIds = [...new Set((woItems || []).map(i => i.batch_id).filter(Boolean))];
+                const { data: batches } = await supabaseClient
+                    .from('batches').select('id, total_qty').in('id', batchIds);
+                const batchQtyMap = {};
+                (batches || []).forEach(b => batchQtyMap[b.id] = b.total_qty);
+
+                sourceItems = (woItems || []).map(row => ({
+                    batch_id: row.batch_id,
+                    batch_number: row.batch_number,
+                    product_name: row.product_name,
+                    product_id: row.product_id,
+                    qty: row.qty_written_off,
+                    available_qty: (batchQtyMap[row.batch_id] ?? 0) + (row.qty_written_off || 0),
+                    cost_per_unit: row.cost_per_unit,
+                    total: row.total_cost
+                }));
+            }
+
             // Set reason
             if (saleData.payment && saleData.payment.note) {
                 const reason = saleData.payment.note;
@@ -585,15 +691,27 @@
                     reasonOther.style.display = 'block';
                     reasonOther.value = reason;
                 }
+            } else if (saleData.reason) {
+                // Raw write_offs rows carry the reason directly on the
+                // `reason` column, not nested under payment.note.
+                const reason = saleData.reason;
+                const options = ['Expired', 'Damaged', 'Expired/Expiring', 'Damaged/Expired', 'Stock Adjustment'];
+                if (options.includes(reason)) {
+                    reasonSelect.value = reason;
+                } else {
+                    reasonSelect.value = 'Other';
+                    reasonOther.style.display = 'block';
+                    reasonOther.value = reason;
+                }
             }
-            
+
             // Add items to table
-            if (saleData.items && saleData.items.length > 0) {
+            if (sourceItems && sourceItems.length > 0) {
                 // Clear existing items
                 writeOffItems = [];
-                
+
                 // Add each item as a write-off item
-                saleData.items.forEach(item => {
+                sourceItems.forEach(item => {
                     writeOffItems.push({
                         batch_id: item.batch_id || '',
                         batch_number: item.batch_number || 'N/A',
@@ -606,21 +724,27 @@
                         total_cost: item.total || (item.qty * item.rate) || 0
                     });
                 });
-                
+
                 renderWriteOffTable();
                 updateTotals();
             }
-            
+
             // Set reference number
-            if (saleData.sale_id) {
+            const refNumber = saleData.sale_id || saleData.reference_number;
+            if (refNumber) {
                 const display = document.getElementById('writeOffIdDisplay');
                 if (display) {
-                    display.textContent = saleData.sale_id;
+                    display.textContent = refNumber;
                 }
             }
-            
+
+            // 🔥 FIX: set this so Save updates this write-off in place
+            // instead of inserting a duplicate. See the state declaration
+            // near the top of the file for why this is needed at all.
+            editingWriteOffId = writeOffId;
+
             alert('✅ Write-Off loaded for editing. Make changes and save.');
-            
+
         } catch (error) {
             console.error('Error loading write-off for edit:', error);
             alert('Error loading write-off: ' + error.message);
@@ -729,9 +853,91 @@
         try {
             let refNumber = document.getElementById('writeOffIdDisplay')?.textContent || generateReference();
 
-            // Create write-off record
+            // 🔥 FIX: editing an existing write-off (editingWriteOffId set
+            // by loadWriteOffForEdit()) must UPDATE the original write_offs
+            // row, never insert a new one -- see that variable's
+            // declaration near the top of the file (this used to always
+            // insert, silently duplicating the write-off, its stock
+            // deduction, and its accounting entry on every edit). Before
+            // writing anything, undo exactly what the ORIGINAL save did:
+            // restore the stock it deducted (from the original
+            // write_off_items rows), remove those rows, and remove the old
+            // audit `sales` record and its journal entry (both matched by
+            // this write-off's own reference number, which stays the same
+            // across an edit). The rest of this function then re-runs its
+            // normal deduction/audit/accounting steps for the edited items
+            // exactly as it already does for a brand-new write-off.
+            if (editingWriteOffId) {
+                const { data: oldItems, error: oldItemsError } = await supabaseClient
+                    .from('write_off_items')
+                    .select('batch_id, qty_written_off')
+                    .eq('write_off_id', editingWriteOffId);
+
+                if (oldItemsError) {
+                    console.error('Error loading original write-off items for edit:', oldItemsError);
+                    alert('❌ Could not load the original write-off to edit it safely. Nothing was changed.\n' + oldItemsError.message);
+                    return;
+                }
+
+                if (oldItems && oldItems.length > 0) {
+                    const qtyToRestoreByBatch = new Map();
+                    for (const item of oldItems) {
+                        qtyToRestoreByBatch.set(item.batch_id, (qtyToRestoreByBatch.get(item.batch_id) || 0) + (item.qty_written_off || 0));
+                    }
+                    const { data: batchesToRestore, error: batchFetchError } = await supabaseClient
+                        .from('batches')
+                        .select('id, total_qty')
+                        .in('id', [...qtyToRestoreByBatch.keys()]);
+
+                    if (batchFetchError) {
+                        console.error('Error restoring stock before edit-save:', batchFetchError);
+                    } else {
+                        await Promise.all((batchesToRestore || []).map(b =>
+                            supabaseClient.from('batches')
+                                .update({ total_qty: b.total_qty + (qtyToRestoreByBatch.get(b.id) || 0) })
+                                .eq('id', b.id)
+                        ));
+                    }
+                }
+
+                await supabaseClient.from('write_off_items').delete().eq('write_off_id', editingWriteOffId);
+
+                await supabaseClient.from('sales').delete().eq('sale_id', refNumber).eq('client_type', 'WRITEOFF');
+
+                const { data: oldJournals } = await supabaseClient
+                    .from('journal_entries')
+                    .select('id')
+                    .eq('reference', refNumber);
+
+                if (oldJournals && oldJournals.length > 0) {
+                    const oldJournalIds = oldJournals.map(j => j.id);
+                    await supabaseClient.from('journal_lines').delete().in('journal_entry_id', oldJournalIds);
+                    await supabaseClient.from('journal_entries').delete().in('id', oldJournalIds);
+                }
+            }
+
+            // Create (or update) the write-off record
             let writeOff;
-            {
+            if (editingWriteOffId) {
+                const { data, error: woError } = await supabaseClient
+                    .from('write_offs')
+                    .update({
+                        reference_number: refNumber,
+                        date: new Date().toISOString().split('T')[0],
+                        reason: finalReason,
+                        total_qty_written_off: totalQty,
+                        total_cost_written_off: totalCost
+                    })
+                    .eq('id', editingWriteOffId)
+                    .select();
+
+                if (woError) throw woError;
+                if (!data || data.length === 0) {
+                    alert('❌ Could not find the original write-off to update. Nothing was saved.');
+                    return;
+                }
+                writeOff = data;
+            } else {
                 const { data, error: woError } = await supabaseClient
                     .from('write_offs')
                     .insert([{
@@ -967,6 +1173,165 @@
                 if (!confirm('Are you sure you want to reset all items?')) return;
             }
             resetForm();
+            // 🔥 FIX: same as retail.js's Clear button -- regenerate the
+            // reference (and clear editingWriteOffId as a side effect of
+            // generateReference()) so Reset genuinely starts a new
+            // write-off instead of leaving the form pointed at whatever
+            // record was being edited, now with its items wiped out.
+            generateReference();
+        });
+    }
+
+    // ============================================
+    // 🔥 ADDED: SEARCH WRITE-OFFS (find + edit an older write-off) --
+    // same feature retail.js/wholesale.js/donation.js already have.
+    // Before this, the ONLY way to edit an existing write-off at all was
+    // Transaction Overview's "Today's Transactions" widget -- and even
+    // that never actually loaded the write-off's items (see
+    // loadWriteOffForEdit()'s fix above). No date limit here -- this
+    // searches every write-off ever saved.
+    // ============================================
+    async function searchWriteOffRecords(query) {
+        const resultsEl = document.getElementById('writeOffSearchResults');
+        if (!resultsEl) return;
+
+        resultsEl.innerHTML = `<div style="text-align:center; padding:30px; color:#94a3b8;"><i class="fa-solid fa-spinner fa-spin"></i> Searching...</div>`;
+
+        try {
+            let dbQuery = supabaseClient
+                .from('write_offs')
+                .select('id, reference_number, date, reason, total_qty_written_off, total_cost_written_off, created_at')
+                .order('created_at', { ascending: false })
+                .limit(20);
+
+            if (query && query.trim() !== '') {
+                const term = query.trim().replace(/[%_]/g, '\\$&');
+                dbQuery = dbQuery.or(
+                    `reference_number.ilike.%${term}%,reason.ilike.%${term}%`
+                );
+            }
+
+            const { data: results, error } = await dbQuery;
+            if (error) throw error;
+
+            renderWriteOffSearchResults(results || []);
+        } catch (error) {
+            console.error('Error searching write-offs:', error);
+            resultsEl.innerHTML = `<div style="text-align:center; padding:30px; color:#dc2626;">Error searching: ${error.message}</div>`;
+        }
+    }
+
+    function renderWriteOffSearchResults(results) {
+        const resultsEl = document.getElementById('writeOffSearchResults');
+        if (!resultsEl) return;
+
+        if (results.length === 0) {
+            resultsEl.innerHTML = `<div style="text-align:center; padding:30px; color:#94a3b8;">No matching write-offs found.</div>`;
+            return;
+        }
+
+        const isAdmin = currentUserRole === 'Admin';
+
+        resultsEl.innerHTML = results.map(r => {
+            const date = new Date(r.created_at || r.date).toLocaleDateString();
+            return `
+                <div style="padding:12px; margin-bottom:8px; background:#f8fafc; border-radius:6px; border:1px solid #e2e8f0;">
+                    <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;">
+                        <div>
+                            <span style="font-weight:600;">${r.reference_number}</span>
+                            <div style="font-size:0.8rem; color:#64748b; margin-top:2px;">${r.reason || 'N/A'} &middot; ${r.total_qty_written_off || 0} units &middot; K${(r.total_cost_written_off || 0).toFixed(2)} &middot; ${date}</div>
+                        </div>
+                        <div style="display:flex; gap:6px;">
+                            <button class="writeoff-search-edit-btn" data-id="${r.id}" style="background:#f59e0b; color:white; border:none; padding:5px 12px; border-radius:4px; cursor:pointer; font-size:0.75rem;"><i class="fa-solid fa-pen"></i> Edit</button>
+                            ${isAdmin ? `<button class="writeoff-search-delete-btn" data-id="${r.id}" data-ref="${r.reference_number}" style="background:#dc2626; color:white; border:none; padding:5px 12px; border-radius:4px; cursor:pointer; font-size:0.75rem;"><i class="fa-solid fa-trash"></i> Delete</button>` : ''}
+                        </div>
+                    </div>
+                </div>
+            `;
+        }).join('');
+
+        resultsEl.querySelectorAll('.writeoff-search-edit-btn').forEach(btn => {
+            btn.addEventListener('click', async () => {
+                const record = results.find(r => r.id === btn.dataset.id);
+                if (!record) return;
+                await loadWriteOffForEdit(record);
+                document.getElementById('writeOffSearchModal').style.display = 'none';
+            });
+        });
+
+        resultsEl.querySelectorAll('.writeoff-search-delete-btn').forEach(btn => {
+            btn.addEventListener('click', () => deleteWriteOffRecord(btn.dataset.id, btn.dataset.ref));
+        });
+    }
+
+    // 🔥 ADDED: same conservative baseline as the other modules'
+    // deleteXRecord() -- removes the write-off, its write_off_items rows,
+    // and its audit sales row only. Does not touch stock or the
+    // accounting ledger. Admin-only, checked both in the UI and here.
+    async function deleteWriteOffRecord(id, refNumber) {
+        if (currentUserRole !== 'Admin') {
+            alert('Only an Admin can delete a write-off record.');
+            return;
+        }
+
+        const confirmed = confirm(
+            `Delete ${refNumber}?\n\nThis permanently removes the write-off record. ` +
+            `It does NOT restore stock or reverse any accounting entries already posted for it -- ` +
+            `those will need to be corrected separately if this write-off affected them.\n\nThis cannot be undone.`
+        );
+        if (!confirmed) return;
+
+        try {
+            const { error: itemsError } = await supabaseClient.from('write_off_items').delete().eq('write_off_id', id);
+            if (itemsError) throw itemsError;
+
+            await supabaseClient.from('sales').delete().eq('sale_id', refNumber).eq('client_type', 'WRITEOFF');
+
+            const { error: woError } = await supabaseClient.from('write_offs').delete().eq('id', id);
+            if (woError) throw woError;
+
+            alert(`✅ ${refNumber} deleted.`);
+            searchWriteOffRecords(document.getElementById('writeOffSearchInput')?.value || '');
+        } catch (error) {
+            console.error('Error deleting write-off:', error);
+            alert('Error deleting write-off: ' + error.message);
+        }
+    }
+
+    const searchWriteOffsBtn = document.getElementById('searchWriteOffsBtn');
+    const writeOffSearchModal = document.getElementById('writeOffSearchModal');
+    const writeOffCloseSearchModalBtn = document.getElementById('writeOffCloseSearchModalBtn');
+    const writeOffSearchInput = document.getElementById('writeOffSearchInput');
+    const writeOffSearchGoBtn = document.getElementById('writeOffSearchGoBtn');
+
+    if (searchWriteOffsBtn && writeOffSearchModal) {
+        searchWriteOffsBtn.addEventListener('click', () => {
+            writeOffSearchModal.style.display = 'flex';
+            if (writeOffSearchInput) writeOffSearchInput.value = '';
+            searchWriteOffRecords('');
+        });
+    }
+    if (writeOffCloseSearchModalBtn && writeOffSearchModal) {
+        writeOffCloseSearchModalBtn.addEventListener('click', () => {
+            writeOffSearchModal.style.display = 'none';
+        });
+    }
+    if (writeOffSearchModal) {
+        writeOffSearchModal.addEventListener('click', (e) => {
+            if (e.target === writeOffSearchModal) writeOffSearchModal.style.display = 'none';
+        });
+    }
+    if (writeOffSearchGoBtn) {
+        writeOffSearchGoBtn.addEventListener('click', () => {
+            searchWriteOffRecords(writeOffSearchInput?.value || '');
+        });
+    }
+    if (writeOffSearchInput) {
+        writeOffSearchInput.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                searchWriteOffRecords(writeOffSearchInput.value || '');
+            }
         });
     }
 

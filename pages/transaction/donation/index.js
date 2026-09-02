@@ -10,6 +10,40 @@
         return;
     }
 
+    // 🔥 CHANGED: the shared window-level getCompanySettings() helper
+    // (assets/js/shared-company-settings.js) no longer exists on the site,
+    // so calling it here threw "getCompanySettings is not defined" and
+    // aborted this entire module's init. Self-contained now: reads the
+    // same single `company_settings` row directly, with a hardcoded
+    // fallback if that fails for any reason.
+    const companySettings = await (async function loadCompanySettingsInline() {
+        const fallback = {
+            company_name: 'GRIFFINS MEDICALS LIMITED',
+            address: 'Plot 3534, Freedomway, Lusaka',
+            phone: '+260 97 000 0000',
+            zamra_number: 'ZAMRA-123456',
+            donation_prefix: 'DON'
+        };
+        try {
+            const { data, error } = await supabaseClient
+                .from('company_settings')
+                .select('company_name, address, phone, zamra_number, donation_prefix')
+                .eq('id', 1)
+                .maybeSingle();
+            if (error || !data) return fallback;
+            return {
+                company_name: data.company_name || fallback.company_name,
+                address: data.address || fallback.address,
+                phone: data.phone || fallback.phone,
+                zamra_number: data.zamra_number || fallback.zamra_number,
+                donation_prefix: data.donation_prefix || fallback.donation_prefix
+            };
+        } catch (e) {
+            console.warn('Could not load company_settings, using defaults:', e);
+            return fallback;
+        }
+    })();
+
     // ============================================
     // DOM REFERENCES
     // ============================================
@@ -28,6 +62,37 @@
     // Print modal refs
     const printModal = document.getElementById('printModal');
     let currentDonationData = null;
+
+    // 🔥 FIX: same issue as retail.js/wholesale.js -- this used to not
+    // exist at all, so loadDonationForEdit() populated the form from an
+    // existing donation but saveDonation() had no way to know it was an
+    // edit rather than a brand-new donation, so it ALWAYS inserted.
+    // Re-saving an "edited" donation silently created a second, separate
+    // record for the same real-world giveaway (duplicate donation,
+    // stock deducted twice, cost posted twice) while the original row
+    // sat there untouched. Set by loadDonationForEdit(), cleared by
+    // generateNextDonationId() (Reset / post-save), read by
+    // saveDonation() to decide update vs insert.
+    let editingDonationDbId = null;
+
+    // 🔥 ADDED: same as retail.js/wholesale.js -- current user's role,
+    // needed to gate the Delete button in search results to Admin only.
+    // Fetched once in the background so it doesn't block anything else.
+    let currentUserRole = null;
+    (async function fetchCurrentUserRole() {
+        try {
+            const { data: { session } } = await supabaseClient.auth.getSession();
+            if (!session) return;
+            const { data: profile } = await supabaseClient
+                .from('user_profiles')
+                .select('role')
+                .eq('id', session.user.id)
+                .maybeSingle();
+            currentUserRole = profile?.role || null;
+        } catch (e) {
+            console.warn("Could not fetch current user role:", e);
+        }
+    })();
 
     // ============================================
     // 🔥 CHART OF ACCOUNTS - AUTO CREATE MISSING ACCOUNTS
@@ -308,10 +373,17 @@
     }
 
     function generateNextDonationId() {
+        // 🔥 FIX: a fresh generated donation number means this is a NEW
+        // donation from here on, not an edit of an existing one -- clear
+        // the edit tracker so Save inserts instead of updating. Covers
+        // the Reset button and the post-save form reset. Same pattern as
+        // retail.js/wholesale.js.
+        editingDonationDbId = null;
+
         const display = document.getElementById('donationIdDisplay');
         const invoiceDisplay = document.getElementById('donationNumber');
         if (!display) return;
-        
+
         const date = new Date();
         const year = date.getFullYear();
         // 🔥 FIX: the old scheme was DON-{year}-{4-digit random} — only
@@ -320,7 +392,7 @@
         // scheme. Matched here for consistency.
         const timestamp = Date.now().toString().slice(-6);
         const random = Math.floor(Math.random() * 10000).toString().padStart(4, '0');
-        const donationId = `DON-${year}-${timestamp}-${random}`;
+        const donationId = `${companySettings.donation_prefix}-${year}-${timestamp}-${random}`;
         
         display.textContent = `Donation #: ${donationId}`;
         if (invoiceDisplay) invoiceDisplay.value = donationId;
@@ -498,9 +570,9 @@
         </head>
         <body>
             <div class="header">
-                <h1>GRIFFINS MEDICALS LIMITED</h1>
-                <p>Plot 3534, Freedomway, Lusaka</p>
-                <p>Phone: +260 97 000 0000 | ZAMRA: ZAMRA-123456</p>
+                <h1>${companySettings.company_name}</h1>
+                <p>${companySettings.address}</p>
+                <p>Phone: ${companySettings.phone} | ZAMRA: ${companySettings.zamra_number}</p>
             </div>
             <div class="receipt-info">
                 <div><strong>Donation #:</strong> ${donationData.donation_id}</div>
@@ -544,7 +616,7 @@
             
             <!-- DONOR MESSAGE -->
             <div class="donor-message">
-                <strong style="color: #2e7d32; font-size: 1.1rem;">❤️ Donated by GRIFFINS MEDICALS LIMITED</strong><br>
+                <strong style="color: #2e7d32; font-size: 1.1rem;">❤️ Donated by ${companySettings.company_name}</strong><br>
                 <span style="font-size: 0.95rem; color: #475569;">In support of ${donationData.donee.donee_name || 'our community'}</span><br>
                 <span style="font-size: 0.85rem; color: #64748b; margin-top: 5px; display: inline-block;">"Caring for our community, one donation at a time."</span>
             </div>
@@ -624,7 +696,7 @@
                     entry_date: entryDate,
                     reference: donationId,
                     description: `Donation to ${donationData.donee.donee_name || 'Community'}`,
-                    journal_number: `DON-${new Date().getFullYear()}-${String(Math.floor(Math.random() * 10000)).padStart(4, '0')}`,
+                    journal_number: `${companySettings.donation_prefix}-${new Date().getFullYear()}-${String(Math.floor(Math.random() * 10000)).padStart(4, '0')}`,
                     status: 'Posted',
                     created_at: new Date().toISOString()
                 };
@@ -707,41 +779,119 @@
 
             console.log('Saving donation to sales table:', dbRecord);
 
+            // 🔥 FIX: editing an existing donation (editingDonationDbId set
+            // by loadDonationForEdit()) must UPDATE that row, never insert
+            // a new one -- see this variable's declaration near the top of
+            // the file for the full story. Before writing the row, undo
+            // exactly what the ORIGINAL save did: restore the stock it
+            // deducted (using the batch_id/quantity actually recorded on
+            // the original sale_items rows -- donation auto-picks a batch
+            // at save time, so this is the only reliable record of which
+            // batch was actually used) and remove its old sale_items and
+            // journal entry (matched by reference, which carries the
+            // donation's own id string). The rest of this function then
+            // re-runs its normal FEFO stock deduction and accounting for
+            // the edited items exactly as it already does for a brand-new
+            // donation.
+            if (editingDonationDbId) {
+                const { data: oldItems, error: oldItemsError } = await supabaseClient
+                    .from('sale_items')
+                    .select('batch_id, quantity, pack_size')
+                    .eq('sale_id', editingDonationDbId);
+
+                if (oldItemsError) {
+                    console.error('Error loading original donation items for edit:', oldItemsError);
+                    alert('❌ Could not load the original donation to edit it safely. Nothing was changed.\n' + oldItemsError.message);
+                    return;
+                }
+
+                if (oldItems && oldItems.length > 0) {
+                    const qtyToRestoreByBatch = new Map();
+                    for (const item of oldItems) {
+                        const packQty = parseInt(item.pack_size) || 1;
+                        qtyToRestoreByBatch.set(item.batch_id, (qtyToRestoreByBatch.get(item.batch_id) || 0) + item.quantity * packQty);
+                    }
+                    const { data: batchesToRestore, error: batchFetchError } = await supabaseClient
+                        .from('batches')
+                        .select('id, total_qty')
+                        .in('id', [...qtyToRestoreByBatch.keys()]);
+
+                    if (batchFetchError) {
+                        console.error('Error restoring stock before edit-save:', batchFetchError);
+                    } else {
+                        await Promise.all((batchesToRestore || []).map(b =>
+                            supabaseClient.from('batches')
+                                .update({ total_qty: b.total_qty + (qtyToRestoreByBatch.get(b.id) || 0) })
+                                .eq('id', b.id)
+                        ));
+                    }
+                }
+
+                await supabaseClient.from('sale_items').delete().eq('sale_id', editingDonationDbId);
+
+                const oldDonationIdString = donationData.donation_id; // unchanged across an edit
+                const { data: oldJournals } = await supabaseClient
+                    .from('journal_entries')
+                    .select('id')
+                    .eq('reference', oldDonationIdString);
+
+                if (oldJournals && oldJournals.length > 0) {
+                    const oldJournalIds = oldJournals.map(j => j.id);
+                    await supabaseClient.from('journal_lines').delete().in('journal_entry_id', oldJournalIds);
+                    await supabaseClient.from('journal_entries').delete().in('id', oldJournalIds);
+                }
+            }
+
             let savedData;
             try {
-                const { data, error } = await supabaseClient
-                    .from('sales')
-                    .insert([dbRecord])
-                    .select();
+                if (editingDonationDbId) {
+                    const { data, error } = await supabaseClient
+                        .from('sales')
+                        .update(dbRecord)
+                        .eq('id', editingDonationDbId)
+                        .select();
 
-                if (error) {
-                    // 🔥 ADDED: same duplicate-id retry as retail.js/wholesale.js
-                    if (error.code === '23505' || error.message?.includes('duplicate key')) {
-                        console.log('⚠️ Duplicate key error, regenerating donation_id...');
-
-                        const timestamp = Date.now().toString().slice(-6);
-                        const random = Math.floor(Math.random() * 10000).toString().padStart(4, '0');
-                        const newDonationId = `DON-${new Date().getFullYear()}-${timestamp}-${random}`;
-
-                        document.getElementById('donationNumber').value = newDonationId;
-                        const display = document.getElementById('donationIdDisplay');
-                        if (display) display.textContent = `Donation #: ${newDonationId}`;
-
-                        dbRecord.sale_id = newDonationId;
-                        donationData.donation_id = newDonationId;
-
-                        const { data: retryData, error: retryError } = await supabaseClient
-                            .from('sales')
-                            .insert([dbRecord])
-                            .select();
-
-                        if (retryError) throw new Error('Failed to save (Retry): ' + retryError.message);
-                        savedData = retryData;
-                    } else {
-                        throw new Error(error.message);
+                    if (error) throw new Error(error.message);
+                    if (!data || data.length === 0) {
+                        alert('❌ Could not find the original donation to update. Nothing was saved.');
+                        return;
                     }
-                } else {
                     savedData = data;
+                } else {
+                    const { data, error } = await supabaseClient
+                        .from('sales')
+                        .insert([dbRecord])
+                        .select();
+
+                    if (error) {
+                        // 🔥 ADDED: same duplicate-id retry as retail.js/wholesale.js
+                        if (error.code === '23505' || error.message?.includes('duplicate key')) {
+                            console.log('⚠️ Duplicate key error, regenerating donation_id...');
+
+                            const timestamp = Date.now().toString().slice(-6);
+                            const random = Math.floor(Math.random() * 10000).toString().padStart(4, '0');
+                            const newDonationId = `${companySettings.donation_prefix}-${new Date().getFullYear()}-${timestamp}-${random}`;
+
+                            document.getElementById('donationNumber').value = newDonationId;
+                            const display = document.getElementById('donationIdDisplay');
+                            if (display) display.textContent = `Donation #: ${newDonationId}`;
+
+                            dbRecord.sale_id = newDonationId;
+                            donationData.donation_id = newDonationId;
+
+                            const { data: retryData, error: retryError } = await supabaseClient
+                                .from('sales')
+                                .insert([dbRecord])
+                                .select();
+
+                            if (retryError) throw new Error('Failed to save (Retry): ' + retryError.message);
+                            savedData = retryData;
+                        } else {
+                            throw new Error(error.message);
+                        }
+                    } else {
+                        savedData = data;
+                    }
                 }
             } catch (dbError) {
                 console.error('Database error:', dbError);
@@ -1041,7 +1191,12 @@
                     updateTotals();
                 }, 600);
             }
-            
+
+            // 🔥 FIX: set this so Save updates this donation in place
+            // instead of inserting a duplicate. See the state declaration
+            // near the top of the file for why this is needed at all.
+            editingDonationDbId = saleData.db_id || null;
+
             alert('✅ Donation loaded for editing. Make changes and save.');
             
         } catch (error) {
@@ -1116,7 +1271,7 @@
                 </tfoot>
             </table>
             <div style="text-align: center; padding: 15px; background: #e8f5e9; border-radius: 8px; border: 2px solid #4caf50;">
-                <strong style="color: #2e7d32;">❤️ Donated by GRIFFINS MEDICALS LIMITED</strong><br>
+                <strong style="color: #2e7d32;">❤️ Donated by ${companySettings.company_name}</strong><br>
                 <span style="font-size: 0.9rem; color: #475569;">"Caring for our community, one donation at a time."</span>
             </div>
         `;
@@ -1150,6 +1305,160 @@
         clearBtn.addEventListener('click', function() {
             if (confirm('Are you sure you want to reset?')) {
                 resetForm();
+            }
+        });
+    }
+
+    // ============================================
+    // 🔥 ADDED: SEARCH DONATIONS (find + edit an older donation) --
+    // same feature retail.js/wholesale.js already have. Before this,
+    // the ONLY way to edit an existing donation at all was Transaction
+    // Overview's "Today's Transactions" widget -- meaning a donation
+    // from yesterday or earlier had no way to be found and corrected.
+    // No date limit here -- this searches every donation ever saved.
+    // ============================================
+    async function searchDonationRecords(query) {
+        const resultsEl = document.getElementById('donationSearchResults');
+        if (!resultsEl) return;
+
+        resultsEl.innerHTML = `<div style="text-align:center; padding:30px; color:#94a3b8;"><i class="fa-solid fa-spinner fa-spin"></i> Searching...</div>`;
+
+        try {
+            let dbQuery = supabaseClient
+                .from('sales')
+                .select('id, sale_id, created_at, items, customer_data, payment')
+                .eq('client_type', 'DONATION')
+                .order('created_at', { ascending: false })
+                .limit(20);
+
+            if (query && query.trim() !== '') {
+                const term = query.trim().replace(/[%_]/g, '\\$&');
+                dbQuery = dbQuery.or(
+                    `sale_id.ilike.%${term}%,customer_data->>full_name.ilike.%${term}%`
+                );
+            }
+
+            const { data: results, error } = await dbQuery;
+            if (error) throw error;
+
+            renderDonationSearchResults(results || []);
+        } catch (error) {
+            console.error('Error searching donations:', error);
+            resultsEl.innerHTML = `<div style="text-align:center; padding:30px; color:#dc2626;">Error searching: ${error.message}</div>`;
+        }
+    }
+
+    function renderDonationSearchResults(results) {
+        const resultsEl = document.getElementById('donationSearchResults');
+        if (!resultsEl) return;
+
+        if (results.length === 0) {
+            resultsEl.innerHTML = `<div style="text-align:center; padding:30px; color:#94a3b8;">No matching donations found.</div>`;
+            return;
+        }
+
+        const isAdmin = currentUserRole === 'Admin';
+
+        resultsEl.innerHTML = results.map(r => {
+            const date = new Date(r.created_at).toLocaleDateString();
+            const doneeName = r.customer_data?.full_name || 'N/A';
+            const itemCount = (r.items || []).reduce((sum, i) => sum + (i.qty || 0), 0);
+
+            return `
+                <div style="padding:12px; margin-bottom:8px; background:#f8fafc; border-radius:6px; border:1px solid #e2e8f0;">
+                    <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;">
+                        <div>
+                            <span style="font-weight:600;">${r.sale_id}</span>
+                            <div style="font-size:0.8rem; color:#64748b; margin-top:2px;">${doneeName} &middot; ${itemCount} items &middot; ${date}</div>
+                        </div>
+                        <div style="display:flex; gap:6px;">
+                            <button class="donation-search-edit-btn" data-id="${r.id}" style="background:#f59e0b; color:white; border:none; padding:5px 12px; border-radius:4px; cursor:pointer; font-size:0.75rem;"><i class="fa-solid fa-pen"></i> Edit</button>
+                            ${isAdmin ? `<button class="donation-search-delete-btn" data-id="${r.id}" data-sale-number="${r.sale_id}" style="background:#dc2626; color:white; border:none; padding:5px 12px; border-radius:4px; cursor:pointer; font-size:0.75rem;"><i class="fa-solid fa-trash"></i> Delete</button>` : ''}
+                        </div>
+                    </div>
+                </div>
+            `;
+        }).join('');
+
+        resultsEl.querySelectorAll('.donation-search-edit-btn').forEach(btn => {
+            btn.addEventListener('click', async () => {
+                const record = results.find(r => r.id === btn.dataset.id);
+                if (!record) return;
+                await loadDonationForEdit({ ...record, db_id: record.id });
+                document.getElementById('donationSearchModal').style.display = 'none';
+            });
+        });
+
+        resultsEl.querySelectorAll('.donation-search-delete-btn').forEach(btn => {
+            btn.addEventListener('click', () => deleteDonationRecord(btn.dataset.id, btn.dataset.saleNumber));
+        });
+    }
+
+    // 🔥 ADDED: same conservative baseline as retail.js/wholesale.js --
+    // removes the sale and its sale_items rows only, does not touch
+    // stock or the accounting ledger. Admin-only, checked both in the
+    // UI (button hidden from non-Admins above) and here.
+    async function deleteDonationRecord(id, saleNumber) {
+        if (currentUserRole !== 'Admin') {
+            alert('Only an Admin can delete a donation record.');
+            return;
+        }
+
+        const confirmed = confirm(
+            `Delete ${saleNumber}?\n\nThis permanently removes the donation record. ` +
+            `It does NOT restore stock or reverse any accounting entries already posted for it -- ` +
+            `those will need to be corrected separately if this donation affected them.\n\nThis cannot be undone.`
+        );
+        if (!confirmed) return;
+
+        try {
+            const { error: itemsError } = await supabaseClient.from('sale_items').delete().eq('sale_id', id);
+            if (itemsError) throw itemsError;
+
+            const { error: saleError } = await supabaseClient.from('sales').delete().eq('id', id);
+            if (saleError) throw saleError;
+
+            alert(`✅ ${saleNumber} deleted.`);
+            searchDonationRecords(document.getElementById('donationSearchInput')?.value || '');
+        } catch (error) {
+            console.error('Error deleting donation:', error);
+            alert('Error deleting donation: ' + error.message);
+        }
+    }
+
+    const searchDonationsBtn = document.getElementById('searchDonationsBtn');
+    const donationSearchModal = document.getElementById('donationSearchModal');
+    const donationCloseSearchModalBtn = document.getElementById('donationCloseSearchModalBtn');
+    const donationSearchInput = document.getElementById('donationSearchInput');
+    const donationSearchGoBtn = document.getElementById('donationSearchGoBtn');
+
+    if (searchDonationsBtn && donationSearchModal) {
+        searchDonationsBtn.addEventListener('click', () => {
+            donationSearchModal.style.display = 'flex';
+            if (donationSearchInput) donationSearchInput.value = '';
+            searchDonationRecords('');
+        });
+    }
+    if (donationCloseSearchModalBtn && donationSearchModal) {
+        donationCloseSearchModalBtn.addEventListener('click', () => {
+            donationSearchModal.style.display = 'none';
+        });
+    }
+    if (donationSearchModal) {
+        donationSearchModal.addEventListener('click', (e) => {
+            if (e.target === donationSearchModal) donationSearchModal.style.display = 'none';
+        });
+    }
+    if (donationSearchGoBtn) {
+        donationSearchGoBtn.addEventListener('click', () => {
+            searchDonationRecords(donationSearchInput?.value || '');
+        });
+    }
+    if (donationSearchInput) {
+        donationSearchInput.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                searchDonationRecords(donationSearchInput.value || '');
             }
         });
     }

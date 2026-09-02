@@ -7,6 +7,13 @@
             </button>
             <span style="font-weight: 600; color: #0f172a; font-size: 0.9rem;">Write-Off</span>
             <span id="writeOffIdDisplay" style="font-weight: bold; color: #0f172a; font-size: 0.85rem; background: #f1f5f9; padding: 2px 10px; border-radius: 4px;">WO-2026-0001</span>
+            <!-- 🔥 ADDED: same "find and edit an older write-off" capability
+                 retail.js/wholesale.js/donation.js already have -- there
+                 was previously no way at all to find a past write-off to
+                 correct it. -->
+            <button id="searchWriteOffsBtn" type="button" style="background: #f1f5f9; border: 1px solid #e2e8f0; color: #475569; padding: 4px 12px; border-radius: 4px; cursor: pointer; font-size: 0.8rem;">
+                <i class="fa-solid fa-magnifying-glass"></i> Search Write-Offs
+            </button>
         </div>
         <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
             <span style="font-size: 0.75rem; color: #64748b;">
@@ -119,6 +126,27 @@
             <button id="saveWriteOffBtn" style="background: #dc2626; color: white; border: none; padding: 8px 25px; border-radius: 6px; cursor: pointer; font-size: 0.9rem;">
                 <i class="fa-solid fa-trash-can"></i> Process Write-Off
             </button>
+        </div>
+    </div>
+</div>
+
+<!-- ============================================ -->
+<!-- 🔥 ADDED: SEARCH WRITE-OFFS MODAL (find + edit an older write-off) -->
+<!-- ============================================ -->
+<div id="writeOffSearchModal" style="display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(15, 23, 42, 0.6); backdrop-filter: blur(4px); z-index: 1000; justify-content: center; align-items: center;">
+    <div class="modal-content-box" style="background: white; padding: 30px; border-radius: 12px; width: 90%; max-width: 700px; max-height: 85vh; overflow-y: auto; box-shadow: 0 20px 50px rgba(0,0,0,0.5);">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; border-bottom: 1px solid #e2e8f0; padding-bottom: 15px;">
+            <h3 style="margin: 0;"><i class="fa-solid fa-magnifying-glass" style="color: #2563eb;"></i> Search Write-Offs</h3>
+            <button id="writeOffCloseSearchModalBtn" type="button" style="background: none; border: none; font-size: 1.5rem; cursor: pointer; color: #64748b;">&times;</button>
+        </div>
+        <div style="display: flex; gap: 10px; margin-bottom: 20px;">
+            <input type="text" id="writeOffSearchInput" placeholder="Reference #, or reason..." style="flex: 1; padding: 10px 14px; border: 1px solid #e2e8f0; border-radius: 6px; font-size: 0.9rem;">
+            <button id="writeOffSearchGoBtn" type="button" style="background: #2563eb; color: white; border: none; padding: 10px 24px; border-radius: 6px; cursor: pointer;">
+                <i class="fa-solid fa-magnifying-glass"></i> Search
+            </button>
+        </div>
+        <div id="writeOffSearchResults">
+            <div style="text-align: center; padding: 30px; color: #94a3b8;">Enter a search above, or click Search to see the most recent write-offs.</div>
         </div>
     </div>
 </div>

@@ -10,6 +10,40 @@
         return;
     }
 
+    // 🔥 CHANGED: see the same note in transaction/retail/index.js -- the
+    // shared window-level getCompanySettings() helper no longer exists on
+    // the site, so calling it here threw "getCompanySettings is not
+    // defined" and aborted this entire module's init before anything below
+    // it ever ran. Self-contained now: reads the same single
+    // `company_settings` row directly, with a hardcoded fallback.
+    const companySettings = await (async function loadCompanySettingsInline() {
+        const fallback = {
+            company_name: 'GRIFFINS MEDICALS LIMITED',
+            address: 'Plot 3534, Freedomway, Lusaka',
+            phone: '+260 97 000 0000',
+            zamra_number: 'ZAMRA-123456',
+            wholesale_prefix: 'GWH'
+        };
+        try {
+            const { data, error } = await supabaseClient
+                .from('company_settings')
+                .select('company_name, address, phone, zamra_number, wholesale_prefix')
+                .eq('id', 1)
+                .maybeSingle();
+            if (error || !data) return fallback;
+            return {
+                company_name: data.company_name || fallback.company_name,
+                address: data.address || fallback.address,
+                phone: data.phone || fallback.phone,
+                zamra_number: data.zamra_number || fallback.zamra_number,
+                wholesale_prefix: data.wholesale_prefix || fallback.wholesale_prefix
+            };
+        } catch (e) {
+            console.warn('Could not load company_settings, using defaults:', e);
+            return fallback;
+        }
+    })();
+
     // ============================================
     // DOM REFERENCES
     // ============================================
@@ -43,6 +77,19 @@
     // Print modal refs
     const printModal = document.getElementById('printModal');
     let currentSaleData = null;
+
+    // 🔥 FIX: this used to not exist at all -- loadWholesaleForEdit()
+    // populated the form from an existing sale, but saveTransaction() had
+    // no way to know it was looking at an edit rather than a new sale, so
+    // it ALWAYS inserted. Re-saving an "edited" wholesale invoice silently
+    // created a second, separate sale row for the same real-world
+    // transaction (duplicate invoice, stock deducted twice, revenue/COGS
+    // posted twice) while the original row sat there untouched. Same fix
+    // as retail.js's `editingSaleDbId` -- set by loadWholesaleForEdit(),
+    // cleared by generateNextSaleId() (Reset / post-save / a fresh
+    // quotation-to-invoice conversion), read by saveTransaction() to
+    // decide update vs insert.
+    let editingWholesaleDbId = null;
 
     // 🔥 ADDED: current user's role -- needed to gate the Delete button
     // in search results to Admin only. Fetched once and cached; runs in
@@ -747,15 +794,24 @@
     }
 
     function generateNextSaleId() {
+        // 🔥 FIX: a fresh generated invoice number means this is a NEW sale
+        // from here on, not an edit of an existing one -- clear the edit
+        // tracker so Save inserts instead of updating. Covers the Reset
+        // button, the post-save form reset, and convertQuotationToInvoice()
+        // (which deliberately calls this right after loadWholesaleForEdit()
+        // to turn a loaded quotation into a brand-new invoice instead of
+        // editing it in place). Same pattern as retail.js.
+        editingWholesaleDbId = null;
+
         const display = document.getElementById('saleIdDisplay');
         const invoiceDisplay = document.getElementById('invoiceNumber');
         if (!display) return;
-        
+
         const date = new Date();
         const year = date.getFullYear();
         const timestamp = Date.now().toString().slice(-6);
         const random = Math.floor(Math.random() * 10000).toString().padStart(4, '0');
-        const saleId = `GWH-${year}-${timestamp}-${random}`;
+        const saleId = `${companySettings.wholesale_prefix}-${year}-${timestamp}-${random}`;
         
         display.textContent = `Invoice #: ${saleId}`;
         if (invoiceDisplay) invoiceDisplay.value = saleId;
@@ -884,8 +940,15 @@
                 .order('created_at', { ascending: false })
                 .limit(20);
 
+            // 🔥 ADDED: this used to only ever match the invoice number --
+            // there was no way to find an older invoice by customer name
+            // alone. No date limit here either -- this already searches
+            // every WHOLESALE sale ever saved, not just today's.
             if (query && query.trim() !== '') {
-                dbQuery = dbQuery.ilike('sale_id', `%${query.trim()}%`);
+                const term = query.trim().replace(/[%_]/g, '\\$&');
+                dbQuery = dbQuery.or(
+                    `sale_id.ilike.%${term}%,customer_data->>customer_name.ilike.%${term}%`
+                );
             }
 
             const { data: results, error } = await dbQuery;
@@ -971,6 +1034,13 @@
         if (!sale) return null;
 
         return {
+            // 🔥 FIX: this was missing entirely, unlike retail.js's own
+            // version of this same function -- so even Wholesale's own
+            // in-page "Search Invoices" modal's Edit button never actually
+            // updated the invoice it loaded; Save always inserted a
+            // duplicate. See editingWholesaleDbId's declaration near the
+            // top of the file.
+            db_id: sale.id,
             sale_id: sale.sale_id,
             client_sub_type: sale.client_sub_type,
             customer_data: sale.customer_data || {},
@@ -1567,6 +1637,14 @@
                 updateTotals();
             }
 
+            // 🔥 FIX: set this LAST -- after everything above, in case any
+            // of those field changes (customer select, payment type) ever
+            // trigger a handler that touches the sale id. Setting it here
+            // is what makes Save actually update this invoice instead of
+            // inserting a duplicate. See the state declaration for why
+            // this is needed at all.
+            editingWholesaleDbId = saleData.db_id || null;
+
             alert('✅ Sale loaded for editing. Make changes and save.');
 
         } catch (error) {
@@ -1602,9 +1680,9 @@
 
                 <div class="doc-header">
                     <div class="company-block">
-                        <h1>GRIFFINS PHARMACEUTICALS</h1>
-                        <p>Plot 3534, Freedomway, Lusaka</p>
-                        <p>Phone: +260 97 000 0000 | ZAMRA: ZAMRA-123456</p>
+                        <h1>${companySettings.company_name}</h1>
+                        <p>${companySettings.address}</p>
+                        <p>Phone: ${companySettings.phone} | ZAMRA: ${companySettings.zamra_number}</p>
                     </div>
                 </div>
 
@@ -1827,43 +1905,120 @@
 
             console.log('Saving to database:', dbRecord);
 
+            // 🔥 FIX: editing an existing wholesale invoice
+            // (editingWholesaleDbId set by loadWholesaleForEdit()) must
+            // UPDATE that row, never insert a new one -- see this
+            // variable's declaration near the top of the file for the full
+            // story (this used to always insert, silently duplicating the
+            // sale on every edit). Before writing the row, undo exactly
+            // what the ORIGINAL save did: restore the stock it deducted,
+            // and remove its old sale_items and journal entries (matched
+            // by reference, which carries the invoice's sale_id string,
+            // e.g. "GWH-2026-...-COGS" for the COGS leg) -- then the rest
+            // of this function re-applies stock deduction and accounting
+            // entries fresh for the edited items, exactly as it already
+            // does for a normal new sale. Mirrors retail.js's edit-save.
+            if (editingWholesaleDbId) {
+                const { data: oldItems, error: oldItemsError } = await supabaseClient
+                    .from('sale_items')
+                    .select('batch_id, quantity, pack_size')
+                    .eq('sale_id', editingWholesaleDbId);
+
+                if (oldItemsError) {
+                    console.error('Error loading original sale items for edit:', oldItemsError);
+                    alert('❌ Could not load the original invoice to edit it safely. Nothing was changed.\n' + oldItemsError.message);
+                    return;
+                }
+
+                if (oldItems && oldItems.length > 0) {
+                    const qtyToRestoreByBatch = new Map();
+                    for (const item of oldItems) {
+                        const packQty = parseInt(item.pack_size) || 1;
+                        qtyToRestoreByBatch.set(item.batch_id, (qtyToRestoreByBatch.get(item.batch_id) || 0) + item.quantity * packQty);
+                    }
+                    const { data: batchesToRestore, error: batchFetchError } = await supabaseClient
+                        .from('batches')
+                        .select('id, total_qty')
+                        .in('id', [...qtyToRestoreByBatch.keys()]);
+
+                    if (batchFetchError) {
+                        console.error('Error restoring stock before edit-save:', batchFetchError);
+                    } else {
+                        await Promise.all((batchesToRestore || []).map(b =>
+                            supabaseClient.from('batches')
+                                .update({ total_qty: b.total_qty + (qtyToRestoreByBatch.get(b.id) || 0) })
+                                .eq('id', b.id)
+                        ));
+                    }
+                }
+
+                await supabaseClient.from('sale_items').delete().eq('sale_id', editingWholesaleDbId);
+
+                const oldSaleIdString = saleData.sale_id; // unchanged across an edit -- same invoice number throughout
+                const { data: oldJournals } = await supabaseClient
+                    .from('journal_entries')
+                    .select('id')
+                    .in('reference', [oldSaleIdString, `${oldSaleIdString}-COGS`]);
+
+                if (oldJournals && oldJournals.length > 0) {
+                    const oldJournalIds = oldJournals.map(j => j.id);
+                    await supabaseClient.from('journal_lines').delete().in('journal_entry_id', oldJournalIds);
+                    await supabaseClient.from('journal_entries').delete().in('id', oldJournalIds);
+                }
+            }
+
             let savedData;
             try {
-                const { data, error } = await supabaseClient
-                    .from('sales')
-                    .insert([dbRecord])
-                    .select();
+                if (editingWholesaleDbId) {
+                    const { data, error } = await supabaseClient
+                        .from('sales')
+                        .update(dbRecord)
+                        .eq('id', editingWholesaleDbId)
+                        .select();
 
-                if (error) {
-                    // 🔥 ADDED: same duplicate sale_id retry as retail.js —
-                    // regenerate the id and try once more instead of just
-                    // failing the whole sale on a rare timestamp collision.
-                    if (error.code === '23505' || error.message?.includes('duplicate key')) {
-                        console.log('⚠️ Duplicate key error, regenerating sale_id...');
-
-                        const timestamp = Date.now().toString().slice(-6);
-                        const random = Math.floor(Math.random() * 10000).toString().padStart(4, '0');
-                        const newSaleId = `${prefix || 'GWH'}-${new Date().getFullYear()}-${timestamp}-${random}`;
-
-                        document.getElementById('invoiceNumber').value = newSaleId;
-                        const display = document.getElementById('saleIdDisplay');
-                        if (display) display.textContent = `Invoice #: ${newSaleId}`;
-
-                        dbRecord.sale_id = newSaleId;
-                        saleData.sale_id = newSaleId;
-
-                        const { data: retryData, error: retryError } = await supabaseClient
-                            .from('sales')
-                            .insert([dbRecord])
-                            .select();
-
-                        if (retryError) throw new Error('Failed to save (Retry): ' + retryError.message);
-                        savedData = retryData;
-                    } else {
-                        throw new Error(error.message);
+                    if (error) throw new Error(error.message);
+                    if (!data || data.length === 0) {
+                        alert('❌ Could not find the original invoice to update. Nothing was saved.');
+                        return;
                     }
-                } else {
                     savedData = data;
+                } else {
+                    const { data, error } = await supabaseClient
+                        .from('sales')
+                        .insert([dbRecord])
+                        .select();
+
+                    if (error) {
+                        // 🔥 ADDED: same duplicate sale_id retry as retail.js —
+                        // regenerate the id and try once more instead of just
+                        // failing the whole sale on a rare timestamp collision.
+                        if (error.code === '23505' || error.message?.includes('duplicate key')) {
+                            console.log('⚠️ Duplicate key error, regenerating sale_id...');
+
+                            const timestamp = Date.now().toString().slice(-6);
+                            const random = Math.floor(Math.random() * 10000).toString().padStart(4, '0');
+                            const newSaleId = `${prefix || 'GWH'}-${new Date().getFullYear()}-${timestamp}-${random}`;
+
+                            document.getElementById('invoiceNumber').value = newSaleId;
+                            const display = document.getElementById('saleIdDisplay');
+                            if (display) display.textContent = `Invoice #: ${newSaleId}`;
+
+                            dbRecord.sale_id = newSaleId;
+                            saleData.sale_id = newSaleId;
+
+                            const { data: retryData, error: retryError } = await supabaseClient
+                                .from('sales')
+                                .insert([dbRecord])
+                                .select();
+
+                            if (retryError) throw new Error('Failed to save (Retry): ' + retryError.message);
+                            savedData = retryData;
+                        } else {
+                            throw new Error(error.message);
+                        }
+                    } else {
+                        savedData = data;
+                    }
                 }
             } catch (dbError) {
                 console.error('Database error:', dbError);
@@ -2045,7 +2200,7 @@
     // ============================================
     // BUTTON EVENTS
     // ============================================
-    if (saveBtn) saveBtn.addEventListener('click', () => saveTransaction('COMPLETED', 'GWH'));
+    if (saveBtn) saveBtn.addEventListener('click', () => saveTransaction('COMPLETED', companySettings.wholesale_prefix));
     if (quoteBtn) quoteBtn.addEventListener('click', () => saveTransaction('QUOTATION', 'QWH'));
 
     // ============================================

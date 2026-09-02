@@ -31,6 +31,44 @@
         return;
     }
 
+    // 🔥 CHANGED: previously called a shared window-level getCompanySettings()
+    // (assets/js/shared-company-settings.js) -- that file is no longer part
+    // of the site, so calling it threw "getCompanySettings is not defined"
+    // and aborted this entire module's init before anything below it (item
+    // search, dropdowns, save/print, everything) ever ran. Self-contained
+    // now: reads the same single `company_settings` row directly, with a
+    // hardcoded fallback if that fails for any reason, so this file has no
+    // dependency on any other script existing on the page.
+    const companySettings = await (async function loadCompanySettingsInline() {
+        const fallback = {
+            company_name: 'GRIFFINS MEDICALS LIMITED',
+            address: 'Plot 3534, Freedomway, Lusaka',
+            phone: '+260 97 000 0000',
+            zamra_number: 'ZAMRA-123456',
+            invoice_prefix: 'GRI',
+            quotation_prefix: 'QGR'
+        };
+        try {
+            const { data, error } = await supabaseClient
+                .from('company_settings')
+                .select('company_name, address, phone, zamra_number, invoice_prefix, quotation_prefix')
+                .eq('id', 1)
+                .maybeSingle();
+            if (error || !data) return fallback;
+            return {
+                company_name: data.company_name || fallback.company_name,
+                address: data.address || fallback.address,
+                phone: data.phone || fallback.phone,
+                zamra_number: data.zamra_number || fallback.zamra_number,
+                invoice_prefix: data.invoice_prefix || fallback.invoice_prefix,
+                quotation_prefix: data.quotation_prefix || fallback.quotation_prefix
+            };
+        } catch (e) {
+            console.warn('Could not load company_settings, using defaults:', e);
+            return fallback;
+        }
+    })();
+
     // 🔥 FIX: tracks the `sales.id` (database UUID) of the invoice currently
     // loaded for in-place editing via the search modal's "Edit" button. Save
     // previously ALWAYS inserted a new `sales` row -- even when editing an
@@ -46,6 +84,14 @@
     // a lower declaration; a `let` accessed before its own declaration line
     // throws, it isn't just `undefined`.
     let editingSaleDbId = null;
+
+    // 🔥 ADDED: in-memory copy of every product (id, product_name,
+    // generic_name), built once by loadProductDropdowns() and reused by
+    // the new item-search box (see renderSearchResults() further down) so
+    // typing doesn't need a network round trip per keystroke. The hidden
+    // .retail-pos-item <select> is still populated from the same data --
+    // this is purely an extra index for filtering/display.
+    let productCatalog = [];
 
     // ============================================
     // DOM REFERENCES
@@ -311,7 +357,7 @@
                     <button id="retailCloseSearchModalBtn" type="button" style="background: none; border: none; font-size: 1.5rem; cursor: pointer; color: #64748b;">&times;</button>
                 </div>
                 <div style="display: flex; gap: 10px; margin-bottom: 20px;">
-                    <input type="text" id="retailSearchInput" placeholder="Enter Invoice # (GRI-...) or Quotation # (QGR-...)" style="flex: 1; padding: 10px 14px; border: 1px solid #e2e8f0; border-radius: 6px; font-size: 0.9rem;">
+                    <input type="text" id="retailSearchInput" placeholder="Invoice #, Quotation #, customer name, or NHIMA claim number..." style="flex: 1; padding: 10px 14px; border: 1px solid #e2e8f0; border-radius: 6px; font-size: 0.9rem;">
                     <button id="retailSearchGoBtn" type="button" style="background: #2563eb; color: white; border: none; padding: 10px 24px; border-radius: 6px; cursor: pointer;">
                         <i class="fa-solid fa-magnifying-glass"></i> Search
                     </button>
@@ -1545,8 +1591,10 @@
             const totalInput = firstRow.querySelector('.retail-pos-total');
             const daysInput = firstRow.querySelector('.retail-pos-days');
             const howToTakeInput = firstRow.querySelector('.retail-pos-how-to-take');
+            const searchInput = firstRow.querySelector('.retail-pos-item-search');
 
             if (itemSelect) itemSelect.value = '';
+            if (searchInput) searchInput.value = '';
             if (batchSelect) batchSelect.innerHTML = `<option value="">Select Batch</option>`;
             if (packInput) packInput.value = '';
             if (expiryInput) expiryInput.value = '';
@@ -2105,8 +2153,10 @@
                 const totalInput = firstRow.querySelector('.retail-pos-total');
                 const daysInput = firstRow.querySelector('.retail-pos-days');
                 const howToTakeInput = firstRow.querySelector('.retail-pos-how-to-take');
+                const searchInput = firstRow.querySelector('.retail-pos-item-search');
 
                 if (itemSelect) itemSelect.value = '';
+                if (searchInput) searchInput.value = '';
                 if (batchSelect) batchSelect.innerHTML = `<option value="">Select Batch</option>`;
                 if (packInput) packInput.value = '';
                 if (taxInput) taxInput.value = '';
@@ -2169,7 +2219,16 @@
                         itemSelect.appendChild(newOpt);
                         opt = newOpt;
                     }
-                    if (opt) itemSelect.value = item.product_id;
+                    if (opt) {
+                        itemSelect.value = item.product_id;
+                        // 🔥 ADDED: this path sets .value directly without
+                        // dispatching 'change' (batch/rate are filled in
+                        // explicitly below instead), so the search box's
+                        // sync-on-change (see the posTableBody 'change'
+                        // handler) never fires here -- keep it in sync by hand.
+                        const searchInputEl = targetRow.querySelector('.retail-pos-item-search');
+                        if (searchInputEl) searchInputEl.value = opt.textContent;
+                    }
                 }
 
                 if (batchSelect && item.batch_id) {
@@ -2251,7 +2310,38 @@
             updateRowTotal(row);
             updateTotals();
         }
+
+        // 🔥 ADDED: price is now editable (see .retail-pos-rate) -- a manual
+        // edit needs to recalculate this row's total and the grand totals
+        // the same way a qty edit already does above. updateRowRate() (the
+        // function that OVERWRITES this field with the calculated default)
+        // only runs when the item or batch selection itself changes, so
+        // typing here doesn't get silently reverted.
+        if (e.target.classList.contains('retail-pos-rate')) {
+            const row = e.target.closest('tr');
+            updateRowTotal(row);
+            updateTotals();
+        }
+
+        // 🔥 ADDED: product search box -- filters productCatalog by product
+        // name OR generic name as the cashier types. See renderItemSearchResults().
+        if (e.target.classList.contains('retail-pos-item-search')) {
+            const row = e.target.closest('tr');
+            renderItemSearchResults(row, e.target, e.target.value);
+        }
     });
+
+    // Reopen the search panel (with whatever's already typed) when a search
+    // box regains focus -- 'focus' doesn't bubble, so this needs its own
+    // capture-phase listener rather than living in the delegated handlers
+    // above. Select-all on focus so typing immediately replaces the
+    // currently-shown product name instead of appending to it.
+    posTableBody.addEventListener('focus', function (e) {
+        if (e.target.classList.contains('retail-pos-item-search')) {
+            e.target.select();
+            renderItemSearchResults(e.target.closest('tr'), e.target, e.target.value);
+        }
+    }, true);
 
     // ============================================
     // PRODUCT AND BATCH SELECTION
@@ -2266,6 +2356,17 @@
             const taxInput = row.querySelector('.retail-pos-tax');
             const rateInput = row.querySelector('.retail-pos-rate');
             const qtyInput = row.querySelector('.retail-pos-qty');
+
+            // 🔥 ADDED: keep the visible search box's text in sync with
+            // whatever the hidden select's value actually is now -- this
+            // single line covers every code path that sets .value and
+            // dispatches 'change' on this select (a search-panel pick,
+            // quickFillItem(), etc.) without needing to touch each of
+            // those call sites separately.
+            const searchInputEl = row.querySelector('.retail-pos-item-search');
+            if (searchInputEl) {
+                searchInputEl.value = productId ? (e.target.options[e.target.selectedIndex]?.text || '') : '';
+            }
 
             if (!productId) {
                 if (batchSelect) batchSelect.innerHTML = `<option value="">Select Batch</option>`;
@@ -2357,9 +2458,19 @@
                         setTimeout(() => {
                             batchSelect.value = batches[0].id;
                             if (taxInput) taxInput.value = product.tax_percent || 0;
-                            updateRowRate(row);
-                            updateRowTotal(row);
-                            updateTotals();
+                            // 🔥 FIX: setting .value programmatically does NOT fire a
+                            // 'change' event, so this auto-pick of the first batch used
+                            // to silently skip the "auto-add next row" logic that only
+                            // ran on a manual batch selection (see the 'change' handler
+                            // on .retail-pos-batch below). That's exactly the real-world
+                            // case: most products only have one batch, it gets
+                            // auto-selected here, qty is already defaulted to 1, and
+                            // nothing is ever "changed" by hand -- so no second row ever
+                            // appeared even though the item was fully entered. Dispatching
+                            // a real 'change' event routes through that same handler
+                            // (rate/total/new-row all in one place) instead of duplicating
+                            // it here.
+                            batchSelect.dispatchEvent(new Event('change', { bubbles: true }));
                         }, 50);
                     }
                 }
@@ -2433,6 +2544,7 @@
         newRow.classList.remove('retail-pos-row');
 
         const itemSelect = newRow.querySelector('.retail-pos-item');
+        const searchInput = newRow.querySelector('.retail-pos-item-search');
         const batchSelect = newRow.querySelector('.retail-pos-batch');
         const packInput = newRow.querySelector('.retail-pos-pack-size');
         const expiryInput = newRow.querySelector('.retail-pos-expiry');
@@ -2447,6 +2559,7 @@
             itemSelect.value = '';
             loadProductDropdownsForRow(itemSelect);
         }
+        if (searchInput) searchInput.value = '';
         if (batchSelect) batchSelect.innerHTML = `<option value="">Select Batch</option>`;
         if (packInput) packInput.value = '';
         if (expiryInput) expiryInput.value = '';
@@ -2473,10 +2586,33 @@
         try {
             const { data: products, error } = await supabaseClient
                 .from('products')
-                .select('id, product_name')
+                .select('id, product_name, generic_name_id')
                 .order('product_name');
 
             if (error) throw error;
+
+            // 🔥 ADDED: resolve generic names for the search box -- same
+            // two-query pattern (fetch products, then look up their
+            // generic_name_id set in one batch) already used by the
+            // Purchase module's product search, rather than relying on a
+            // PostgREST embedded select.
+            const genericIds = [...new Set((products || []).map(p => p.generic_name_id).filter(Boolean))];
+            let genericMap = {};
+            if (genericIds.length > 0) {
+                const { data: generics, error: genError } = await supabaseClient
+                    .from('generic_names')
+                    .select('id, name')
+                    .in('id', genericIds);
+                if (!genError && generics) {
+                    generics.forEach(g => { genericMap[g.id] = g.name; });
+                }
+            }
+
+            productCatalog = (products || []).map(p => ({
+                id: p.id,
+                product_name: p.product_name,
+                generic_name: genericMap[p.generic_name_id] || ''
+            }));
 
             selects.forEach(select => {
                 if (select) {
@@ -2494,20 +2630,124 @@
     async function loadProductDropdownsForRow(select) {
         if (!select) return;
         try {
-            const { data: products, error } = await supabaseClient
-                .from('products')
-                .select('id, product_name')
-                .order('product_name');
-
-            if (error) throw error;
+            // 🔥 CHANGED: reuse the shared productCatalog (loaded once by
+            // loadProductDropdowns()) instead of re-querying the DB for
+            // every single row -- a new row's select needs the exact same
+            // full product list every time, so there's nothing per-row to
+            // actually fetch. Falls back to a fresh load only if the cache
+            // hasn't been populated yet (e.g. this runs before the initial
+            // background load finishes).
+            if (!productCatalog.length) {
+                await loadProductDropdowns();
+            }
 
             select.innerHTML = `<option value="">Select Item</option>`;
-            products.forEach(p => {
+            productCatalog.forEach(p => {
                 select.innerHTML += `<option value="${p.id}">${p.product_name}</option>`;
             });
         } catch (e) {
             console.warn("Could not load products for row:", e);
         }
+    }
+
+    // ============================================
+    // 🔥 ADDED: PRODUCT SEARCH BOX (search by product name OR generic name)
+    // ============================================
+    // The panel is a single shared element appended to <body> once (not
+    // nested inside .pos-items-table-wrap, which has overflow-x:auto -- per
+    // spec that forces overflow-y:auto too, so an absolutely-positioned
+    // dropdown nested in there would get clipped the moment it needed to
+    // extend below the table). Positioned with getBoundingClientRect() under
+    // whichever row's search box is currently focused, closed on scroll/
+    // resize/outside-click rather than re-tracked, since it's only ever open
+    // for the few seconds it takes to search and pick.
+    let searchPanelRow = null;
+
+    function getOrCreateSearchPanel() {
+        let panel = document.getElementById('retailItemSearchPanel');
+        if (!panel) {
+            panel = document.createElement('div');
+            panel.id = 'retailItemSearchPanel';
+            panel.style.cssText = 'display:none; position:fixed; z-index:2000; background:white; border:1px solid #e2e8f0; border-radius:8px; box-shadow:0 12px 28px rgba(15,23,42,0.18); max-height:260px; overflow-y:auto; font-size:0.82rem;';
+            document.body.appendChild(panel);
+        }
+        return panel;
+    }
+
+    function hideItemSearchPanel() {
+        const panel = document.getElementById('retailItemSearchPanel');
+        if (panel) panel.style.display = 'none';
+        searchPanelRow = null;
+    }
+
+    function positionItemSearchPanel(panel, input) {
+        const rect = input.getBoundingClientRect();
+        panel.style.left = `${Math.round(rect.left)}px`;
+        panel.style.top = `${Math.round(rect.bottom + 4)}px`;
+        panel.style.width = `${Math.max(240, Math.round(rect.width))}px`;
+    }
+
+    function renderItemSearchResults(row, input, query) {
+        if (!row) return;
+        const panel = getOrCreateSearchPanel();
+        searchPanelRow = row;
+
+        const term = query.trim().toLowerCase();
+        const matches = term
+            ? productCatalog.filter(p =>
+                p.product_name.toLowerCase().includes(term) ||
+                (p.generic_name && p.generic_name.toLowerCase().includes(term))
+            ).slice(0, 30)
+            : productCatalog.slice(0, 30);
+
+        if (matches.length === 0) {
+            panel.innerHTML = `<div style="padding:10px 12px; color:#94a3b8;">No matching products.</div>`;
+        } else {
+            panel.innerHTML = matches.map(p => `
+                <div class="retail-item-search-result" data-id="${p.id}" style="padding:8px 12px; cursor:pointer; border-bottom:1px solid #f1f5f9;">
+                    <div style="font-weight:600; color:#0f172a;">${p.product_name}</div>
+                    ${p.generic_name ? `<div style="font-size:0.72rem; color:#94a3b8;">${p.generic_name}</div>` : ''}
+                </div>
+            `).join('');
+        }
+
+        positionItemSearchPanel(panel, input);
+        panel.style.display = 'block';
+    }
+
+    // Picking a result just drives the hidden <select> exactly like a
+    // native option pick would -- same value assignment, same 'change'
+    // event -- so batch loading / rate calc / everything downstream runs
+    // completely unchanged.
+    function selectItemSearchResult(productId) {
+        if (!searchPanelRow) return;
+        const select = searchPanelRow.querySelector('.retail-pos-item');
+        if (select) {
+            select.value = productId;
+            select.dispatchEvent(new Event('change', { bubbles: true }));
+        }
+        hideItemSearchPanel();
+    }
+
+    // mousedown (not click) + preventDefault so the search input never
+    // blurs before the pick registers -- the classic combobox gotcha.
+    document.addEventListener('mousedown', function (e) {
+        const panel = document.getElementById('retailItemSearchPanel');
+        if (!panel || panel.style.display === 'none') return;
+        const result = e.target.closest('.retail-item-search-result');
+        if (result) {
+            e.preventDefault();
+            selectItemSearchResult(result.dataset.id);
+            return;
+        }
+        if (!e.target.closest('#retailItemSearchPanel') && !e.target.classList.contains('retail-pos-item-search')) {
+            hideItemSearchPanel();
+        }
+    });
+
+    if (!window.__retailPosDocListenersAttached) {
+        window.addEventListener('scroll', () => hideItemSearchPanel(), true);
+        window.addEventListener('resize', () => hideItemSearchPanel());
     }
 
     async function loadNhimaDropdown() {
@@ -2568,7 +2808,7 @@
         const year = date.getFullYear();
         const timestamp = Date.now().toString().slice(-6);
         const random = Math.floor(Math.random() * 10000).toString().padStart(4, '0');
-        const saleId = `GRI-${year}-${timestamp}-${random}`;
+        const saleId = `${companySettings.invoice_prefix}-${year}-${timestamp}-${random}`;
 
         display.textContent = `Invoice #: ${saleId}`;
         if (invoiceDisplay) invoiceDisplay.value = saleId;
@@ -2905,7 +3145,7 @@
         try {
             let dbQuery = supabaseClient
                 .from('sales')
-                .select('id, sale_id, created_at, grand_total, status, is_quotation, customer_data, client_type')
+                .select('id, sale_id, created_at, grand_total, status, is_quotation, customer_data, client_type, claim_number')
                 // 🔥 FIX: this used to search across ALL sale types --
                 // Retail, Wholesale, Donation. Wholesale stores rate as a
                 // pack-adjusted price, completely different from how
@@ -2919,9 +3159,19 @@
                 .limit(20);
 
             // Blank search shows the most recent 20; otherwise match the
-            // invoice/quotation number (partial, case-insensitive).
+            // invoice/quotation number, customer name, or NHIMA claim
+            // number (partial, case-insensitive). 🔥 ADDED: this used to
+            // only ever match the invoice number -- there was no way to
+            // find an older invoice by the patient's name or claim number
+            // alone, which is exactly what you'd have on hand if you
+            // don't remember the invoice number itself. No date limit
+            // here either -- this already searches every RETAIL sale ever
+            // saved, not just today's.
             if (query && query.trim() !== '') {
-                dbQuery = dbQuery.ilike('sale_id', `%${query.trim()}%`);
+                const term = query.trim().replace(/[%_]/g, '\\$&');
+                dbQuery = dbQuery.or(
+                    `sale_id.ilike.%${term}%,claim_number.ilike.%${term}%,customer_data->>full_name.ilike.%${term}%`
+                );
             }
 
             const { data: results, error } = await dbQuery;
@@ -2970,7 +3220,7 @@
                     <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;">
                         <div>
                             <span style="font-weight:600;">${r.sale_id}</span> ${typeLabel}
-                            <div style="font-size:0.8rem; color:#64748b; margin-top:2px;">${customerName} &middot; ${date} &middot; K${(r.grand_total || 0).toFixed(2)}</div>
+                            <div style="font-size:0.8rem; color:#64748b; margin-top:2px;">${customerName}${r.claim_number ? ` &middot; Claim# ${r.claim_number}` : ''} &middot; ${date} &middot; K${(r.grand_total || 0).toFixed(2)}</div>
                         </div>
                         <div style="display:flex; gap:6px;">${actions}</div>
                     </div>
@@ -3763,7 +4013,7 @@
                      page can control: in the print dialog, open "More
                      settings" and uncheck "Headers and footers" -- most
                      browsers remember that choice for next time. -->
-                <title>GRIFFINS MEDICALS LIMITED - ${docLabel} ${saleData.sale_id}</title>
+                <title>${companySettings.company_name} - ${docLabel} ${saleData.sale_id}</title>
                 <style>
                     * { box-sizing: border-box; }
                     /* 🔥 FIX: printed on the real thermal printer, everything
@@ -3818,9 +4068,9 @@
             </head>
             <body>
                 <div class="header">
-                    <h1>GRIFFINS MEDICALS LIMITED</h1>
-                    <p>Plot 3534, Freedomway, Lusaka</p>
-                    <p>Phone: +260 97 000 0000 | ZAMRA: ZAMRA-123456</p>
+                    <h1>${companySettings.company_name}</h1>
+                    <p>${companySettings.address}</p>
+                    <p>Phone: ${companySettings.phone} | ZAMRA: ${companySettings.zamra_number}</p>
                     <div class="doc-type-badge">${isQuotation ? 'QUOTATION -- NOT A TAX INVOICE' : 'TAX INVOICE'}</div>
                 </div>
                 <div class="meta-row">
@@ -3958,6 +4208,34 @@
                 if (saleData.client_sub_type === 'NHIMA') {
                     const nhimaSelectEl = document.getElementById('retailNhimaNumber');
                     if (nhimaSelectEl && customer.nhima_number) {
+                        // 🔥 FIX: this is the actual "NHIMA number not
+                        // loading" bug. loadNhimaDropdown() (called once,
+                        // fired-and-forgotten, at page init -- see the
+                        // Promise.all near the top of this file) populates
+                        // this <select>'s <option>s from a background
+                        // network request. Setting a <select>'s .value to
+                        // something with no matching <option> is a SILENT
+                        // no-op in every browser -- it doesn't throw, it
+                        // just leaves the dropdown showing its placeholder
+                        // -- which is exactly why every OTHER field below
+                        // (name, NRC, phone, address, claim #) restored
+                        // correctly while only this dropdown stayed blank:
+                        // editing a sale soon after the page loads (before
+                        // that background request finishes) or editing one
+                        // whose NHIMA number was later removed from the
+                        // nhima_members master list both hit this. Make
+                        // sure the option exists -- inserting it on the fly
+                        // if it's missing -- before selecting it, so this
+                        // invoice's own saved NHIMA number always shows
+                        // regardless of dropdown-load timing or whether the
+                        // master list still has it.
+                        const hasOption = Array.from(nhimaSelectEl.options).some(o => o.value === customer.nhima_number);
+                        if (!hasOption) {
+                            const opt = document.createElement('option');
+                            opt.value = customer.nhima_number;
+                            opt.textContent = customer.nhima_number;
+                            nhimaSelectEl.appendChild(opt);
+                        }
                         nhimaSelectEl.value = customer.nhima_number;
                         nhimaSelectEl.dispatchEvent(new Event('change'));
                     }
@@ -4023,6 +4301,8 @@
                     const totalInput = firstRow.querySelector('.retail-pos-total');
                     const daysInput = firstRow.querySelector('.retail-pos-days');
                     const howToTakeInput = firstRow.querySelector('.retail-pos-how-to-take');
+                    const searchInput = firstRow.querySelector('.retail-pos-item-search');
+                    if (searchInput) searchInput.value = '';
 
                     if (itemSelect) itemSelect.value = '';
                     if (batchSelect) batchSelect.innerHTML = `<option value="">Select Batch</option>`;
@@ -4112,6 +4392,13 @@
                             itemSelect.appendChild(newOpt);
                         }
                         itemSelect.value = item.product_id;
+                        // 🔥 ADDED: sets .value directly without dispatching
+                        // 'change' (batch/rate are restored explicitly below
+                        // from the sale's own saved data), so the search
+                        // box's sync-on-change never fires here -- keep it
+                        // in sync by hand, same as addAllItemsFromSale() above.
+                        const searchInputEl = targetRow.querySelector('.retail-pos-item-search');
+                        if (searchInputEl) searchInputEl.value = itemSelect.options[itemSelect.selectedIndex]?.text || '';
                     }
 
                     if (batchSelect && item.batch_id) {
@@ -4309,8 +4596,8 @@
     // ============================================
     // SAVE & QUOTATION BUTTONS
     // ============================================
-    if (saveBtn) saveBtn.addEventListener('click', () => saveTransaction('COMPLETED', 'GRI'));
-    if (quoteBtn) quoteBtn.addEventListener('click', () => saveTransaction('QUOTATION', 'QGR'));
+    if (saveBtn) saveBtn.addEventListener('click', () => saveTransaction('COMPLETED', companySettings.invoice_prefix));
+    if (quoteBtn) quoteBtn.addEventListener('click', () => saveTransaction('QUOTATION', companySettings.quotation_prefix));
 
     // ============================================
     // 🔥 ADDED: SEARCH BUTTON & MODAL WIRING
@@ -4445,27 +4732,12 @@
     console.log("✅ Customer existence ensurer added - permanent fix for FK constraint");
 
     // ============================================
-    // 🎨 ADDED (layout redesign): qty stepper buttons for the item table.
-    // Purely additive UI sugar -- doesn't duplicate or change any
-    // calculation/business logic above. The buttons just mutate the SAME
-    // .retail-pos-qty input already wired by the 'input' listener further
-    // up and dispatch a real 'input' event, so row total recalculation,
-    // batch stock validation, and auto-adding the next empty row all fire
-    // exactly as if the number had been typed by hand.
+    // 🔥 REMOVED: qty stepper (+/-) buttons for the item table. Cashiers
+    // never used them -- qty is always typed directly -- so the buttons
+    // and their click handler were removed; the HTML qty cell is now just
+    // the plain .retail-pos-qty input (see index.html), still wired by the
+    // 'input' listener further up exactly as before.
     // ============================================
-    posTableBody.addEventListener('click', function (e) {
-        const stepBtn = e.target.closest('.qty-step-inc, .qty-step-dec');
-        if (!stepBtn) return;
-        const row = stepBtn.closest('tr');
-        const qtyInput = row?.querySelector('.retail-pos-qty');
-        if (!qtyInput || qtyInput.disabled) return;
-
-        const step = stepBtn.classList.contains('qty-step-inc') ? 1 : -1;
-        const current = parseInt(qtyInput.value) || 0;
-        const next = Math.max(0, current + step);
-        qtyInput.value = next;
-        qtyInput.dispatchEvent(new Event('input', { bubbles: true }));
-    });
 
 })();
 // ============================================

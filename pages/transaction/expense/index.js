@@ -10,6 +10,28 @@
         return;
     }
 
+    // 🔥 CHANGED: the shared window-level getCompanySettings() helper
+    // (assets/js/shared-company-settings.js) no longer exists on the site,
+    // so calling it here threw "getCompanySettings is not defined" and
+    // aborted this entire module's init. Self-contained now: reads the
+    // company_name straight from the `company_settings` row, with a
+    // hardcoded fallback if that fails for any reason.
+    const companySettings = await (async function loadCompanySettingsInline() {
+        const fallback = { company_name: 'GRIFFINS MEDICALS LIMITED' };
+        try {
+            const { data, error } = await supabaseClient
+                .from('company_settings')
+                .select('company_name')
+                .eq('id', 1)
+                .maybeSingle();
+            if (error || !data) return fallback;
+            return { company_name: data.company_name || fallback.company_name };
+        } catch (e) {
+            console.warn('Could not load company_settings, using defaults:', e);
+            return fallback;
+        }
+    })();
+
     // ============================================
     // GLOBAL STATE
     // ============================================
@@ -616,7 +638,7 @@
         const printContent = `
             <div style="font-family: 'Courier New', monospace; padding: 20px; max-width: 400px; margin: 0 auto;">
                 <div style="text-align: center; border-bottom: 2px dashed #333; padding-bottom: 10px; margin-bottom: 15px;">
-                    <h2 style="margin: 0; font-size: 1.2rem;">GRIFFINS MEDICALS LIMITED</h2>
+                    <h2 style="margin: 0; font-size: 1.2rem;">${companySettings.company_name}</h2>
                     <p style="margin: 3px 0; font-size: 0.85rem; color: #475569;">Expense Voucher</p>
                 </div>
                 <div style="font-size: 0.85rem;">

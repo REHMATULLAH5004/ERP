@@ -2098,14 +2098,37 @@
             setTimeout(() => { printWindow.focus(); printWindow.print(); }, 500);
         };
     
-        window.printReceiptDocument = function() {
+        window.printReceiptDocument = async function() {
             const data = state.currentReceiptData;
             if (!data) { safeToast('No receipt data to print', 'error'); return; }
-    
+
+            // 🔥 CHANGED: the shared window-level getCompanySettings() helper
+            // (assets/js/shared-company-settings.js) no longer exists on the
+            // site, so calling it here threw "getCompanySettings is not
+            // defined" the moment a receipt was printed. Self-contained now:
+            // reads the same single `company_settings` row directly, with a
+            // hardcoded fallback if that fails for any reason.
+            let companySettings;
+            try {
+                const { data: settingsRow, error: settingsError } = await supabaseClient
+                    .from('company_settings')
+                    .select('company_name, address, phone')
+                    .eq('id', 1)
+                    .maybeSingle();
+                companySettings = (!settingsError && settingsRow) ? {
+                    company_name: settingsRow.company_name || 'GRIFFINS MEDICALS LIMITED',
+                    address: settingsRow.address || 'Plot 3534, Freedomway, Lusaka',
+                    phone: settingsRow.phone || '+260 97 000 0000'
+                } : { company_name: 'GRIFFINS MEDICALS LIMITED', address: 'Plot 3534, Freedomway, Lusaka', phone: '+260 97 000 0000' };
+            } catch (e) {
+                console.warn('Could not load company_settings, using defaults:', e);
+                companySettings = { company_name: 'GRIFFINS MEDICALS LIMITED', address: 'Plot 3534, Freedomway, Lusaka', phone: '+260 97 000 0000' };
+            }
+
             const { customer, amount, receiptNumber, paymentMethod, reference, notes } = data;
             const printWindow = window.open('', '_blank', 'width=420,height=600,scrollbars=yes');
             if (!printWindow) { safeToast('Please allow popups', 'error'); return; }
-    
+
             printWindow.document.write(`
                 <!DOCTYPE html><html><head><title>Receipt - ${receiptNumber}</title>
                 <style>
@@ -2124,9 +2147,9 @@
                 </style></head>
                 <body>
                     <div class="header">
-                        <h2>GRIFFINS MEDICALS LIMITED</h2>
-                        <p>Plot 3534, Freedomway, Lusaka</p>
-                        <p>Phone: +260 97 000 0000</p>
+                        <h2>${companySettings.company_name}</h2>
+                        <p>${companySettings.address}</p>
+                        <p>Phone: ${companySettings.phone}</p>
                     </div>
                     <div class="receipt-info">
                         <div><span class="label">Receipt #:</span> ${receiptNumber || 'N/A'}</div>

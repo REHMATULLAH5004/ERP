@@ -4,6 +4,25 @@
 <a class="sidebar-menu-item" onclick="loadSubModule('admin', 'roles')">
     <i class="fa-solid fa-user-shield"></i> Roles & Permissions
 </a>
+<!-- 🔥 Clients / Invoicing Settings live in admin-view.html/js now, not
+     their own loadSubModule folders -- see admin-view.js's header
+     comment for why. window.__adminDesiredSection tells that script
+     which section to reveal once loadModule('admin') re-fetches it. -->
+<a class="sidebar-menu-item" onclick="window.__adminDesiredSection='clients'; loadModule('admin');">
+    <i class="fa-solid fa-address-book"></i> Clients
+</a>
+<a class="sidebar-menu-item" onclick="window.__adminDesiredSection='invoicing'; loadModule('admin');">
+    <i class="fa-solid fa-file-invoice"></i> Invoicing Settings
+</a>
+<a class="sidebar-menu-item" onclick="loadSubModule('admin', 'category')">
+    <i class="fa-solid fa-layer-group"></i> Category
+</a>
+<a class="sidebar-menu-item" onclick="loadSubModule('admin', 'brand')">
+    <i class="fa-solid fa-tags"></i> Brand
+</a>
+<a class="sidebar-menu-item" onclick="loadSubModule('admin', 'supplier')">
+    <i class="fa-solid fa-truck"></i> Supplier
+</a>
 <a class="sidebar-menu-item" onclick="loadSubModule('admin', 'backups')">
     <i class="fa-solid fa-database"></i> Backups
 </a>
