@@ -239,9 +239,57 @@
             speechSynthesis.onvoiceschanged = () => { cachedVoice = null; pickVoice(); };
         }
 
+        // 🔥 FIX: known Chrome/Edge bug (chromium issue 679437) -- the
+        // browser's speech engine silently stops producing any audio once
+        // it's gone roughly 15 seconds without speaking, and never
+        // recovers on its own. Confirmed this is exactly the situation
+        // here: a TV display can easily sit for minutes between calls, so
+        // voice would work right after the "Tap to Start" gate, then go
+        // completely silent later with no error anywhere -- looking
+        // "broken" even though the code triggering it is fine. Chrome's
+        // own documented workaround is to periodically pause() then
+        // immediately resume() while nothing is actively mid-sentence --
+        // that resets its internal timer without audibly interrupting
+        // anything. Runs the whole time the page is open, independent of
+        // whether an announcement is currently in progress.
+        if ('speechSynthesis' in window) {
+            setInterval(() => {
+                if (speechSynthesis.speaking) {
+                    speechSynthesis.pause();
+                    speechSynthesis.resume();
+                }
+            }, 10000);
+        }
+
+        // Tracks when the most recent utterance was actually handed to
+        // speechSynthesis, so speak() below can tell "still genuinely
+        // talking" apart from "stuck/jammed" -- see the comment there.
+        let lastSpeakStartedAt = 0;
+        // No real announcement here ever runs anywhere near this long
+        // (even the longest "Token number X. Full Patient Name. Please
+        // proceed to Counter Y." at this rate is a few seconds) -- past
+        // this, speechSynthesis.speaking still reading `true` means the
+        // queue is jammed, not that it's legitimately still talking.
+        const MAX_REALISTIC_UTTERANCE_MS = 8000;
+
         function speak(text) {
             if (!voiceEnabled || !('speechSynthesis' in window)) return;
             try {
+                // 🔥 FIX: if a PREVIOUS utterance got stuck (the same
+                // idle-timeout bug above can also leave one utterance
+                // wedged mid-queue rather than just going idle-silent),
+                // speechSynthesis.speak() below would just queue this new
+                // one behind it forever rather than ever playing it. Only
+                // force-clear when it's been "speaking" for far longer
+                // than any real announcement ever takes -- that's the
+                // signal it's actually jammed, not a genuine second
+                // announcement still legitimately mid-sentence during
+                // back-to-back multi-counter calls (which should be left
+                // alone to finish, not cut off).
+                if (speechSynthesis.speaking && (Date.now() - lastSpeakStartedAt) > MAX_REALISTIC_UTTERANCE_MS) {
+                    speechSynthesis.cancel();
+                }
+                lastSpeakStartedAt = Date.now();
                 const utterance = new SpeechSynthesisUtterance(text);
                 const voice = pickVoice();
                 if (voice) utterance.voice = voice;
@@ -275,10 +323,43 @@
         // ============================================
         let audioCtx = null;
         document.getElementById('soundGateBtn').addEventListener('click', () => {
-            try { audioCtx = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) { /* ignore */ }
+            let audioFailed = false;
+            let speechFailed = false;
+            try {
+                audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+            } catch (e) {
+                console.error('Could not unlock chime audio:', e);
+                audioFailed = true;
+            }
             document.getElementById('soundGate').style.display = 'none';
-            speak('Queue display ready.'); // also unlocks SpeechSynthesis for later, unprompted calls
+            try {
+                speak('Queue display ready.'); // also unlocks SpeechSynthesis for later, unprompted calls
+            } catch (e) {
+                console.error('Could not unlock voice:', e);
+                speechFailed = true;
+            }
+            if (!('speechSynthesis' in window)) speechFailed = true;
             loadAll();
+
+            // 🔥 FIX: previously, if either unlock silently failed (the try/
+            // catch above just swallowed the error), the gate still
+            // vanished and the display looked completely normal from then
+            // on -- exactly what happened here: "everything is okay but
+            // voice is not coming", with no way to tell from the screen
+            // itself that sound never actually unlocked. This makes that
+            // failure visible instead of invisible, right where staff are
+            // already looking, so it's obvious this device/browser needs
+            // attention rather than looking like a mystery.
+            if (audioFailed || speechFailed) {
+                const warn = document.createElement('div');
+                warn.style.cssText = 'position:fixed; top:70px; right:20px; background:#7f1d1d; color:#fecaca; padding:8px 14px; border-radius:8px; font-size:0.8rem; z-index:998; max-width:300px;';
+                warn.textContent = audioFailed && speechFailed
+                    ? '⚠ Sound and voice could not start on this device/browser.'
+                    : audioFailed
+                        ? '⚠ Chime could not start on this device/browser.'
+                        : '⚠ Voice could not start on this device/browser.';
+                document.body.appendChild(warn);
+            }
         });
 
         function chime() {
@@ -363,15 +444,30 @@
 
             countEl.textContent = waitingRows.length;
 
-            if (!recentRows.length) {
-                listEl.innerHTML = '<div class="empty-state">No one called yet today.</div>';
+            // 🔥 CHANGED: this used to be a "recently called" HISTORY list
+            // -- everyone called today, most of them already long done with
+            // this stage. Confirmed from real feedback (viewed on a phone)
+            // that this genuinely doesn't answer the one question someone
+            // sitting in the waiting room actually has: "how many people
+            // are ahead of me, and who's next?" A history of who's already
+            // been served answers a completely different question. This
+            // now shows exactly that instead -- everyone still WAITING for
+            // this stage, in the order they'll be called (same token-number
+            // order the query already sorts by), with the very next person
+            // called out clearly. Nobody in this list has a counter yet
+            // (that's only assigned the moment they're actually called),
+            // so there's nothing counter-related to show per row anymore --
+            // the earlier "Counter 1 ... Done" confusion this replaces
+            // doesn't apply here by construction.
+            if (!waitingRows.length) {
+                listEl.innerHTML = '<div class="empty-state">No one waiting.</div>';
                 return;
             }
 
-            listEl.innerHTML = recentRows.map(r => `
-                <div class="recent-row ${r.status === 'completed' || r.status === 'skipped' ? 'done' : ''}">
+            listEl.innerHTML = waitingRows.map((r, i) => `
+                <div class="recent-row">
                     <span><span class="rn">#${r.token_number}</span> &nbsp; ${r.patient_name}</span>
-                    <span class="rc">${r[counterField] || ''}</span>
+                    ${i === 0 ? '<span class="rc" style="color:#34d399; font-weight:700;">Up Next</span>' : ''}
                 </div>
             `).join('');
         }
