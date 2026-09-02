@@ -57,25 +57,54 @@
 
     async function loadJournalLines() {
         try {
-            const { data, error } = await supabaseClient
-                .from('journal_lines')
-                .select(`
-                    id,
-                    account_code,
-                    debit,
-                    credit,
-                    description,
-                    journal_entries!inner (
-                        entry_date,
-                        journal_number,
-                        status
-                    )
-                `)
-                .eq('journal_entries.status', 'Posted');
+            // 🔥 FIX: this used to be a single unpaginated fetch -- Supabase
+            // (PostgREST) silently caps any query with no .range() at its
+            // default max-rows setting (1000 here) and returns THAT MANY
+            // rows with no error, no warning, nothing to indicate anything
+            // was cut off. Confirmed against real data: this project has
+            // 1250+ Posted journal_lines, so the old query was quietly
+            // dropping ~250 of them -- and because Postgres has no
+            // guaranteed row order without an ORDER BY, the rows that got
+            // cut were effectively the most RECENTLY inserted ones (i.e.
+            // today's), not some random/old subset. That's exactly why
+            // Total Revenue on the Income Statement came out far short of
+            // the real total for a period that included today: today's
+            // NHIMA/Regular sales entries were the ones silently missing
+            // from state.journalLines before every report's date filter
+            // even got a chance to run. Fixed by paging through in batches
+            // of 1000 until a page comes back short, so this always loads
+            // every Posted line regardless of how large the ledger grows.
+            const PAGE_SIZE = 1000;
+            let allLines = [];
+            let offset = 0;
 
-            if (error) throw error;
-            
-            state.journalLines = data || [];
+            while (true) {
+                const { data, error } = await supabaseClient
+                    .from('journal_lines')
+                    .select(`
+                        id,
+                        account_code,
+                        debit,
+                        credit,
+                        description,
+                        journal_entries!inner (
+                            entry_date,
+                            journal_number,
+                            status
+                        )
+                    `)
+                    .eq('journal_entries.status', 'Posted')
+                    .range(offset, offset + PAGE_SIZE - 1);
+
+                if (error) throw error;
+
+                allLines = allLines.concat(data || []);
+
+                if (!data || data.length < PAGE_SIZE) break;
+                offset += PAGE_SIZE;
+            }
+
+            state.journalLines = allLines;
             return state.journalLines;
         } catch (error) {
             console.error('Error loading journal lines:', error);

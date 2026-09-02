@@ -83,25 +83,50 @@
 
     async function loadJournalLines(asOfDate) {
         try {
-            const { data, error } = await supabaseClient
-                .from('journal_lines')
-                .select(`
-                    id,
-                    account_code,
-                    debit,
-                    credit,
-                    description,
-                    journal_entries!inner (
-                        entry_date,
-                        journal_number,
-                        status
-                    )
-                `)
-                .lte('journal_entries.entry_date', asOfDate)
-                .eq('journal_entries.status', 'Posted');
+            // 🔥 FIX: same bug as Financial Statements' loadJournalLines() --
+            // a single unpaginated fetch silently caps at Supabase/PostgREST's
+            // default max-rows (1000), with no error and no way to tell from
+            // the response that anything was cut off. This project already
+            // has 1250+ Posted journal_lines, and since Postgres has no
+            // guaranteed row order without an ORDER BY, the rows most likely
+            // to be missing are the most recently inserted ones -- i.e. the
+            // newest entries, which is exactly backwards from what you'd
+            // want for a report that's supposed to be complete "as of"
+            // today. Fixed by paging through in batches of 1000 until a page
+            // comes back short, so this always loads every matching line
+            // regardless of how large the ledger grows.
+            const PAGE_SIZE = 1000;
+            let allLines = [];
+            let offset = 0;
 
-            if (error) throw error;
-            return data || [];
+            while (true) {
+                const { data, error } = await supabaseClient
+                    .from('journal_lines')
+                    .select(`
+                        id,
+                        account_code,
+                        debit,
+                        credit,
+                        description,
+                        journal_entries!inner (
+                            entry_date,
+                            journal_number,
+                            status
+                        )
+                    `)
+                    .lte('journal_entries.entry_date', asOfDate)
+                    .eq('journal_entries.status', 'Posted')
+                    .range(offset, offset + PAGE_SIZE - 1);
+
+                if (error) throw error;
+
+                allLines = allLines.concat(data || []);
+
+                if (!data || data.length < PAGE_SIZE) break;
+                offset += PAGE_SIZE;
+            }
+
+            return allLines;
         } catch (error) {
             console.error('Error loading journal lines:', error);
             return [];
