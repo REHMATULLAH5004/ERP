@@ -731,9 +731,35 @@
         }
 
         // Generate transaction number
-        const txNumber = editId ? 
+        const txNumber = editId ?
             (state.expenses.find(t => t.id === editId)?.transaction_number || `EXP-${new Date().getFullYear()}-${String(Math.floor(Math.random() * 10000)).padStart(4, '0')}`) :
             `EXP-${new Date().getFullYear()}-${String(Math.floor(Math.random() * 10000)).padStart(4, '0')}`;
+
+        // 🔥 ADDED: this had no double-submit guard at all -- a double
+        // click/press on "Record Expense" fired saveExpense() twice before
+        // the first call's cash_transactions insert even came back, each
+        // generating its OWN random transaction number and posting its OWN
+        // full GL entry, so one click could silently record (and post) the
+        // same expense twice. Locking the button the moment a save
+        // genuinely starts closes that window, same fix already applied to
+        // retail POS's saveTransaction().
+        //
+        // 🔥 ADDED: on top of disabling the button, this now also swaps its
+        // visible label to a spinner + "Saving..." so there is an obvious,
+        // impossible-to-miss visual signal that the save is in progress --
+        // previously the button just silently sat there disabled with no
+        // change in appearance, so users couldn't tell a click had even
+        // registered and would click again.
+        const saveExpenseBtn = document.getElementById('saveExpenseBtn');
+        if (saveExpenseBtn) {
+            if (saveExpenseBtn.disabled) {
+                // Already saving -- ignore this extra click/press entirely.
+                return;
+            }
+            saveExpenseBtn.disabled = true;
+            saveExpenseBtn.dataset.originalHtml = saveExpenseBtn.innerHTML;
+            saveExpenseBtn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Saving...';
+        }
 
         const txData = {
             transaction_number: txNumber,
@@ -793,6 +819,17 @@
         } catch (error) {
             console.error('Error saving expense:', error);
             showToast('Error saving expense: ' + error.message, 'error');
+        } finally {
+            // 🔥 ADDED: guaranteed to run whether the save succeeded or
+            // failed -- the button is never left stuck disabled or stuck
+            // showing "Saving...".
+            if (saveExpenseBtn) {
+                saveExpenseBtn.disabled = false;
+                if (saveExpenseBtn.dataset.originalHtml) {
+                    saveExpenseBtn.innerHTML = saveExpenseBtn.dataset.originalHtml;
+                    delete saveExpenseBtn.dataset.originalHtml;
+                }
+            }
         }
     }
 
