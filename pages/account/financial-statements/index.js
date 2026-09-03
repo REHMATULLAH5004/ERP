@@ -242,14 +242,31 @@
 
     function generateIncomeStatement(startDate, endDate) {
         const balances = state.accountBalances;
-        const revenueAccounts = state.accounts.filter(a => isRevenueType(a) && (balances[a.code]?.period_credit || 0) > 0.01);
-        const expenseAccounts = state.accounts.filter(a => a.type === 'Expense' && (balances[a.code]?.period_debit || 0) > 0.01);
+        // 🔥 FIX: this used to filter/sum by the RAW one-sided
+        // period_credit (revenue) / period_debit (expense) for each
+        // account, completely ignoring the opposite side. That's fine for
+        // an account that only ever gets debited (or only credited) --
+        // but the moment a REVERSAL is posted against it (e.g. deleting a
+        // duplicate expense correctly posts an offsetting credit into that
+        // same expense account, rather than deleting the original entry),
+        // the reversal's credit was silently dropped from the total while
+        // both original debits still counted in full. Confirmed against
+        // real data: a K500 expense double-recorded by an accidental
+        // double-click, with one copy properly reversed, still showed as
+        // K1,000 of expense here even though the ledger's true net balance
+        // for that account was K500. `balances[code].net_balance` (set in
+        // calculateAccountBalances, just above) already nets debit against
+        // credit the correct way for each account's normal-balance side --
+        // using it here instead of the raw one-sided figures is the fix,
+        // for both the filters and every sum/row below.
+        const revenueAccounts = state.accounts.filter(a => isRevenueType(a) && Math.abs(balances[a.code]?.net_balance || 0) > 0.01);
+        const expenseAccounts = state.accounts.filter(a => a.type === 'Expense' && Math.abs(balances[a.code]?.net_balance || 0) > 0.01);
         const cogsAccounts = expenseAccounts.filter(a => a.name.toLowerCase().includes('cogs') || a.name.toLowerCase().includes('cost of goods') || a.name.toLowerCase().includes('cost of sales'));
         const operatingExpenses = expenseAccounts.filter(a => !cogsAccounts.includes(a));
 
-        const totalRevenue = revenueAccounts.reduce((sum, a) => sum + (balances[a.code]?.period_credit || 0), 0);
-        const totalCogs = cogsAccounts.reduce((sum, a) => sum + (balances[a.code]?.period_debit || 0), 0);
-        const totalExpenses = operatingExpenses.reduce((sum, a) => sum + (balances[a.code]?.period_debit || 0), 0);
+        const totalRevenue = revenueAccounts.reduce((sum, a) => sum + (balances[a.code]?.net_balance || 0), 0);
+        const totalCogs = cogsAccounts.reduce((sum, a) => sum + (balances[a.code]?.net_balance || 0), 0);
+        const totalExpenses = operatingExpenses.reduce((sum, a) => sum + (balances[a.code]?.net_balance || 0), 0);
         const grossProfit = totalRevenue - totalCogs;
         const netIncome = grossProfit - totalExpenses;
 
@@ -261,12 +278,12 @@
                 </div>
                 <div class="fs-section">
                     <div class="fs-section-title">Revenue</div>
-                    ${revenueAccounts.map(a => `<div class="fs-row"><span>${a.code} - ${a.name}</span><span class="amount positive">${formatCurrency(balances[a.code]?.period_credit || 0)}</span></div>`).join('') || '<div class="fs-row"><span>No revenue recorded</span><span class="amount">K0.00</span></div>'}
+                    ${revenueAccounts.map(a => `<div class="fs-row"><span>${a.code} - ${a.name}</span><span class="amount positive">${formatCurrency(balances[a.code]?.net_balance || 0)}</span></div>`).join('') || '<div class="fs-row"><span>No revenue recorded</span><span class="amount">K0.00</span></div>'}
                     <div class="fs-total"><span>Total Revenue</span><span class="amount positive">${formatCurrency(totalRevenue)}</span></div>
                 </div>
                 <div class="fs-section">
                     <div class="fs-section-title">Cost of Goods Sold</div>
-                    ${cogsAccounts.map(a => `<div class="fs-row"><span>${a.code} - ${a.name}</span><span class="amount negative">(${formatCurrency(balances[a.code]?.period_debit || 0)})</span></div>`).join('') || '<div class="fs-row"><span>No COGS recorded</span><span class="amount">K0.00</span></div>'}
+                    ${cogsAccounts.map(a => `<div class="fs-row"><span>${a.code} - ${a.name}</span><span class="amount negative">(${formatCurrency(balances[a.code]?.net_balance || 0)})</span></div>`).join('') || '<div class="fs-row"><span>No COGS recorded</span><span class="amount">K0.00</span></div>'}
                     <div class="fs-subtotal"><span>Total COGS</span><span class="amount negative">(${formatCurrency(totalCogs)})</span></div>
                 </div>
                 <div class="fs-subtotal" style="background: #eff6ff; border: none;">
@@ -275,7 +292,7 @@
                 </div>
                 <div class="fs-section" style="margin-top: 25px;">
                     <div class="fs-section-title">Operating Expenses</div>
-                    ${operatingExpenses.map(a => `<div class="fs-row"><span>${a.code} - ${a.name}</span><span class="amount negative">(${formatCurrency(balances[a.code]?.period_debit || 0)})</span></div>`).join('') || '<div class="fs-row"><span>No expenses recorded</span><span class="amount">K0.00</span></div>'}
+                    ${operatingExpenses.map(a => `<div class="fs-row"><span>${a.code} - ${a.name}</span><span class="amount negative">(${formatCurrency(balances[a.code]?.net_balance || 0)})</span></div>`).join('') || '<div class="fs-row"><span>No expenses recorded</span><span class="amount">K0.00</span></div>'}
                     <div class="fs-subtotal"><span>Total Operating Expenses</span><span class="amount negative">(${formatCurrency(totalExpenses)})</span></div>
                 </div>
                 <div class="fs-total" style="border-top: 3px double #0f172a; padding-top: 15px; margin-top: 15px;">
@@ -300,8 +317,12 @@
         const equityAccounts = state.accounts.filter(a => a.type === 'Equity' && Math.abs(balances[a.code]?.net_balance || 0) > 0.01);
 
         // 2a. Calculate Net Income to add to Equity
-        const totalRevenue = state.accounts.filter(a => isRevenueType(a)).reduce((sum, a) => sum + (balances[a.code]?.period_credit || 0), 0);
-        const totalExpenses = state.accounts.filter(a => a.type === 'Expense').reduce((sum, a) => sum + (balances[a.code]?.period_debit || 0), 0);
+        // 🔥 FIX: same net_balance fix as generateIncomeStatement() above --
+        // summing the raw one-sided period_credit/period_debit ignored any
+        // reversal posted against a revenue/expense account, overstating
+        // both. See that function's comment for the full story.
+        const totalRevenue = state.accounts.filter(a => isRevenueType(a)).reduce((sum, a) => sum + (balances[a.code]?.net_balance || 0), 0);
+        const totalExpenses = state.accounts.filter(a => a.type === 'Expense').reduce((sum, a) => sum + (balances[a.code]?.net_balance || 0), 0);
         const netIncome = totalRevenue - totalExpenses;
 
         // 2b. Add Net Income to the display list (so the user sees it!)
@@ -385,8 +406,12 @@
         const balances = state.accountBalances;
         
         // 1. Get Net Income from the current period (reuse P&L logic)
-        const totalRevenue = state.accounts.filter(a => isRevenueType(a)).reduce((sum, a) => sum + (balances[a.code]?.period_credit || 0), 0);
-        const totalExpenses = state.accounts.filter(a => a.type === 'Expense').reduce((sum, a) => sum + (balances[a.code]?.period_debit || 0), 0);
+        // 🔥 FIX: same net_balance fix as generateIncomeStatement() above --
+        // summing the raw one-sided period_credit/period_debit ignored any
+        // reversal posted against a revenue/expense account, overstating
+        // both. See that function's comment for the full story.
+        const totalRevenue = state.accounts.filter(a => isRevenueType(a)).reduce((sum, a) => sum + (balances[a.code]?.net_balance || 0), 0);
+        const totalExpenses = state.accounts.filter(a => a.type === 'Expense').reduce((sum, a) => sum + (balances[a.code]?.net_balance || 0), 0);
         const currentNetIncome = totalRevenue - totalExpenses;
 
         // 2. Find Retained Earnings account (Type Equity, Name contains Retained or code 32xx)
@@ -438,8 +463,12 @@
         const balances = state.accountBalances;
         
         // 1. Get Net Income from current period
-        const totalRevenue = state.accounts.filter(a => isRevenueType(a)).reduce((sum, a) => sum + (balances[a.code]?.period_credit || 0), 0);
-        const totalExpenses = state.accounts.filter(a => a.type === 'Expense').reduce((sum, a) => sum + (balances[a.code]?.period_debit || 0), 0);
+        // 🔥 FIX: same net_balance fix as generateIncomeStatement() above --
+        // summing the raw one-sided period_credit/period_debit ignored any
+        // reversal posted against a revenue/expense account, overstating
+        // both. See that function's comment for the full story.
+        const totalRevenue = state.accounts.filter(a => isRevenueType(a)).reduce((sum, a) => sum + (balances[a.code]?.net_balance || 0), 0);
+        const totalExpenses = state.accounts.filter(a => a.type === 'Expense').reduce((sum, a) => sum + (balances[a.code]?.net_balance || 0), 0);
         const netIncome = totalRevenue - totalExpenses;
 
         // 2. Add back non-cash expenses (Depreciation)
