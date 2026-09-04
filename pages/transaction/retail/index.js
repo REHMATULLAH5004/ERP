@@ -5137,6 +5137,34 @@
         // next patient in.
         let ticket = null;
 
+        // 🔥 FIX: THE BUG -- "Send to Dispatch + Call Next" popup never
+        // showing after saving a sale, even though the "Serving Token #N
+        // ... Saving the sale sends them to Dispensing and calls the next
+        // patient automatically" banner was right there promising it
+        // would. This hook used to be assigned ONLY inside the "INIT"
+        // block further down, which is gated behind
+        // `sessionStorage.getItem('activeQueueTicket')` being ALREADY set
+        // at the exact moment this page first loads -- i.e. only true if
+        // you arrived here via "Open in POS" from the queue bar with a
+        // ticket already in hand. The NORMAL day-to-day flow is the
+        // opposite: sit on this POS page, then click the in-page "Call
+        // Next Patient" button (see initManualCallNextButton() below),
+        // which calls hydrateFormFromTicket() mid-session and correctly
+        // sets `ticket` + shows the banner -- but since nothing was in
+        // sessionStorage at PAGE LOAD, that gated block already returned
+        // early and this hook was simply never wired up for the rest of
+        // that page session. The save handler's guard
+        // (typeof window.__onRetailSaleSaved === 'function') then just
+        // silently found nothing to call. Assigning it here instead --
+        // unconditionally, once, up front -- covers both ways a ticket
+        // can become active. Safe to always wire up: showSendToDispatchPopup()
+        // itself already no-ops via `if (!ticket) return;` whenever
+        // there's no active ticket at all (e.g. a walk-in sale with no
+        // queue ticket involved), so this changes nothing for that case.
+        window.__onRetailSaleSaved = function () {
+            showSendToDispatchPopup();
+        };
+
         // ---- Pre-select the customer + show the "Serving Token #N"
         // banner for whichever ticket is current right now. ----
         function hydrateFormFromTicket(t) {
@@ -5385,7 +5413,9 @@
         })();
 
         // ---- INIT: only do anything if this POS session actually
-        // started from "Open in POS" on the queue bar. ----
+        // started from "Open in POS" on the queue bar. (window.__onRetailSaleSaved
+        // is now wired up unconditionally further up -- see that comment --
+        // so it no longer needs to happen here too.) ----
         const raw = sessionStorage.getItem('activeQueueTicket');
         if (!raw) return;
         let initialTicket;
@@ -5393,15 +5423,6 @@
         if (!initialTicket || !initialTicket.id) return;
 
         hydrateFormFromTicket(initialTicket);
-
-        // 🔥 Generic hook core POS calls unconditionally after every
-        // completed, non-quotation save (see the save handler above) --
-        // a no-op unless there's still an active ticket at that moment
-        // (e.g. it wasn't already sent manually via the banner's own
-        // "Send to Dispensing Now" button).
-        window.__onRetailSaleSaved = function () {
-            showSendToDispatchPopup();
-        };
     } catch (e) {
         console.warn('Queue bridge init failed (non-fatal, POS unaffected):', e);
     }
