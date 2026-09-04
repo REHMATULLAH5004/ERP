@@ -1547,21 +1547,30 @@
         const address = document.getElementById('retailAddress');
         const nhimaNumber = document.getElementById('retailNhimaNumber');
         const claimNumber = document.getElementById('retailClaimNumber');
+        // 🔥 ADDED: the visible search inputs sitting in front of the
+        // NHIMA/Phone selects don't get cleared just by resetting the
+        // hidden select's .value (that assignment doesn't dispatch
+        // 'change', which is what the search-input sync listener in
+        // initSearchableSelect() listens for) -- clear them directly here.
+        const nhimaNumberSearch = document.getElementById('retailNhimaNumberSearch');
 
         if (nhimaName) nhimaName.value = '';
         if (nrc) nrc.value = '';
         if (phone) phone.value = '';
         if (address) address.value = '';
         if (nhimaNumber) nhimaNumber.value = '';
+        if (nhimaNumberSearch) nhimaNumberSearch.value = '';
         if (claimNumber) claimNumber.value = '';
 
         const regName = document.getElementById('retailRegName');
         const regAddress = document.getElementById('retailRegAddress');
         const regPhone = document.getElementById('retailRegPhone');
+        const regPhoneSearch = document.getElementById('retailRegPhoneSearch');
 
         if (regName) regName.value = '';
         if (regAddress) regAddress.value = '';
         if (regPhone) regPhone.value = '';
+        if (regPhoneSearch) regPhoneSearch.value = '';
 
         if (clientHistoryContainer) {
             clientHistoryContainer.style.display = 'none';
@@ -2666,6 +2675,12 @@
     // resize/outside-click rather than re-tracked, since it's only ever open
     // for the few seconds it takes to search and pick.
     let searchPanelRow = null;
+    // 🔥 ADDED: keyboard-nav state for the panel -- which rows currently
+    // matched the query, and which one is highlighted (Down/Up moves this,
+    // Enter/Tab picks it). Kept at module scope alongside searchPanelRow
+    // since only one panel is ever open at a time.
+    let searchPanelMatches = [];
+    let searchPanelHighlightIndex = -1;
 
     function getOrCreateSearchPanel() {
         let panel = document.getElementById('retailItemSearchPanel');
@@ -2682,6 +2697,8 @@
         const panel = document.getElementById('retailItemSearchPanel');
         if (panel) panel.style.display = 'none';
         searchPanelRow = null;
+        searchPanelMatches = [];
+        searchPanelHighlightIndex = -1;
     }
 
     function positionItemSearchPanel(panel, input) {
@@ -2689,6 +2706,27 @@
         panel.style.left = `${Math.round(rect.left)}px`;
         panel.style.top = `${Math.round(rect.bottom + 4)}px`;
         panel.style.width = `${Math.max(240, Math.round(rect.width))}px`;
+    }
+
+    // 🔥 ADDED: split out from renderItemSearchResults() so ArrowUp/ArrowDown
+    // can just re-paint the highlight without re-filtering productCatalog
+    // on every keypress.
+    function renderItemSearchResultsHtml(panel) {
+        if (searchPanelMatches.length === 0) {
+            panel.innerHTML = `<div style="padding:10px 12px; color:#94a3b8;">No matching products.</div>`;
+        } else {
+            panel.innerHTML = searchPanelMatches.map((p, i) => `
+                <div class="retail-item-search-result" data-index="${i}" data-id="${p.id}" style="padding:8px 12px; cursor:pointer; border-bottom:1px solid #f1f5f9; ${i === searchPanelHighlightIndex ? 'background:#eff6ff;' : ''}">
+                    <div style="font-weight:600; color:#0f172a;">${p.product_name}</div>
+                    ${p.generic_name ? `<div style="font-size:0.72rem; color:#94a3b8;">${p.generic_name}</div>` : ''}
+                </div>
+            `).join('');
+        }
+    }
+
+    function scrollItemSearchHighlightIntoView(panel) {
+        const el = panel.querySelector(`.retail-item-search-result[data-index="${searchPanelHighlightIndex}"]`);
+        if (el) el.scrollIntoView({ block: 'nearest' });
     }
 
     function renderItemSearchResults(row, input, query) {
@@ -2704,17 +2742,12 @@
             ).slice(0, 30)
             : productCatalog.slice(0, 30);
 
-        if (matches.length === 0) {
-            panel.innerHTML = `<div style="padding:10px 12px; color:#94a3b8;">No matching products.</div>`;
-        } else {
-            panel.innerHTML = matches.map(p => `
-                <div class="retail-item-search-result" data-id="${p.id}" style="padding:8px 12px; cursor:pointer; border-bottom:1px solid #f1f5f9;">
-                    <div style="font-weight:600; color:#0f172a;">${p.product_name}</div>
-                    ${p.generic_name ? `<div style="font-size:0.72rem; color:#94a3b8;">${p.generic_name}</div>` : ''}
-                </div>
-            `).join('');
-        }
+        searchPanelMatches = matches;
+        // 🔥 ADDED: first result starts highlighted so an immediate
+        // Enter/Tab (without ever touching the mouse) picks the top match.
+        searchPanelHighlightIndex = matches.length ? 0 : -1;
 
+        renderItemSearchResultsHtml(panel);
         positionItemSearchPanel(panel, input);
         panel.style.display = 'block';
     }
@@ -2733,6 +2766,16 @@
         hideItemSearchPanel();
     }
 
+    // 🔥 ADDED: pick whichever result is currently highlighted (used by
+    // Enter and Tab). Returns false (does nothing) if the panel has no
+    // matches -- e.g. an empty query with no products loaded yet -- so the
+    // caller knows whether to let the key's default behavior continue.
+    function selectHighlightedItemSearchResult() {
+        if (searchPanelHighlightIndex < 0 || !searchPanelMatches[searchPanelHighlightIndex]) return false;
+        selectItemSearchResult(searchPanelMatches[searchPanelHighlightIndex].id);
+        return true;
+    }
+
     // mousedown (not click) + preventDefault so the search input never
     // blurs before the pick registers -- the classic combobox gotcha.
     document.addEventListener('mousedown', function (e) {
@@ -2745,6 +2788,40 @@
             return;
         }
         if (!e.target.closest('#retailItemSearchPanel') && !e.target.classList.contains('retail-pos-item-search')) {
+            hideItemSearchPanel();
+        }
+    });
+
+    // 🔥 ADDED: keyboard navigation for the product search panel -- Down/Up
+    // moves the highlight, Enter picks it (and stays put), Tab picks it
+    // too but WITHOUT preventDefault so focus still naturally advances to
+    // whatever field comes next (the hidden <select> itself is display:none
+    // and so never receives Tab focus), Escape closes the panel. Delegated
+    // on posTableBody (like the other item-search listeners) since rows
+    // are added/removed dynamically.
+    posTableBody.addEventListener('keydown', function (e) {
+        if (!e.target.classList.contains('retail-pos-item-search')) return;
+        const panel = document.getElementById('retailItemSearchPanel');
+        const isOpen = panel && panel.style.display !== 'none' && searchPanelRow === e.target.closest('tr');
+        if (!isOpen) return;
+
+        if (e.key === 'ArrowDown') {
+            e.preventDefault();
+            if (!searchPanelMatches.length) return;
+            searchPanelHighlightIndex = Math.min(searchPanelHighlightIndex + 1, searchPanelMatches.length - 1);
+            renderItemSearchResultsHtml(panel);
+            scrollItemSearchHighlightIntoView(panel);
+        } else if (e.key === 'ArrowUp') {
+            e.preventDefault();
+            if (!searchPanelMatches.length) return;
+            searchPanelHighlightIndex = Math.max(searchPanelHighlightIndex - 1, 0);
+            renderItemSearchResultsHtml(panel);
+            scrollItemSearchHighlightIntoView(panel);
+        } else if (e.key === 'Enter') {
+            if (selectHighlightedItemSearchResult()) e.preventDefault();
+        } else if (e.key === 'Tab') {
+            selectHighlightedItemSearchResult();
+        } else if (e.key === 'Escape') {
             hideItemSearchPanel();
         }
     });
@@ -2793,6 +2870,217 @@
             console.warn("Could not load customers:", e);
         }
     }
+
+    // ============================================
+    // 🔥 ADDED: SEARCHABLE COMBOBOX for plain native <select>s (NHIMA
+    // Number, Regular Phone Number) -- mirrors the product-search box
+    // above (visible text input in front of a hidden <select>, floating
+    // results panel, mousedown-to-pick, Down/Up/Enter/Tab/Escape), but
+    // does PREFIX (startsWith) matching instead of substring -- narrows
+    // one digit at a time as the cashier types, instead of the old plain
+    // <select> which relied on the browser's own inconsistent typeahead
+    // across a very long list of numbers ("looking for every number at
+    // once"). Reads the option list live off the underlying <select> each
+    // time the panel opens, so it always reflects whatever
+    // loadNhimaDropdown()/loadPhoneDropdown() most recently populated --
+    // no separate cache to keep in sync.
+    // ============================================
+    // 🔥 ADDED: optional `normalize` -- by default the match term is just
+    // lowercased (exact prefix match, e.g. NHIMA numbers, which are stored
+    // as plain digit strings and match exactly what's typed). Phone
+    // numbers need something smarter: they're stored as
+    // "+260771248060" (country code included), but a cashier naturally
+    // types "0771...", "771..." or "260771..." -- none of which are a
+    // literal prefix of the stored value, so plain startsWith() would
+    // silently never match. normalizePhoneForMatch() below strips
+    // everything down to a comparable "core" digit string on both sides.
+    function normalizePhoneForMatch(raw) {
+        let digits = (raw || '').replace(/\D/g, '');
+        if (digits.startsWith('260')) digits = digits.slice(3);
+        else if (digits.startsWith('0')) digits = digits.slice(1);
+        return digits;
+    }
+
+    function initSearchableSelect({ searchInputId, selectId, panelId, normalize, matchMode }) {
+        const searchInput = document.getElementById(searchInputId);
+        const select = document.getElementById(selectId);
+        if (!searchInput || !select) return;
+        const normalizeFn = normalize || (v => (v || '').toLowerCase());
+        // 🔥 'prefix' (default) = must start with what's typed -- fine for
+        // NHIMA numbers, which are always typed/read from the first digit.
+        // 'contains' = the typed digits can appear ANYWHERE in the
+        // (normalized) number -- phone numbers need this: a cashier often
+        // remembers the middle/last digits of a number rather than always
+        // starting from the very first one, and it still narrows correctly
+        // as more digits are typed (each extra digit only keeps numbers
+        // that still contain the longer string, so typing "123" then "4"
+        // narrows from "contains 123" down to "contains 1234", never
+        // resets).
+        const mode = matchMode || 'prefix';
+
+        let panel = document.getElementById(panelId);
+        if (!panel) {
+            panel = document.createElement('div');
+            panel.id = panelId;
+            panel.style.cssText = 'display:none; position:fixed; z-index:2000; background:white; border:1px solid #e2e8f0; border-radius:8px; box-shadow:0 12px 28px rgba(15,23,42,0.18); max-height:260px; overflow-y:auto; font-size:0.82rem;';
+            document.body.appendChild(panel);
+        }
+
+        let matches = [];
+        let highlightIndex = -1;
+
+        function liveOptions() {
+            return Array.from(select.options).filter(o => o.value !== '').map(o => o.value);
+        }
+
+        function position() {
+            const rect = searchInput.getBoundingClientRect();
+            panel.style.left = `${Math.round(rect.left)}px`;
+            panel.style.top = `${Math.round(rect.bottom + 4)}px`;
+            panel.style.width = `${Math.max(180, Math.round(rect.width))}px`;
+        }
+
+        function render() {
+            if (matches.length === 0) {
+                panel.innerHTML = `<div style="padding:10px 12px; color:#94a3b8;">No matches.</div>`;
+                return;
+            }
+            panel.innerHTML = matches.map((v, i) => `
+                <div class="searchable-select-result" data-index="${i}" data-value="${v}" style="padding:8px 12px; cursor:pointer; border-bottom:1px solid #f1f5f9; ${i === highlightIndex ? 'background:#eff6ff;' : ''}">${v}</div>
+            `).join('');
+        }
+
+        function scrollHighlightIntoView() {
+            const el = panel.querySelector(`.searchable-select-result[data-index="${highlightIndex}"]`);
+            if (el) el.scrollIntoView({ block: 'nearest' });
+        }
+
+        function hide() {
+            panel.style.display = 'none';
+            matches = [];
+            highlightIndex = -1;
+        }
+
+        function show(query) {
+            const term = normalizeFn(query.trim());
+            const all = liveOptions();
+            matches = (term
+                ? all.filter(v => {
+                    const nv = normalizeFn(v);
+                    return mode === 'contains' ? nv.includes(term) : nv.startsWith(term);
+                })
+                : all
+            ).slice(0, 30);
+            highlightIndex = matches.length ? 0 : -1;
+            render();
+            position();
+            panel.style.display = 'block';
+        }
+
+        function commit(value) {
+            select.value = value;
+            // 🔥 Set the visible text directly here rather than relying
+            // solely on the 'change' listener below -- see that
+            // listener's comment for why it now skips updating while this
+            // input is focused.
+            searchInput.value = value || '';
+            select.dispatchEvent(new Event('change', { bubbles: true }));
+            hide();
+        }
+
+        function selectHighlighted() {
+            if (highlightIndex < 0 || !matches[highlightIndex]) return false;
+            commit(matches[highlightIndex]);
+            return true;
+        }
+
+        searchInput.addEventListener('focus', () => {
+            searchInput.select();
+            show(searchInput.value);
+        });
+        searchInput.addEventListener('input', () => show(searchInput.value));
+        searchInput.addEventListener('keydown', (e) => {
+            if (panel.style.display === 'none') return;
+            if (e.key === 'ArrowDown') {
+                e.preventDefault();
+                if (!matches.length) return;
+                highlightIndex = Math.min(highlightIndex + 1, matches.length - 1);
+                render();
+                scrollHighlightIntoView();
+            } else if (e.key === 'ArrowUp') {
+                e.preventDefault();
+                if (!matches.length) return;
+                highlightIndex = Math.max(highlightIndex - 1, 0);
+                render();
+                scrollHighlightIntoView();
+            } else if (e.key === 'Enter') {
+                if (selectHighlighted()) e.preventDefault();
+            } else if (e.key === 'Tab') {
+                selectHighlighted();
+            } else if (e.key === 'Escape') {
+                hide();
+            }
+        });
+
+        // mousedown (not click) + preventDefault so the search input never
+        // blurs before the pick registers.
+        document.addEventListener('mousedown', (e) => {
+            if (panel.style.display === 'none') return;
+            const result = e.target.closest(`#${panelId} .searchable-select-result`);
+            if (result) {
+                e.preventDefault();
+                commit(result.dataset.value);
+                return;
+            }
+            if (!e.target.closest(`#${panelId}`) && e.target !== searchInput) {
+                hide();
+            }
+        });
+
+        window.addEventListener('scroll', () => hide(), true);
+        window.addEventListener('resize', () => hide());
+
+        // 🔥 THE ACTUAL BUG behind "typing resets after a pause": this
+        // listener used to unconditionally overwrite the visible search
+        // text on EVERY 'change' from the underlying select -- including
+        // one dispatched by the queue bridge's pollForOptionAndSelect(),
+        // which retries every 300ms for up to ~4.5s after a patient is
+        // called in to auto-fill their NHIMA/phone number. If a cashier
+        // was mid-search for a DIFFERENT person during that same window
+        // (very common -- calling a patient in is usually the first thing
+        // that happens before billing), the poll's eventual match would
+        // silently stomp whatever they'd already typed, making it look
+        // like the search "started over". Now this only auto-syncs when
+        // the search box does NOT currently have focus -- i.e. only for
+        // background/programmatic updates (loadSaleForEdit(), the "+"
+        // add-new-member/customer flows, the queue bridge) that happen
+        // while the cashier isn't actively typing here. A pick the
+        // cashier makes THEMSELVES (click or keyboard) still updates
+        // instantly via commit() above, regardless of focus.
+        select.addEventListener('change', () => {
+            if (document.activeElement === searchInput) return;
+            searchInput.value = select.value || '';
+        });
+
+        // Reflect whatever the select already holds at init time (e.g. if
+        // it was populated before this ran).
+        searchInput.value = select.value || '';
+    }
+
+    initSearchableSelect({ searchInputId: 'retailNhimaNumberSearch', selectId: 'retailNhimaNumber', panelId: 'retailNhimaSearchPanel' });
+    // 🔥 Phone numbers in the `customers` table are stored with the
+    // "+260" country code (confirmed via the actual data), so this one
+    // needs normalizePhoneForMatch() -- plain prefix matching on the raw
+    // string would never match how a cashier actually types a number.
+    // 🔥 CHANGED BACK to 'prefix' -- confirmed with the user they want
+    // matching from the number's actual starting point (i.e. the start of
+    // the LOCAL number, after normalizePhoneForMatch() strips the +260
+    // country code / leading 0), not "contains these digits anywhere".
+    // Typing "123" then "4" still narrows correctly with prefix matching,
+    // since both searches read the input's full current value each
+    // keystroke -- "123" matches local numbers starting 123…, "1234"
+    // matches local numbers starting 1234…, a strict subset of the first.
+    initSearchableSelect({ searchInputId: 'retailRegPhoneSearch', selectId: 'retailRegPhone', panelId: 'retailRegPhoneSearchPanel', normalize: normalizePhoneForMatch });
 
     function generateNextSaleId() {
         // 🔥 FIX: a fresh generated invoice number means this is a NEW sale
@@ -4868,7 +5156,12 @@
             document.getElementById('queueBridgeBanner')?.remove();
             const banner = document.createElement('div');
             banner.id = 'queueBridgeBanner';
-            banner.style.cssText = 'display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap; background:#eff6ff; border:1px solid #bfdbfe; color:#1e3a8a; padding:10px 16px; border-radius:8px; margin-bottom:14px; font-size:0.85rem;';
+            // 🔥 CHANGED: rounded/shadowed to match the .pos-card language
+            // used everywhere else on this screen (12px radius, subtle
+            // shadow) instead of the flatter 8px box this was before --
+            // part of the same "looks quite rushed" cleanup as the Call
+            // Next card above.
+            banner.style.cssText = 'display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap; background:#eff6ff; border:1px solid #bfdbfe; color:#1e3a8a; padding:12px 16px; border-radius:12px; margin-bottom:16px; font-size:0.85rem; box-shadow:0 1px 3px rgba(15,23,42,0.06);';
             banner.innerHTML = `
                 <span><i class="fa-solid fa-ticket" style="color:#2563eb;"></i>
                     Serving <strong>Token #${ticket.tokenNumber}</strong> -- ${ticket.patientName}.
@@ -4876,7 +5169,7 @@
                 </span>
                 <span style="display:flex; gap:8px;">
                     <button type="button" id="queueBridgeSendBtn" class="btn btn-success btn-sm"><i class="fa-solid fa-check"></i> Send to Dispensing Now</button>
-                    <button type="button" id="queueBridgeDismissBtn" class="btn btn-outline btn-sm">Dismiss</button>
+                    <button type="button" id="queueBridgeDismissBtn" class="btn btn-outline btn-sm"><i class="fa-solid fa-clock"></i> Send to Pending (No-Show)</button>
                 </span>
             `;
             workspaceContent.insertAdjacentElement('afterbegin', banner);
@@ -4894,10 +5187,31 @@
                     setTimeout(() => b.remove(), 4000);
                 }
             });
-            document.getElementById('queueBridgeDismissBtn')?.addEventListener('click', () => {
+            // 🔥 FIX: "Dismiss" used to only clear this browser tab's own
+            // sessionStorage -- it never touched the database at all, so
+            // the ticket stayed stuck on status='serving_billing' forever
+            // (never shown as waiting, pending, or skipped anywhere,
+            // effectively lost). A no-show now properly moves to
+            // 'pending' via send_ticket_to_pending() -- visible in the
+            // Pending (No-Show) list on the CRM registration screen,
+            // where staff recall the patient as PRIORITY the moment they
+            // actually turn up -- and immediately calls the next waiting
+            // billing patient into this same counter, same as finishing
+            // a sale does.
+            document.getElementById('queueBridgeDismissBtn')?.addEventListener('click', async () => {
+                if (!ticket) return;
+                if (!confirm(`Send Token #${ticket.tokenNumber} (${ticket.patientName}) to Pending? They'll be off this counter and can be recalled as priority once they arrive.`)) return;
+                const dismissed = ticket;
+                try {
+                    await supabaseClient.rpc('send_ticket_to_pending', { p_ticket_id: dismissed.id });
+                } catch (e) {
+                    console.warn('Queue bridge: could not send ticket to pending:', e);
+                }
                 sessionStorage.removeItem('activeQueueTicket');
                 document.getElementById('queueBridgeBanner')?.remove();
                 ticket = null;
+                showQueueToast(`Token #${dismissed.tokenNumber} sent to Pending. `, true);
+                await callNextForThisCounter(null);
             });
         }
 
