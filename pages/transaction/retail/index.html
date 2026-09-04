@@ -202,8 +202,14 @@
                      entirely unless this login is actually working a
                      billing counter (Counter 1/2/3) -- see
                      initQueueBridge() in index.js. -->
-                <div id="retailCallNextWrap" style="display:none; margin-bottom:14px;">
-                    <button id="retailCallNextBtn" type="button" style="width:100%; background:#2563eb; color:white; border:none; padding:10px 10px; border-radius:7px; font-weight:600; font-size:0.82rem; cursor:pointer; display:flex; align-items:center; justify-content:center; gap:8px;">
+                <!-- 🔥 CHANGED: was a flat colored button dropped straight
+                     into the page; now sits in its own small card so it
+                     reads as one deliberate control instead of a bolted-on
+                     afterthought, matching the .pos-card language used
+                     everywhere else on this screen. -->
+                <div id="retailCallNextWrap" style="display:none; margin-bottom:16px; background:#f8fafc; border:1px solid #e8edf3; border-radius:12px; padding:12px;">
+                    <div style="font-size:0.7rem; font-weight:700; letter-spacing:0.04em; text-transform:uppercase; color:#94a3b8; margin-bottom:8px;">Billing Queue</div>
+                    <button id="retailCallNextBtn" type="button" style="width:100%; background:#2563eb; color:white; border:none; padding:10px 10px; border-radius:8px; font-weight:600; font-size:0.82rem; cursor:pointer; display:flex; align-items:center; justify-content:center; gap:8px; box-shadow:0 1px 2px rgba(37,99,235,0.25);">
                         <span id="retailCallNextBtnLabel"><i class="fa-solid fa-forward"></i> Call Next Patient</span>
                         <span id="retailCallNextWaitingBadge" style="background:rgba(255,255,255,0.25); padding:1px 8px; border-radius:10px; font-size:0.72rem;">0 waiting</span>
                     </button>
@@ -213,10 +219,19 @@
                     <!-- NHIMA Number & NRC -->
                     <div class="pos-form-group">
                         <label class="pos-label">NHIMA Number</label>
+                        <!-- 🔥 CHANGED: plain native <select> replaced with a
+                             searchable combobox (visible text input in front,
+                             the select kept underneath/hidden) -- prefix
+                             search + keyboard nav wired up in index.js's
+                             initSearchableSelect(). See the product-search
+                             box further down the page for the same pattern. -->
                         <div style="display: flex; gap: 6px;">
-                            <select id="retailNhimaNumber" class="pos-select">
-                                <option value="">Select NHIMA member</option>
-                            </select>
+                            <div style="position:relative; flex:1; min-width:0;">
+                                <input type="text" id="retailNhimaNumberSearch" class="retail-pos-item-search" placeholder="Search NHIMA number…" autocomplete="off">
+                                <select id="retailNhimaNumber" class="pos-select" style="display:none;">
+                                    <option value="">Select NHIMA member</option>
+                                </select>
+                            </div>
                             <button id="addNhimaBtn" type="button" style="background: #10b981; color: white; border: none; width: 34px; border-radius: 6px; cursor: pointer; font-size: 0.9rem; flex-shrink: 0;">+</button>
                         </div>
                     </div>
@@ -246,19 +261,27 @@
                 </div>
 
                 <!-- Regular/Online/Staff Fields -->
+                <!-- 🔥 CHANGED: Phone moved ahead of Full Name -- phone
+                     number is how a cashier actually looks a regular
+                     customer up, so it should be the first thing typed,
+                     not the second. Phone is also now a searchable
+                     combobox (prefix search) instead of a plain <select>. -->
                 <div id="retailRegularFields" style="display: none;">
-                    <div class="pos-form-group">
-                        <label class="pos-label">Full Name</label>
-                        <input type="text" id="retailRegName" class="pos-input">
-                    </div>
                     <div class="pos-form-group">
                         <label class="pos-label">Phone</label>
                         <div style="display: flex; gap: 6px;">
-                            <select id="retailRegPhone" class="pos-select">
-                                <option value="">Select Phone</option>
-                            </select>
+                            <div style="position:relative; flex:1; min-width:0;">
+                                <input type="text" id="retailRegPhoneSearch" class="retail-pos-item-search" placeholder="Search phone number…" autocomplete="off">
+                                <select id="retailRegPhone" class="pos-select" style="display:none;">
+                                    <option value="">Select Phone</option>
+                                </select>
+                            </div>
                             <button id="addPhoneBtn" type="button" style="background: #10b981; color: white; border: none; width: 34px; border-radius: 6px; cursor: pointer; font-size: 0.9rem; flex-shrink: 0;">+</button>
                         </div>
+                    </div>
+                    <div class="pos-form-group">
+                        <label class="pos-label">Full Name</label>
+                        <input type="text" id="retailRegName" class="pos-input">
                     </div>
                     <div class="pos-form-group">
                         <label class="pos-label">Address</label>
