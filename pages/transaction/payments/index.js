@@ -10,6 +10,33 @@
         return;
     }
 
+    // 🔥 FIX: "Cannot read properties of null (reading 'addEventListener')
+    // at setupEventListeners" -- this whole module is one async IIFE that
+    // awaits 7 separate Supabase round trips (below) before it ever wires
+    // up the DOM. app.js's loadSubModule() already guards against a STALE
+    // fetch injecting HTML/a script over a newer navigation (see its
+    // navToken comment), but that guard only covers the injection step --
+    // it can't stop an ALREADY-INJECTED script's own async chain from
+    // continuing to run in the background after the user navigates away
+    // (removing the <script> tag doesn't cancel code already executing).
+    // If the user leaves Payments -- or re-opens it quickly -- while any
+    // of those awaits are still in flight, this exact run keeps going,
+    // and eventually reaches setupEventListeners() trying to attach
+    // listeners to #paymentSupplier etc., which by then belong to
+    // whatever page replaced this one and are simply gone from the DOM.
+    //
+    // Fix: capture a sentinel element reference right now, synchronously,
+    // at the instant this script starts executing (guaranteed to exist
+    // then -- loadSubModule() injects this module's HTML immediately
+    // before injecting this script). Its .isConnected flips to false the
+    // moment ANY later navigation replaces workspace-content, which is
+    // exactly the signal needed to detect "this run is stale" after the
+    // long await chain below.
+    const paymentModuleSentinel = document.getElementById('paymentModal');
+    function paymentModuleStillMounted() {
+        return !!(paymentModuleSentinel && paymentModuleSentinel.isConnected);
+    }
+
     // ============================================
     // GLOBAL STATE
     // ============================================
@@ -1708,10 +1735,19 @@
     await loadSupplierPayables();
     await loadGRNs();
     await loadPaymentInvoices();
-    
+
+    // 🔥 If the user navigated away from Payments at any point during the
+    // 7 awaits above, this DOM no longer belongs to this run -- stop here
+    // instead of crashing on elements that aren't there anymore. See the
+    // paymentModuleSentinel comment near the top of this file.
+    if (!paymentModuleStillMounted()) {
+        console.log('ℹ️ Payment module: navigated away before init finished -- skipping DOM setup for this stale run.');
+        return;
+    }
+
     const supplierData = calculateSupplierBalances();
     renderPaymentList(supplierData);
     setupEventListeners();
-    
+
     console.log("✅ Payment module initialized successfully!");
 })();
