@@ -707,8 +707,28 @@
     
         function calculateRetailReceivables() {
             const retailSubTypes = ['REGULAR', 'ONLINE', 'STAFF'];
-            const retailSales = state.sales.filter(sale => 
+            // 🔥 FIX: THE BIG BUG -- this used to include EVERY retail sale
+            // regardless of how it was paid, so a Cash (or Bank Transfer /
+            // Airtel Money) sale -- fully paid at the till, with its own
+            // Debit Cash / Credit Sales journal entry already posted the
+            // moment it was saved in the POS -- showed up here as if the
+            // full amount were still owed. Clicking "Receive" on one of
+            // those posted a SECOND, bogus payment entry for money that
+            // was already accounted for, on top of an Accounts Receivable
+            // credit that was never actually debited in the first place
+            // (because a Cash sale never touches AR at all). Confirmed
+            // directly against the data: every current REGULAR sale is
+            // payment.type "Cash" with status "COMPLETED", so all 9 of
+            // them were incorrectly sitting in this list.
+            //
+            // Only a 'Credit' sale ever creates a real receivable -- that's
+            // the one case where the POS debited Accounts Receivable
+            // instead of Cash/Bank at the time of sale (see retail's
+            // saveTransaction() accounting block), so it's the only case
+            // where a LATER "Receive Payment" here is correct at all.
+            const retailSales = state.sales.filter(sale =>
                 retailSubTypes.includes(sale.client_sub_type) &&
+                sale.payment?.type === 'Credit' &&
                 sale.status !== 'Paid' && sale.status !== 'Rejected'
             );
     
@@ -717,7 +737,24 @@
                 const data = sale.customer_data || {};
                 const key = data.phone || data.full_name || 'unknown';
                 if (!customerMap[key]) {
-                    const customer = state.customers.find(c => c.phone === data.phone || c.full_name === data.full_name);
+                    // 🔥 FIX: SECOND bug found alongside the Cash-sale one --
+                    // this searched state.customers (which merges NHIMA
+                    // members + regular customers + wholesale customers
+                    // into one array, NHIMA members listed FIRST) with no
+                    // _source filter at all. If an NHIMA member happened to
+                    // share a phone number or name with this REGULAR/
+                    // ONLINE/STAFF customer, .find() matched the NHIMA
+                    // record instead -- which is exactly why "NHIMA" badges
+                    // were showing up under Retail Receivables. Worse, it
+                    // also meant this entry's _customerId pointed at the
+                    // WRONG customer, so payments looked up via
+                    // state.receipts.filter(r => r.customer_id ===
+                    // entry.customer._customerId) below could get matched
+                    // to the wrong person's receipts. Scoped to
+                    // _source === 'customers' now -- the same scoping
+                    // calculateWholesaleReceivables() already correctly
+                    // does for its own lookup (_source === 'wholesale').
+                    const customer = state.customers.find(c => c._source === 'customers' && (c.phone === data.phone || c.full_name === data.full_name));
                     customerMap[key] = {
                         customer: customer || {
                             _displayName: data.full_name || 'Unknown',
@@ -750,8 +787,15 @@
         }
     
         function calculateWholesaleReceivables() {
-            const wholesaleSales = state.sales.filter(sale => 
+            // 🔥 FIX: same bug as calculateRetailReceivables() above --
+            // wholesale uses the identical payment.type convention
+            // ('Credit' | 'Cash' | 'Bank Transfer' | ...), so a Cash/Bank
+            // wholesale sale was being counted as fully outstanding here
+            // too, even though it was already paid and posted at time of
+            // sale. Only 'Credit' sales are real receivables.
+            const wholesaleSales = state.sales.filter(sale =>
                 sale.client_type === 'WHOLESALE' &&
+                sale.payment?.type === 'Credit' &&
                 sale.status !== 'Paid' && sale.status !== 'Rejected'
             );
     
