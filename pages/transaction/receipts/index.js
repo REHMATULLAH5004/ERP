@@ -707,8 +707,28 @@
     
         function calculateRetailReceivables() {
             const retailSubTypes = ['REGULAR', 'ONLINE', 'STAFF'];
-            const retailSales = state.sales.filter(sale => 
+            // 🔥 FIX: THE BIG BUG -- this used to include EVERY retail sale
+            // regardless of how it was paid, so a Cash (or Bank Transfer /
+            // Airtel Money) sale -- fully paid at the till, with its own
+            // Debit Cash / Credit Sales journal entry already posted the
+            // moment it was saved in the POS -- showed up here as if the
+            // full amount were still owed. Clicking "Receive" on one of
+            // those posted a SECOND, bogus payment entry for money that
+            // was already accounted for, on top of an Accounts Receivable
+            // credit that was never actually debited in the first place
+            // (because a Cash sale never touches AR at all). Confirmed
+            // directly against the data: every current REGULAR sale is
+            // payment.type "Cash" with status "COMPLETED", so all 9 of
+            // them were incorrectly sitting in this list.
+            //
+            // Only a 'Credit' sale ever creates a real receivable -- that's
+            // the one case where the POS debited Accounts Receivable
+            // instead of Cash/Bank at the time of sale (see retail's
+            // saveTransaction() accounting block), so it's the only case
+            // where a LATER "Receive Payment" here is correct at all.
+            const retailSales = state.sales.filter(sale =>
                 retailSubTypes.includes(sale.client_sub_type) &&
+                sale.payment?.type === 'Credit' &&
                 sale.status !== 'Paid' && sale.status !== 'Rejected'
             );
     
@@ -750,8 +770,15 @@
         }
     
         function calculateWholesaleReceivables() {
-            const wholesaleSales = state.sales.filter(sale => 
+            // 🔥 FIX: same bug as calculateRetailReceivables() above --
+            // wholesale uses the identical payment.type convention
+            // ('Credit' | 'Cash' | 'Bank Transfer' | ...), so a Cash/Bank
+            // wholesale sale was being counted as fully outstanding here
+            // too, even though it was already paid and posted at time of
+            // sale. Only 'Credit' sales are real receivables.
+            const wholesaleSales = state.sales.filter(sale =>
                 sale.client_type === 'WHOLESALE' &&
+                sale.payment?.type === 'Credit' &&
                 sale.status !== 'Paid' && sale.status !== 'Rejected'
             );
     

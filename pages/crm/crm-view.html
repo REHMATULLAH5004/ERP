@@ -63,6 +63,17 @@
                     </div>
                 </div>
 
+                <!-- 🔥 ADDED: mark this patient as priority right at
+                     registration -- their token still gets a normal
+                     sequential number (so the printed slip and
+                     "recently registered" list stay in order), but
+                     call_next_ticket() always calls priority tickets
+                     ahead of everyone else waiting in that stage. -->
+                <div class="form-group" style="display:flex; align-items:center; gap:8px; background:#fff7ed; border:1px solid #fed7aa; border-radius:8px; padding:10px 12px;">
+                    <input type="checkbox" id="qregPriority" style="width:16px; height:16px; margin:0; cursor:pointer;">
+                    <label for="qregPriority" style="margin:0; cursor:pointer; font-weight:600; color:#9a3412;"><i class="fa-solid fa-star" style="color:#f59e0b;"></i> Priority patient -- call next, ahead of the line</label>
+                </div>
+
                 <button type="submit" id="qregSubmitBtn" class="btn btn-primary" style="width:100%; justify-content:center; padding:12px;">
                     <i class="fa-solid fa-ticket"></i> Register &amp; Issue Token
                 </button>
@@ -87,13 +98,37 @@
 
             <div class="card" style="padding:0;">
                 <div style="padding: 12px 20px; border-bottom: 1px solid #e8edf3; display:flex; justify-content:space-between; align-items:center;">
-                    <strong><i class="fa-solid fa-clock-rotate-left" style="color:#2563eb;"></i> Recently Registered</strong>
+                    <strong><i class="fa-solid fa-clock-rotate-left" style="color:#2563eb;"></i> Today's Queue</strong>
                     <button class="btn btn-outline btn-sm" onclick="window.open('tv-display.html','_blank')"><i class="fa-solid fa-tv"></i> TV Display</button>
                 </div>
+                <!-- 🔥 CHANGED: this was a read-only "Recently Registered"
+                     list (reprint only). It's now the actionable queue
+                     list -- still shows every token issued today, but a
+                     ticket that's still WAITING gets a "Make Priority"
+                     toggle right here, so staff don't need a separate
+                     screen to bump someone up. See loadRecent() /
+                     toggleTicketPriority() in crm-view.js. -->
                 <div id="qregRecentList" style="max-height: 420px; overflow-y:auto;">
                     <p class="helper-text" style="padding:16px;">Nothing yet today.</p>
                 </div>
             </div>
+        </div>
+    </div>
+
+    <!-- ============================= -->
+    <!-- 🔥 ADDED: PENDING (NO-SHOW) LIST -->
+    <!-- ============================= -->
+    <!-- Patients sent here via the queue bar's "Send to Pending" button
+         (called but didn't come up) land here instead of being
+         permanently skipped. Staff can recall any of them back into the
+         correct waiting line whenever they turn up -- see recallPendingTicket()
+         in crm-view.js. -->
+    <div class="card" style="padding:0; margin-top:20px;">
+        <div style="padding: 12px 20px; border-bottom: 1px solid #e8edf3;">
+            <strong><i class="fa-solid fa-clock" style="color:#d97706;"></i> Pending (No-Show) -- Recall When They Arrive</strong>
+        </div>
+        <div id="qregPendingList" style="max-height: 260px; overflow-y:auto;">
+            <p class="helper-text" style="padding:16px;">No one is pending right now.</p>
         </div>
     </div>
 </div>

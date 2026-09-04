@@ -68,7 +68,10 @@
     const printBtn = document.getElementById('qregPrintBtn');
     const newBtn = document.getElementById('qregNewBtn');
 
+    const priorityCheckbox = document.getElementById('qregPriority');
+
     const recentList = document.getElementById('qregRecentList');
+    const pendingList = document.getElementById('qregPendingList');
 
     let lastIssuedTicket = null;
 
@@ -305,7 +308,12 @@
                 p_patient_name: fullName,
                 p_phone: phone || customer.phone || null,
                 p_customer_type: 'NHIMA',
-                p_nhima_number: nhimaNumber
+                p_nhima_number: nhimaNumber,
+                // 🔥 ADDED: priority flag from the checkbox above the
+                // submit button -- call_next_ticket() (database side)
+                // always calls priority=true tickets before everyone
+                // else waiting in that stage, regardless of token number.
+                p_priority: !!priorityCheckbox.checked
             });
 
             if (tokenError) throw tokenError;
@@ -314,6 +322,7 @@
             showTokenCard(ticket);
             resetForm();
             await loadRecent();
+            await loadPending();
         } catch (err) {
             console.error('Error registering patient:', err);
             showError('Error: ' + (err.message || 'could not register patient.'));
@@ -334,6 +343,7 @@
         nrcMatchSelect.innerHTML = '<option value="">-- New patient (not in the list below) --</option>';
         nrcCandidates = [];
         selectedCustomerId = null;
+        if (priorityCheckbox) priorityCheckbox.checked = false;
     }
 
     // ============================================
@@ -343,7 +353,10 @@
         tokenCard.style.display = 'block';
         tokenNumberEl.textContent = '#' + ticket.token_number;
         tokenNameEl.textContent = ticket.patient_name;
-        tokenMetaEl.textContent = `${ticket.customer_type || ''} -- ${new Date(ticket.created_at).toLocaleString()}`;
+        // 🔥 ADDED: flag priority tokens right on the confirmation card
+        // so the front-desk staff know it'll jump the line.
+        const priorityTag = ticket.priority ? ' <span style="color:#f59e0b;"><i class="fa-solid fa-star"></i> PRIORITY</span>' : '';
+        tokenMetaEl.innerHTML = `${ticket.customer_type || ''} -- ${new Date(ticket.created_at).toLocaleString()}${priorityTag}`;
         tokenCard.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
     }
 
@@ -396,8 +409,30 @@
     });
 
     // ============================================
-    // RECENTLY REGISTERED TODAY
+    // TODAY'S QUEUE (formerly a read-only "Recently Registered" list)
     // ============================================
+    const STATUS_LABELS = {
+        waiting_billing: 'Waiting -- Billing',
+        serving_billing: 'At Billing Counter',
+        waiting_dispensing: 'Waiting -- Dispensing',
+        serving_dispensing: 'At Dispensing Counter',
+        pending: 'Pending (No-Show)',
+        completed: 'Completed',
+        skipped: 'Skipped'
+    };
+    const STATUS_COLORS = {
+        waiting_billing: '#2563eb',
+        serving_billing: '#2563eb',
+        waiting_dispensing: '#7c3aed',
+        serving_dispensing: '#7c3aed',
+        pending: '#d97706',
+        completed: '#059669',
+        skipped: '#94a3b8'
+    };
+    const WAITING_STATUSES = ['waiting_billing', 'waiting_dispensing'];
+
+    let recentRows = [];
+
     async function loadRecent() {
         const today = new Date().toISOString().split('T')[0];
         const { data, error } = await supabaseClient
@@ -405,38 +440,157 @@
             .select('*')
             .eq('queue_date', today)
             .order('token_number', { ascending: false })
-            .limit(20);
+            .limit(30);
 
         if (error) {
             console.error('Error loading recent tickets:', error);
             return;
         }
 
-        if (!data || data.length === 0) {
+        recentRows = data || [];
+
+        if (recentRows.length === 0) {
             recentList.innerHTML = `<p class="helper-text" style="padding:16px;">Nothing yet today.</p>`;
             return;
         }
 
-        recentList.innerHTML = data.map(t => `
-            <div style="display:flex; justify-content:space-between; align-items:center; padding:10px 20px; border-bottom:1px solid #f1f5f9;">
+        recentList.innerHTML = recentRows.map(t => {
+            const isWaiting = WAITING_STATUSES.includes(t.status);
+            const statusLabel = STATUS_LABELS[t.status] || t.status;
+            const statusColor = STATUS_COLORS[t.status] || '#64748b';
+            const priorityTag = t.priority ? '<i class="fa-solid fa-star" style="color:#f59e0b;" title="Priority"></i> ' : '';
+            // 🔥 ADDED: a waiting ticket gets a Priority toggle right
+            // here -- staff no longer need a separate screen to bump
+            // someone to the front of that stage's line.
+            const priorityBtn = isWaiting
+                ? `<button class="btn btn-outline btn-sm" data-priority-id="${t.id}" data-priority-next="${t.priority ? 'false' : 'true'}" title="${t.priority ? 'Remove priority' : 'Make priority -- call next'}">
+                       <i class="fa-solid fa-star" style="color:${t.priority ? '#f59e0b' : '#cbd5e1'};"></i>
+                   </button>`
+                : '';
+            return `
+            <div style="display:flex; justify-content:space-between; align-items:center; padding:10px 20px; border-bottom:1px solid #f1f5f9; gap:8px;">
                 <div>
-                    <div style="font-weight:600; font-size:0.9rem;">#${t.token_number} -- ${t.patient_name}</div>
-                    <div style="font-size:0.75rem; color:#94a3b8;">${t.customer_type || ''} -- ${new Date(t.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</div>
+                    <div style="font-weight:600; font-size:0.9rem;">${priorityTag}#${t.token_number} -- ${t.patient_name}</div>
+                    <div style="font-size:0.75rem; color:${statusColor}; font-weight:600;">${statusLabel}</div>
                 </div>
-                <button class="btn btn-outline btn-sm" data-reprint-id="${t.id}"><i class="fa-solid fa-print"></i></button>
+                <div style="display:flex; gap:6px; flex-shrink:0;">
+                    ${priorityBtn}
+                    <button class="btn btn-outline btn-sm" data-reprint-id="${t.id}"><i class="fa-solid fa-print"></i></button>
+                </div>
             </div>
-        `).join('');
+        `; }).join('');
 
         recentList.querySelectorAll('[data-reprint-id]').forEach(btn => {
             btn.addEventListener('click', () => {
-                const row = data.find(t => String(t.id) === btn.dataset.reprintId);
+                const row = recentRows.find(t => String(t.id) === btn.dataset.reprintId);
                 if (row) printTicket(row);
             });
         });
+        recentList.querySelectorAll('[data-priority-id]').forEach(btn => {
+            btn.addEventListener('click', () => toggleTicketPriority(btn.dataset.priorityId, btn.dataset.priorityNext === 'true'));
+        });
+    }
+
+    async function toggleTicketPriority(ticketId, makePriority) {
+        try {
+            const { error } = await supabaseClient.rpc('set_ticket_priority', {
+                p_ticket_id: Number(ticketId),
+                p_priority: makePriority
+            });
+            if (error) throw error;
+            await loadRecent();
+        } catch (err) {
+            console.error('Error updating priority:', err);
+            alert('Error updating priority: ' + (err.message || err));
+        }
+    }
+
+    // ============================================
+    // 🔥 ADDED: PENDING (NO-SHOW) LIST
+    // ============================================
+    // Tickets a counter sent here via "Send to Pending" (see
+    // Shared-queue-bar.js's skipCurrent()) after being called but not
+    // showing up. They stay here, off the active waiting line, until
+    // staff recall them -- unlike the old skip_ticket() path, nothing
+    // here is a dead end.
+    async function loadPending() {
+        if (!pendingList) return;
+        const today = new Date().toISOString().split('T')[0];
+        const { data, error } = await supabaseClient
+            .from('queue_tickets')
+            .select('*')
+            .eq('queue_date', today)
+            .eq('status', 'pending')
+            .order('pending_at', { ascending: true });
+
+        if (error) {
+            console.error('Error loading pending tickets:', error);
+            return;
+        }
+
+        if (!data || data.length === 0) {
+            pendingList.innerHTML = `<p class="helper-text" style="padding:16px;">No one is pending right now.</p>`;
+            return;
+        }
+
+        pendingList.innerHTML = data.map(t => {
+            const stageLabel = t.billing_done_at ? 'Dispensing' : 'Billing';
+            return `
+            <div style="display:flex; justify-content:space-between; align-items:center; padding:10px 20px; border-bottom:1px solid #f1f5f9; gap:8px;">
+                <div>
+                    <div style="font-weight:600; font-size:0.9rem;">#${t.token_number} -- ${t.patient_name}</div>
+                    <div style="font-size:0.75rem; color:#94a3b8;">Was waiting for ${stageLabel} -- sent to pending ${t.pending_at ? new Date(t.pending_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : ''}</div>
+                </div>
+                <button class="btn btn-primary btn-sm" data-recall-id="${t.id}"><i class="fa-solid fa-star"></i> Recall as Priority</button>
+            </div>
+        `; }).join('');
+
+        pendingList.querySelectorAll('[data-recall-id]').forEach(btn => {
+            btn.addEventListener('click', () => recallPendingTicket(btn.dataset.recallId));
+        });
+    }
+
+    // 🔥 CHANGED: recalling always brings the patient back as PRIORITY --
+    // a no-show sent to Pending from POS was already waiting their turn
+    // once; when they actually show up, they go straight back in line
+    // ahead of everyone else rather than to the back of it. This is the
+    // "push him to billing queue again and as priority customer" flow
+    // described for the billing no-show case; recalling a dispensing
+    // no-show the same way is harmless too since call_next_ticket()
+    // simply calls priority tickets first within whichever stage they
+    // land in.
+    async function recallPendingTicket(ticketId) {
+        try {
+            const { error } = await supabaseClient.rpc('recall_pending_ticket', {
+                p_ticket_id: Number(ticketId),
+                p_priority: true
+            });
+            if (error) throw error;
+            await loadPending();
+            await loadRecent();
+        } catch (err) {
+            console.error('Error recalling pending ticket:', err);
+            alert('Error recalling patient: ' + (err.message || err));
+        }
+    }
+
+    // 🔥 ADDED: keep both lists live as counters call/complete/skip/
+    // pend tickets from other screens, without needing a page reload.
+    try {
+        supabaseClient
+            .channel('crm_queue_view_' + Date.now())
+            .on('postgres_changes', { event: '*', schema: 'public', table: 'queue_tickets' }, () => {
+                loadRecent();
+                loadPending();
+            })
+            .subscribe();
+    } catch (e) {
+        console.warn('CRM queue view: realtime subscription failed, list will still refresh after actions taken here:', e);
     }
 
     // ============================================
     // INIT
     // ============================================
     loadRecent();
+    loadPending();
 })();

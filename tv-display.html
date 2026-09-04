@@ -287,6 +287,60 @@
         const TTS_FUNCTION_URL = SUPABASE_URL + '/functions/v1/tts-polly';
         const TTS_TIMEOUT_MS = 6000;
 
+        // 🔥 FIX: the missing piece the old "🔎 TEMPORARY" log comment
+        // below was still trying to catch -- Amazon Polly itself was
+        // never the problem (confirmed from the tts-polly function's own
+        // logs: every single call today returned 200 with real MP3 audio,
+        // right up to the moment this was reported broken). The failure
+        // is downstream of that, in the browser: ttsAudioEl.play() for
+        // the FIRST real announcement only ever gets called after the
+        // "Queue display ready" test's network round-trip to Polly
+        // finishes -- and by the time that response comes back, enough
+        // time has passed since the actual tap that some browsers (this
+        // is common on embedded/smart-TV-box browsers, less so on a
+        // laptop's desktop Chrome) no longer treat play() as connected to
+        // a real user gesture, and silently reject it forever after --
+        // same root cause the SpeechSynthesis priming call above already
+        // works around for the browser-voice fallback, just not yet done
+        // for this <audio> element. Fix: play a tiny silent WAV through
+        // THIS SAME element SYNCHRONOUSLY inside the tap handler, before
+        // any network call happens at all. Once a media element has been
+        // successfully played from within a real gesture, browsers keep
+        // allowing its play() calls indefinitely afterward -- so every
+        // later automatic announcement (called from loadAll()/renderStage(),
+        // with no gesture at all) plays normally instead of being silently
+        // dropped.
+        function unlockTtsAudioElement() {
+            try {
+                const sampleRate = 8000, numSamples = 400; // ~50ms of silence
+                const dataSize = numSamples * 2;
+                const buf = new ArrayBuffer(44 + dataSize);
+                const view = new DataView(buf);
+                const writeStr = (offset, str) => { for (let i = 0; i < str.length; i++) view.setUint8(offset + i, str.charCodeAt(i)); };
+                writeStr(0, 'RIFF'); view.setUint32(4, 36 + dataSize, true); writeStr(8, 'WAVE');
+                writeStr(12, 'fmt '); view.setUint32(16, 16, true); view.setUint16(20, 1, true);
+                view.setUint16(22, 1, true); view.setUint32(24, sampleRate, true);
+                view.setUint32(28, sampleRate * 2, true); view.setUint16(32, 2, true); view.setUint16(34, 16, true);
+                writeStr(36, 'data'); view.setUint32(40, dataSize, true); // PCM samples left at 0 = silence
+
+                const unlockUrl = URL.createObjectURL(new Blob([buf], { type: 'audio/wav' }));
+                ttsAudioEl.src = unlockUrl;
+                // Left to finish on its own (just 50ms of silence) rather
+                // than paused from the play() promise -- pausing here could
+                // race with the very next real speakCloud() call re-using
+                // this same element and cut its announcement off early.
+                ttsAudioEl.addEventListener('ended', () => URL.revokeObjectURL(unlockUrl), { once: true });
+                const playPromise = ttsAudioEl.play();
+                if (playPromise && playPromise.then) {
+                    playPromise
+                        .then(() => console.log('[voice] audio element unlocked for future automatic play() calls'))
+                        .catch(err => { console.warn('[voice] audio element unlock play() was rejected:', err.name, '-', err.message); URL.revokeObjectURL(unlockUrl); });
+                }
+            } catch (e) {
+                console.warn('[voice] could not build/play silent unlock clip (non-fatal):', e);
+            }
+        }
+
         function speakCloud(text) {
             return new Promise((resolve, reject) => {
                 const controller = new AbortController();
@@ -433,6 +487,11 @@
                     speechSynthesis.speak(new SpeechSynthesisUtterance(' '));
                 }
             } catch (e) { /* non-fatal */ }
+
+            // 🔥 ADDED: unlock the cloud-voice <audio> element the same
+            // way, and just as synchronously -- see unlockTtsAudioElement()
+            // above for the full story on why this was the missing piece.
+            unlockTtsAudioElement();
 
             document.getElementById('soundGate').style.display = 'none';
             loadAll();
@@ -586,7 +645,7 @@
 
             listEl.innerHTML = waitingRows.map((r, i) => `
                 <div class="recent-row">
-                    <span><span class="rn">#${r.token_number}</span> &nbsp; ${r.patient_name}</span>
+                    <span>${r.priority ? '<i class="fa-solid fa-star" style="color:#fbbf24;" title="Priority"></i> ' : ''}<span class="rn">#${r.token_number}</span> &nbsp; ${r.patient_name}</span>
                     ${i === 0 ? '<span class="rc" style="color:#34d399; font-weight:700;">Up Next</span>' : ''}
                 </div>
             `).join('');
@@ -599,7 +658,7 @@
             const today = new Date().toISOString().split('T')[0];
             const { data, error } = await supabaseClient
                 .from('queue_tickets')
-                .select('id, token_number, patient_name, status, billing_counter, dispensing_counter, called_billing_at, called_dispensing_at, completed_at, created_at')
+                .select('id, token_number, patient_name, status, priority, billing_counter, dispensing_counter, called_billing_at, called_dispensing_at, completed_at, created_at')
                 .eq('queue_date', today)
                 .order('token_number', { ascending: true });
 
@@ -614,14 +673,22 @@
             // just the most-recently-called one -- the table shows every
             // counter at once, so every one of them needs its ticket.
             const billingServing = rows.filter(r => r.status === 'serving_billing');
-            const billingWaiting = rows.filter(r => r.status === 'waiting_billing');
+            // 🔥 ADDED: priority tickets are always called before
+            // everyone else in the stage (see call_next_ticket() /
+            // priority column) -- sorting the on-screen waiting order to
+            // match keeps "Up Next" here honest with who's actually
+            // called next. Array.filter preserves the original
+            // token_number-ascending order, so this stable sort only
+            // moves priority rows to the front without disturbing order
+            // within each group.
+            const billingWaiting = rows.filter(r => r.status === 'waiting_billing').sort((a, b) => (b.priority ? 1 : 0) - (a.priority ? 1 : 0));
             const billingRecent = rows
                 .filter(r => r.called_billing_at)
                 .sort((a, b) => new Date(b.called_billing_at) - new Date(a.called_billing_at))
                 .slice(0, 8);
 
             const dispensingServing = rows.filter(r => r.status === 'serving_dispensing');
-            const dispensingWaiting = rows.filter(r => r.status === 'waiting_dispensing');
+            const dispensingWaiting = rows.filter(r => r.status === 'waiting_dispensing').sort((a, b) => (b.priority ? 1 : 0) - (a.priority ? 1 : 0));
             const dispensingRecent = rows
                 .filter(r => r.called_dispensing_at)
                 .sort((a, b) => new Date(b.called_dispensing_at) - new Date(a.called_dispensing_at))
