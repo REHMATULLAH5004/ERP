@@ -143,7 +143,16 @@
                                     <input type="number" class="wholesale-pos-tax" readonly style="width: 100%; padding: 3px 6px; border: 1px solid #e2e8f0; border-radius: 3px; background: #f1f5f9; color: #64748b; text-align: center; font-size: 0.8rem;">
                                 </td>
                                 <td style="padding: 2px 4px;">
-                                    <input type="number" class="wholesale-pos-rate" step="0.01" readonly style="width: 100%; padding: 3px 6px; border: 1px solid #e2e8f0; border-radius: 3px; background: #f1f5f9; color: #64748b; text-align: right; font-size: 0.8rem;">
+                                    <!-- 🔥 FIX: this was hardcoded readonly with a greyed-out
+                                         "disabled" look, so there was genuinely no way to
+                                         change the price on a wholesale sale -- staff could
+                                         only ever use whatever updateRowRate() auto-calculated
+                                         from the batch cost + markup%. Matching retail's
+                                         .retail-pos-rate here: auto-filled the same way, but
+                                         editable so a negotiated/custom wholesale price can
+                                         override it for this line. See the matching 'input'
+                                         listener clause in index.js for the recalculation. -->
+                                    <input type="number" class="wholesale-pos-rate" step="0.01" min="0" title="Auto-filled from the batch's price -- click to override for this line" style="width: 100%; padding: 3px 6px; border: 1px solid #e2e8f0; border-radius: 3px; background: white; color: #0f172a; text-align: right; font-size: 0.8rem;">
                                 </td>
                                 <td style="padding: 2px 4px;">
                                     <input type="number" class="wholesale-pos-qty" min="1" value="1" style="width: 100%; padding: 3px 6px; border: 1px solid #e2e8f0; border-radius: 3px; background: white; text-align: center; font-size: 0.8rem;">

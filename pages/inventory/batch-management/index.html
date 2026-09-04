@@ -26,17 +26,41 @@
                     <th>Expiry Date</th>
                     <th>Cost Price (Per Unit)</th>
                     <th style="text-align: right;">Total Qty</th>
-                    <th style="padding-right: 20px; text-align: right;">Total Amount (K)</th>
+                    <th style="text-align: right;">Total Amount (K)</th>
+                    <th style="padding-right: 20px; text-align: right;">Actions</th>
                 </tr>
             </thead>
             <tbody id="batchTableBody">
                 <tr>
-                    <td colspan="6" style="text-align: center; padding: 30px; color: #94a3b8;">
+                    <td colspan="7" style="text-align: center; padding: 30px; color: #94a3b8;">
                         <i class="fa-solid fa-spinner fa-spin"></i> Loading batches...
                     </td>
                 </tr>
             </tbody>
         </table>
+    </div>
+</div>
+
+<!-- Edit Batch Cost Price Modal -->
+<div id="editBatchCostModal" style="display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(15,23,42,0.6); z-index:9999; justify-content:center; align-items:center;">
+    <div style="background:white; padding:28px; border-radius:12px; width:90%; max-width:420px; box-shadow:0 20px 50px rgba(0,0,0,0.4);">
+        <h3 style="margin:0 0 4px 0;"><i class="fa-solid fa-coins" style="color:#2563eb;"></i> Edit Cost Price</h3>
+        <p id="editBatchCostSubtitle" style="margin:0 0 18px 0; color:#64748b; font-size:0.85rem;"></p>
+
+        <input type="hidden" id="editBatchCostId">
+
+        <label style="display:block; font-size:0.85rem; font-weight:600; margin-bottom:6px;">Cost Price (Per Unit, K)</label>
+        <input type="number" id="editBatchCostInput" step="0.01" min="0" style="width:100%; padding:10px; border:1px solid #e2e8f0; border-radius:6px; margin-bottom:6px;">
+        <p style="margin:0 0 18px 0; font-size:0.78rem; color:#94a3b8;">
+            This only changes the batch's cost price going forward (used for stock valuation and future sales). It will not change the cost already recorded on past invoices -- that's frozen at the time of each sale, which is correct for accounting purposes.
+        </p>
+
+        <div style="display:flex; gap:10px; justify-content:flex-end;">
+            <button id="editBatchCostCancelBtn" style="background:#f1f5f9; border:1px solid #e2e8f0; padding:10px 20px; border-radius:6px; cursor:pointer; color:#475569;">Cancel</button>
+            <button id="editBatchCostSaveBtn" style="background:#2563eb; color:white; border:none; padding:10px 24px; border-radius:6px; cursor:pointer;">
+                <i class="fa-solid fa-floppy-disk"></i> Save
+            </button>
+        </div>
     </div>
 </div>
 

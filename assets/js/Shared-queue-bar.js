@@ -347,4 +347,52 @@ window.initQueueBar = function initQueueBar() {
 
     renderBar();
     loadWaitingCount();
+
+    // 🔥 ADDED: re-sync against the database on load, instead of trusting
+    // sessionStorage alone. sessionStorage is per-tab -- it's gone the
+    // moment a tab is closed and reopened, the browser/device is swapped,
+    // or the app is reloaded after a crash. Whenever that happened, this
+    // bar used to come back up showing "idle" (Call Next Patient) even
+    // though the database still had this exact counter actively serving
+    // whoever was last called -- and clicking Call Next in that state
+    // grabbed a brand-new patient on top of the old one, orphaning it
+    // forever (nothing left to ever mark it complete). The database
+    // function itself now refuses to do that (see call_next_ticket's
+    // guard), but fixing it here too means staff don't even see a
+    // misleading "idle" button in the first place after a refresh --
+    // the bar just quietly shows who they're really still serving.
+    (async function resyncServingFromDb() {
+        try {
+            const today = new Date().toISOString().split('T')[0];
+            const counterField = isBilling ? 'billing_counter' : 'dispensing_counter';
+            const servingStatus = isBilling ? 'serving_billing' : 'serving_dispensing';
+
+            const { data, error } = await supabaseClient
+                .from('queue_tickets')
+                .select('*')
+                .eq('queue_date', today)
+                .eq('status', servingStatus)
+                .eq(counterField, counter)
+                .order(isBilling ? 'called_billing_at' : 'called_dispensing_at', { ascending: false })
+                .limit(1)
+                .maybeSingle();
+
+            if (error) { console.warn('Queue bar: could not re-sync serving ticket from DB:', error); return; }
+
+            if (data) {
+                // DB says this counter is actively serving someone --
+                // trust that over whatever sessionStorage had (or didn't).
+                if (!servingTicket || servingTicket.id !== data.id) {
+                    setServing(data);
+                }
+            } else if (servingTicket) {
+                // sessionStorage thought we were serving someone, but the
+                // database disagrees (e.g. completed/sent to pending from
+                // another tab/device) -- clear the stale local state.
+                setServing(null);
+            }
+        } catch (e) {
+            console.warn('Queue bar: resync from DB failed (non-fatal):', e);
+        }
+    })();
 };

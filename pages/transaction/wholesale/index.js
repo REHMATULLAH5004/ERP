@@ -499,10 +499,25 @@
             const row = e.target.closest('tr');
             const rows = posTableBody.querySelectorAll('tr');
             const qty = parseInt(e.target.value) || 0;
-            
+
             if (row === rows[rows.length - 1] && qty > 0) {
                 addPOSRow();
             }
+            updateRowTotal(row);
+            updateTotals();
+        }
+
+        // 🔥 FIX: the rate field used to be readonly, so no edit could ever
+        // happen here -- see the matching HTML change. Now that it's
+        // editable, a manual edit needs to recalculate this row's total
+        // and the grand totals the same way a qty edit already does above.
+        // updateRowRate() (the function that OVERWRITES this field with
+        // the auto-calculated batch cost + markup%) only runs when the
+        // item or batch selection itself changes, so typing a custom price
+        // here doesn't get silently reverted. Same pattern as retail.js's
+        // .retail-pos-rate handling.
+        if (e.target.classList.contains('wholesale-pos-rate')) {
+            const row = e.target.closest('tr');
             updateRowTotal(row);
             updateTotals();
         }
