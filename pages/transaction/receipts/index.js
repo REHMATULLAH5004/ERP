@@ -737,7 +737,24 @@
                 const data = sale.customer_data || {};
                 const key = data.phone || data.full_name || 'unknown';
                 if (!customerMap[key]) {
-                    const customer = state.customers.find(c => c.phone === data.phone || c.full_name === data.full_name);
+                    // 🔥 FIX: SECOND bug found alongside the Cash-sale one --
+                    // this searched state.customers (which merges NHIMA
+                    // members + regular customers + wholesale customers
+                    // into one array, NHIMA members listed FIRST) with no
+                    // _source filter at all. If an NHIMA member happened to
+                    // share a phone number or name with this REGULAR/
+                    // ONLINE/STAFF customer, .find() matched the NHIMA
+                    // record instead -- which is exactly why "NHIMA" badges
+                    // were showing up under Retail Receivables. Worse, it
+                    // also meant this entry's _customerId pointed at the
+                    // WRONG customer, so payments looked up via
+                    // state.receipts.filter(r => r.customer_id ===
+                    // entry.customer._customerId) below could get matched
+                    // to the wrong person's receipts. Scoped to
+                    // _source === 'customers' now -- the same scoping
+                    // calculateWholesaleReceivables() already correctly
+                    // does for its own lookup (_source === 'wholesale').
+                    const customer = state.customers.find(c => c._source === 'customers' && (c.phone === data.phone || c.full_name === data.full_name));
                     customerMap[key] = {
                         customer: customer || {
                             _displayName: data.full_name || 'Unknown',
