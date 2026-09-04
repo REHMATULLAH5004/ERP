@@ -67,6 +67,12 @@
         currentGRNOrderData: null,
         currentGRNCurrency: 'USD',
         currentGRNExchangeRate: 1,
+        // 🔥 ADDED: which order is currently open in the "View PO Details"
+        // modal, and whether goods have actually been received against it
+        // (i.e. it has become a GRN) -- drives whether the modal's Print
+        // button prints the Purchase Order or the Goods Receipt Note.
+        currentViewOrderId: null,
+        currentViewHasGRN: false,
         isEditing: false,
         reorderItems: [],
         // 🔥 ADDED: products sharing a generic_name_id with something
@@ -1275,9 +1281,23 @@
         modal.dataset.targetSelectId = trigger.dataset.targetSelect || '';
     });
 
+    // 🔥 ADDED: safeguard against a repeat of the ALL-CAPS-vs-Proper-Case
+    // mess found and cleaned up across products/customers/suppliers/etc.
+    // Only touches a value that is ENTIRELY caps -- anything already
+    // mixed-case, including deliberately-preserved acronyms like "(UK)",
+    // is left exactly as typed.
+    function toProperCaseIfAllCaps(str) {
+        if (!str) return str;
+        const trimmed = str.trim();
+        if (trimmed.length > 2 && trimmed === trimmed.toUpperCase() && trimmed !== trimmed.toLowerCase()) {
+            return trimmed.replace(/\w\S*/g, w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase());
+        }
+        return str;
+    }
+
     async function handleSaveSupplier(e) {
         e.preventDefault();
-        const name = document.getElementById('newSupplierName').value.trim();
+        const name = toProperCaseIfAllCaps(document.getElementById('newSupplierName').value.trim());
         const phoneVal = document.getElementById('newSupplierPhone').value.trim();
         if (!name) { alert('Supplier Name is required'); return; }
         if (!phoneVal) { alert('Mobile Number is required'); return; }
@@ -1629,10 +1649,9 @@
         if (title) title.innerHTML = '<i class="fa-solid fa-file-invoice"></i> New Purchase Order';
         if (supplier) supplier.value = '';
         if (currency) currency.value = 'USD';
-        // 🔥 FIX: defaults to today's shared exchange rate instead of a
-        // hardcoded 1.00, which never made sense next to a USD default
-        // currency -- still editable per PO if a specific deal needs a
-        // different rate.
+        // 🔒 LOCKED: always today's shared exchange rate -- the field is
+        // read-only now, so this is the only way it ever gets set for a
+        // new PO. Update the rate on the Dashboard if it needs changing.
         if (rate) rate.value = sharedZmwPerUsd;
         if (delivery) delivery.value = getFutureDate(14);
         if (notes) notes.value = '';
@@ -1656,6 +1675,9 @@
         if (title) title.innerHTML = `<i class="fa-solid fa-pen-to-square"></i> Edit PO: ${order.po_number}`;
         if (supplier) supplier.value = order.supplier_id || '';
         if (currency) currency.value = order.currency || 'USD';
+        // 🔒 LOCKED: shows the rate this PO was actually created with
+        // (read-only) -- editing other fields on an existing PO no longer
+        // re-prices it to today's rate.
         if (rate) rate.value = order.exchange_rate || 1;
         if (delivery) delivery.value = order.expected_delivery_date || '';
         if (notes) notes.value = order.notes || '';
@@ -2538,7 +2560,22 @@
 
             const content = document.getElementById('viewPOContent');
             if (!content) return;
-            
+
+            // 🔥 ADDED: a PO "becomes" a GRN once it's fully received --
+            // same condition already used elsewhere in this file to show
+            // the dedicated "View GRN" button (renderOrderActions above).
+            // Drives whether this modal's Print button prints the
+            // Purchase Order or the Goods Receipt Note, instead of always
+            // printing "PURCHASE ORDER" even after receiving. A
+            // Partially Received order still prints as a PO here (it's
+            // still open, with remaining items) -- its GRN-so-far can be
+            // viewed/printed via the green receipt icon.
+            const hasGRN = order.status === 'Goods Received' || order.status === 'Closed';
+            state.currentViewOrderId = orderId;
+            state.currentViewHasGRN = hasGRN;
+            const printLabel = document.getElementById('viewPOPrintBtnLabel');
+            if (printLabel) printLabel.textContent = hasGRN ? 'Print GRN' : 'Print PO';
+
             const supplierName = order.suppliers?.name || 'Unknown';
             const symbol = order.currency === 'ZMW' ? 'ZK' : '$';
             const lines = order.purchase_order_lines || [];
@@ -2735,6 +2772,13 @@
             </div>
         `;
 
+        // 🔥 ADDED: this is a specific, already-posted GRN -- the Print
+        // button should print this Goods Receipt Note, not the PO.
+        state.currentViewOrderId = grn.purchase_order_id;
+        state.currentViewHasGRN = true;
+        const printLabel = document.getElementById('viewPOPrintBtnLabel');
+        if (printLabel) printLabel.textContent = 'Print GRN';
+
         showModal('viewPOModal');
     }
 
@@ -2914,6 +2958,15 @@
                 </div>
             </div>
         `;
+
+        // 🔥 ADDED: this is a summary of multiple GRNs against one PO --
+        // there's no single receipt to print here (use "View" on a row
+        // for that), so the Print button falls back to printing the
+        // underlying PO as a whole.
+        state.currentViewOrderId = grns[0]?.purchase_order_id || null;
+        state.currentViewHasGRN = false;
+        const printLabel = document.getElementById('viewPOPrintBtnLabel');
+        if (printLabel) printLabel.textContent = 'Print PO';
 
         showModal('viewPOModal');
     }
@@ -3713,20 +3766,33 @@
     function printPOFromView() {
         const content = document.getElementById('viewPOContent');
         if (!content) return;
-        
+
         const poNumberEl = content.querySelector('.detail-row .value strong');
         if (!poNumberEl) {
             showToast('PO not found', 'error');
             return;
         }
-        
+
         const order = state.orders.find(o => o.po_number === poNumberEl.textContent);
         if (!order) {
             showToast('Order not found', 'error');
             return;
         }
-        
+
         generatePOPrint(order);
+    }
+
+    // 🔥 ADDED: the "View PO Details" modal's Print button now dispatches
+    // to whichever document this order actually is right now -- still a
+    // Purchase Order (nothing received yet), or already a Goods Receipt
+    // Note (goods have been received against it), per the hasGRN check
+    // done in viewPO().
+    function printFromView() {
+        if (state.currentViewHasGRN && state.currentViewOrderId) {
+            printGRN(state.currentViewOrderId);
+        } else {
+            printPOFromView();
+        }
     }
 
     function generatePOPrint(order) {
@@ -3941,8 +4007,12 @@
         return html;
     }
 
-    function printGRN() {
-        const orderId = state.currentGRNOrderId;
+    // 🔥 CHANGED: now accepts an optional orderId so it can be called from
+    // the "View PO Details" modal (any received order) as well as from the
+    // GRN receiving modal itself (which still just passes nothing and
+    // relies on state.currentGRNOrderId, unchanged).
+    function printGRN(orderIdOverride) {
+        const orderId = orderIdOverride || state.currentGRNOrderId;
         if (!orderId) {
             showToast('No GRN open to print', 'error');
             return;
@@ -3952,8 +4022,21 @@
             .from('goods_receipt_notes')
             .select(`
                 *,
-                goods_receipt_lines (*)
+                goods_receipt_lines (*),
+                purchase_orders:purchase_order_id (
+                    po_number,
+                    suppliers:supplier_id (name),
+                    currency,
+                    exchange_rate
+                )
             `)
+            // 🔥 FIX: this was missing the purchase_orders join that
+            // viewGRN()/viewSingleGRNById() already use -- without it,
+            // grn.purchase_orders was always undefined, so every printed
+            // GRN showed "PO Reference: N/A" and "Supplier: Unknown"
+            // regardless of what was actually on the order (caught via the
+            // new View PO -> Print GRN path, but this pre-existed on the
+            // GRN receiving modal's own Print button too).
             .eq('purchase_order_id', orderId)
             .order('created_at', { ascending: false })
             .limit(1)
@@ -4109,16 +4192,16 @@
     function updateExchangeRate() {
         const currency = document.getElementById('poCurrency')?.value;
         const rateInput = document.getElementById('poExchangeRate');
-        
+
+        // 🔒 LOCKED: this field is read-only now -- always the Dashboard's
+        // shared exchange rate for a USD PO (1 for ZMW), never a typed-in
+        // value. Prevents a typo'd rate (like the 0.07-instead-of-19.5 bug)
+        // from corrupting batch cost, inventory value and the GL entry.
+        // To change it, update the shared rate on the Dashboard first.
         if (currency === 'ZMW' && rateInput) {
             rateInput.value = 1;
-            rateInput.disabled = true;
         } else if (rateInput) {
-            rateInput.disabled = false;
-            // 🔥 FIX: fell back to a flat 1 (i.e. "no conversion at all")
-            // whenever the field was empty -- now falls back to today's
-            // shared exchange rate instead, matching resetPOForm().
-            rateInput.value = rateInput.value || sharedZmwPerUsd;
+            rateInput.value = sharedZmwPerUsd;
         }
         updatePOTotal();
     }
@@ -4313,6 +4396,7 @@
     window.printPO = printPO;
     window.printPOFromView = printPOFromView;
     window.printGRN = printGRN;
+    window.printFromView = printFromView;
     window.showToast = showToast;
     window.openReorderReport = openReorderReport;
     window.generateReorderReport = generateReorderReport;

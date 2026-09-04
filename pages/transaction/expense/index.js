@@ -743,8 +743,23 @@
         // same expense twice. Locking the button the moment a save
         // genuinely starts closes that window, same fix already applied to
         // retail POS's saveTransaction().
+        //
+        // 🔥 ADDED: on top of disabling the button, this now also swaps its
+        // visible label to a spinner + "Saving..." so there is an obvious,
+        // impossible-to-miss visual signal that the save is in progress --
+        // previously the button just silently sat there disabled with no
+        // change in appearance, so users couldn't tell a click had even
+        // registered and would click again.
         const saveExpenseBtn = document.getElementById('saveExpenseBtn');
-        if (saveExpenseBtn) saveExpenseBtn.disabled = true;
+        if (saveExpenseBtn) {
+            if (saveExpenseBtn.disabled) {
+                // Already saving -- ignore this extra click/press entirely.
+                return;
+            }
+            saveExpenseBtn.disabled = true;
+            saveExpenseBtn.dataset.originalHtml = saveExpenseBtn.innerHTML;
+            saveExpenseBtn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Saving...';
+        }
 
         const txData = {
             transaction_number: txNumber,
@@ -806,8 +821,15 @@
             showToast('Error saving expense: ' + error.message, 'error');
         } finally {
             // 🔥 ADDED: guaranteed to run whether the save succeeded or
-            // failed -- the button is never left stuck disabled.
-            if (saveExpenseBtn) saveExpenseBtn.disabled = false;
+            // failed -- the button is never left stuck disabled or stuck
+            // showing "Saving...".
+            if (saveExpenseBtn) {
+                saveExpenseBtn.disabled = false;
+                if (saveExpenseBtn.dataset.originalHtml) {
+                    saveExpenseBtn.innerHTML = saveExpenseBtn.dataset.originalHtml;
+                    delete saveExpenseBtn.dataset.originalHtml;
+                }
+            }
         }
     }
 

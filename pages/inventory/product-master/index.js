@@ -15,6 +15,26 @@
     // ============================================
     let accountCache = {};
 
+    // 🔒 LOCKED: cached copy of today's shared exchange rate (Dashboard),
+    // loaded once at init and used to drive the read-only Exchange Rate
+    // field on the Add Batch form -- see updateBatchCost() below.
+    let sharedZmwPerUsd = 25.00;
+
+    // 🔥 ADDED: safeguard against a repeat of the ALL-CAPS-vs-Proper-Case
+    // mess found across products/customers/suppliers/etc. and cleaned up
+    // in bulk. Only touches a value that is ENTIRELY caps (e.g. someone
+    // typed or pasted "ESOZ 20MG TABLET") -- anything already mixed-case,
+    // including deliberately-preserved acronyms like "(UK)", is left
+    // exactly as typed.
+    function toProperCaseIfAllCaps(str) {
+        if (!str) return str;
+        const trimmed = str.trim();
+        if (trimmed.length > 2 && trimmed === trimmed.toUpperCase() && trimmed !== trimmed.toLowerCase()) {
+            return trimmed.replace(/\w\S*/g, w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase());
+        }
+        return str;
+    }
+
     async function loadAccountCodes() {
         try {
             const { data: accounts, error } = await supabaseClient
@@ -241,6 +261,7 @@
     if (csvBtn) csvBtn.disabled = true;
 
     await loadAccountCodes();
+    sharedZmwPerUsd = await getSharedExchangeRate();
 
     if (openBtn) openBtn.disabled = false;
     if (csvBtn) csvBtn.disabled = false;
@@ -1063,7 +1084,12 @@ ${errorMessages.length > 5 ? `\n... and ${errorMessages.length - 5} more errors`
             openingCostPriceFinal.value = cost.toFixed(2);
         } else {
             batchExchangeRate.style.display = 'block';
-            const rate = parseFloat(batchExchangeRate.value) || 0;
+            // 🔒 LOCKED: field is read-only now -- always today's shared
+            // exchange rate from the Dashboard, never a typed-in value.
+            // Prevents a typo'd rate from corrupting this batch's cost
+            // price (the same bug class that hit a Furosemide purchase).
+            batchExchangeRate.value = sharedZmwPerUsd;
+            const rate = sharedZmwPerUsd || 0;
             if (rate > 0) {
                 const converted = cost * rate;
                 costZMWDisplay.textContent = converted.toFixed(2);
@@ -1170,7 +1196,9 @@ ${errorMessages.length > 5 ? `\n... and ${errorMessages.length - 5} more errors`
         const isEditing = hiddenId.value !== '';
         const formData = {
             sku: document.getElementById('sku').value,
-            product_name: document.getElementById('productName').value,
+            // 🔥 ADDED: auto-corrects a pure ALL-CAPS entry to Proper Case
+            // on save -- see toProperCaseIfAllCaps() above.
+            product_name: toProperCaseIfAllCaps(document.getElementById('productName').value),
             generic_name_id: document.getElementById('genericName').value || null,
             category_id: document.getElementById('category').value || null,
             sub_category_id: document.getElementById('subCategory').value || null,
@@ -1252,6 +1280,7 @@ ${errorMessages.length > 5 ? `\n... and ${errorMessages.length - 5} more errors`
                 // ==========================================
                 // CREATE BATCH AND ACCOUNTING ENTRY
                 // ==========================================
+                let accountingFailed = false;
                 if (formData.opening_qty > 0 && result && result.length > 0) {
                     const productId = result[0].id;
                     const totalCost = formData.batch_cost * formData.opening_qty;
@@ -1278,6 +1307,21 @@ ${errorMessages.length > 5 ? `\n... and ${errorMessages.length - 5} more errors`
                     }]);
                     if (batchError) throw batchError;
 
+                    // 🔥 FIX: steps 2-4 (chart-of-accounts checks + journal
+                    // entry + journal lines) used to share the outer
+                    // try/catch with the product/batch insert above. That
+                    // meant a failure here (most commonly the same expired-
+                    // session RLS error seen elsewhere in this app) threw
+                    // all the way up to the generic "Error saving product"
+                    // toast -- even though the product AND batch had
+                    // already saved successfully. The confusing message
+                    // made it look like nothing saved, which invited a
+                    // retry with the same manually-typed SKU and a second,
+                    // unrelated "duplicate key" error. Isolating this in
+                    // its own try/catch lets the product/batch save be
+                    // reported as the success it is, with a clear separate
+                    // warning if only the accounting entry failed.
+                    try {
                     // ==========================================
                     // 2. ENSURE COA ACCOUNTS EXIST
                     // ==========================================
@@ -1372,10 +1416,25 @@ ${errorMessages.length > 5 ? `\n... and ${errorMessages.length - 5} more errors`
                     console.log(`   Inventory Account: ${finalInventoryAccount}`);
                     console.log(`   Equity Account: ${finalEquityAccount}`);
                     console.log(`   Total Cost: K${totalCost.toFixed(2)}`);
+                    } catch (acctError) {
+                        console.error('Accounting entry error (product and batch already saved):', acctError);
+                        accountingFailed = true;
+                    }
                 }
                 // ==========================================
 
                 showToast('Product saved successfully!', 'success');
+
+                if (accountingFailed) {
+                    alert(
+                        '⚠️ Product and opening stock saved, but the accounting entry FAILED to post.\n\n' +
+                        `"${formData.product_name}" and its batch are saved, ` +
+                        'but no journal entry was created for the opening stock value ' +
+                        '(often caused by an expired login session -- try logging out and back in).\n\n' +
+                        'Please tell an admin/accountant so the journal entry can be posted manually. ' +
+                        'Do NOT re-enter this product -- it has already been saved.'
+                    );
+                }
             }
 
             submitBtn.innerHTML = `<i class="fa-solid fa-check"></i> Saved!`;

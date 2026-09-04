@@ -75,6 +75,108 @@
 
     let lastIssuedTicket = null;
 
+    // ============================================
+    // FORMAT VALIDATION + AUTO PROPER-CASE
+    // -- same rules as Retail POS's "Add NHIMA Member" / "Add Customer"
+    // modals (pages/transaction/retail/index.js), kept in sync here
+    // because THIS form is the main gate most patients are actually
+    // registered through. Client-side rules alone can't be fully
+    // trusted (stale/cached code can bypass them), so the database
+    // also has matching CHECK constraints on customers/nhima_members
+    // as a backstop -- but this still gives staff a clear, friendly
+    // message instead of a raw database error.
+    //   - NHIMA Number: 14 digits + "/" + 2 digits, OR "NHA" + 13
+    //     digits + "/" + 2 digits.
+    //   - NRC: 6 digits + "/" + 2 digits + "/" + 1 digit.
+    //   - Phone: fixed +260 country code + exactly 9 digits, optional here.
+    //   - Name: letters only (spaces/hyphens/apostrophes/periods allowed).
+    const ZM_PHONE_DIGITS = 9;
+    const NRC_REGEX = /^\d{6}\/\d{2}\/\d$/;
+    const NHIMA_REGEX = /^(?:\d{14}\/\d{2}|NHA\d{13}\/\d{2})$/;
+    const NAME_REGEX = /^[A-Za-z][A-Za-z '.-]*$/;
+
+    function toProperCaseIfAllCaps(str) {
+        if (!str) return str;
+        const trimmed = str.trim();
+        if (trimmed.length > 2 && trimmed === trimmed.toUpperCase() && trimmed !== trimmed.toLowerCase()) {
+            return trimmed.replace(/\w\S*/g, w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase());
+        }
+        return str;
+    }
+
+    function sanitizeNameInput(el) {
+        if (!el) return;
+        el.addEventListener('input', () => {
+            const cleaned = el.value.replace(/[^A-Za-z '.-]/g, '');
+            if (cleaned !== el.value) el.value = cleaned;
+        });
+    }
+
+    function sanitizePhoneDigitsInput(el) {
+        if (!el) return;
+        el.addEventListener('input', () => {
+            const digits = el.value.replace(/\D/g, '').slice(0, ZM_PHONE_DIGITS);
+            if (digits !== el.value) el.value = digits;
+        });
+    }
+
+    function sanitizeNrcInput(el) {
+        if (!el) return;
+        el.addEventListener('input', () => {
+            const digits = el.value.replace(/\D/g, '').slice(0, 9); // 6 + 2 + 1
+            let formatted = digits.slice(0, 6);
+            if (digits.length > 6) formatted += '/' + digits.slice(6, 8);
+            if (digits.length > 8) formatted += '/' + digits.slice(8, 9);
+            el.value = formatted;
+        });
+    }
+
+    function validateNameValue(value, fieldLabel) {
+        const trimmed = (value || '').trim();
+        if (!trimmed) return null; // required-ness is checked separately
+        if (!NAME_REGEX.test(trimmed)) {
+            return `${fieldLabel} can only contain letters, no numbers -- got "${value}"`;
+        }
+        return null;
+    }
+
+    function validateNrcValue(value) {
+        const trimmed = (value || '').trim();
+        if (!trimmed) return null;
+        if (!NRC_REGEX.test(trimmed)) {
+            return `NRC must be in the format 123456/78/9 (6 digits / 2 digits / 1 digit) -- got "${value}"`;
+        }
+        return null;
+    }
+
+    function validateNhimaNumberValue(value) {
+        const trimmed = (value || '').trim().toUpperCase();
+        if (!NHIMA_REGEX.test(trimmed)) {
+            return `NHIMA Number must be 14 digits + "/" + 2 digits (e.g. 49310691110129/00), or "NHA" + 13 digits + "/" + 2 digits -- got "${value}"`;
+        }
+        return null;
+    }
+
+    function buildZmPhone(digitsValue) {
+        const digits = (digitsValue || '').replace(/\D/g, '');
+        return digits ? `+260${digits}` : '';
+    }
+
+    function validatePhoneDigitsValue(digitsValue, required) {
+        const digits = (digitsValue || '').replace(/\D/g, '');
+        if (!digits) {
+            return required ? 'Phone Number is required' : null;
+        }
+        if (digits.length !== ZM_PHONE_DIGITS) {
+            return `Phone Number must be exactly ${ZM_PHONE_DIGITS} digits after +260 (e.g. 971234567) -- got ${digits.length} digit(s)`;
+        }
+        return null;
+    }
+
+    sanitizeNameInput(fullNameInput);
+    sanitizeNrcInput(nrcInput);
+    sanitizePhoneDigitsInput(phoneInput);
+
     // `selectedCustomerId` tracks whether the dropdown below currently
     // points at a real, already-registered patient. When set, submit
     // UPDATES that customer's record instead of creating a new one.
@@ -166,8 +268,10 @@
         addressInput.value = match.address || '';
         // A synthetic "NRC-..." phone (see ensurePatientCustomer below)
         // was never a real phone number, so don't load it back into the
-        // optional Phone field as if it were.
-        phoneInput.value = (match.phone && !match.phone.startsWith('NRC-')) ? match.phone : '';
+        // optional Phone field as if it were. The field itself only holds
+        // the digits after +260 (the prefix is a fixed label beside it),
+        // so strip that prefix back off a real stored number.
+        phoneInput.value = (match.phone && !match.phone.startsWith('NRC-')) ? match.phone.replace(/^\+260/, '') : '';
         if (match.nhima_number) nhimaNumberInput.value = match.nhima_number;
         nrcMatchHint.textContent = '✓ Existing patient loaded -- editing their record.';
         nrcMatchHint.style.color = '#059669';
@@ -286,15 +390,23 @@
         e.preventDefault();
         clearError();
 
-        const fullName = fullNameInput.value.trim();
+        const fullName = toProperCaseIfAllCaps(fullNameInput.value.trim());
         const nrc = nrcInput.value.trim();
-        const nhimaNumber = nhimaNumberInput.value.trim();
-        const phone = phoneInput.value.trim() || null;
+        const nhimaNumber = nhimaNumberInput.value.trim().toUpperCase();
+        const phoneDigits = phoneInput.value.trim();
         const address = addressInput.value.trim();
 
         if (!nrc) { showError('NRC Number is required.'); return; }
         if (!fullName) { showError('Full Name is required.'); return; }
         if (!nhimaNumber) { showError('NHIMA Number is required.'); return; }
+
+        const validationError = validateNameValue(fullName, 'Full Name')
+            || validateNrcValue(nrc)
+            || validateNhimaNumberValue(nhimaNumber)
+            || validatePhoneDigitsValue(phoneDigits, false);
+        if (validationError) { showError(validationError); return; }
+
+        const phone = buildZmPhone(phoneDigits) || null;
 
         submitBtn.disabled = true;
         submitBtn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Registering...';

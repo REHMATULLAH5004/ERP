@@ -152,8 +152,9 @@
                         </select>
                     </div>
                     <div class="po-field">
-                        <label>Exchange Rate</label>
-                        <input type="number" class="form-control" id="poExchangeRate" step="0.0001" value="1.00" onchange="updateExchangeRate()">
+                        <label>Exchange Rate <i class="fa-solid fa-lock" style="font-size: 0.7rem; color: #94a3b8;" title="Locked to the shared rate set on the Dashboard"></i></label>
+                        <input type="number" class="form-control" id="poExchangeRate" step="0.0001" value="1.00" readonly style="background:#f1f5f9; color:#64748b; cursor:not-allowed;" title="Locked to today's shared exchange rate. Change it on the Dashboard if it's wrong.">
+                        <small style="color: #94a3b8; font-size: 0.72rem;">Locked to today's rate on the Dashboard.</small>
                     </div>
                     <div class="po-field">
                         <label>Expected Delivery Date *</label>
@@ -424,8 +425,8 @@
                 <!-- Dynamic content -->
             </div>
             <div class="modal-footer">
-                <button class="btn btn-primary" onclick="printPOFromView()">
-                    <i class="fa-solid fa-print"></i> Print PO
+                <button class="btn btn-primary" id="viewPOPrintBtn" onclick="printFromView()">
+                    <i class="fa-solid fa-print"></i> <span id="viewPOPrintBtnLabel">Print PO</span>
                 </button>
                 <button class="btn btn-outline" onclick="closeModal('viewPOModal')">Close</button>
             </div>

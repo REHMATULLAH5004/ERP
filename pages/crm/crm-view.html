@@ -26,7 +26,7 @@
                      the patient's name) checks for an existing record. -->
                 <div class="form-group">
                     <label>NRC Number *</label>
-                    <input type="text" id="qregNrc" class="form-control" placeholder="e.g. 123456/78/9" autocomplete="off" required>
+                    <input type="text" id="qregNrc" class="form-control" placeholder="e.g. 123456/78/9" maxlength="11" autocomplete="off" required>
                     <div id="qregNrcMatchHint" class="helper-text" style="margin-top:4px; display:none;"></div>
                 </div>
 
@@ -49,13 +49,18 @@
 
                 <div class="form-group">
                     <label>NHIMA Number *</label>
-                    <input type="text" id="qregNhimaNumber" class="form-control" placeholder="Enter NHIMA number" required>
+                    <input type="text" id="qregNhimaNumber" class="form-control" placeholder="e.g. 49310691110129/00" required>
+                    <small style="color: #94a3b8; font-size: 0.72rem;">14 digits + "/" + 2 digits, or "NHA" + 13 digits + "/" + 2 digits</small>
                 </div>
 
                 <div class="form-row">
                     <div class="form-group">
                         <label>Phone Number</label>
-                        <input type="text" id="qregPhone" class="form-control" placeholder="e.g. 0971234567">
+                        <div style="display: flex; gap: 6px; align-items: center;">
+                            <span style="padding: 6px 10px; background: #f1f5f9; border: 1px solid #e2e8f0; border-radius: 4px; font-size: 0.9rem; color: #475569; flex-shrink: 0;">+260</span>
+                            <input type="text" id="qregPhone" class="form-control" inputmode="numeric" maxlength="9" placeholder="971234567" style="flex:1;">
+                        </div>
+                        <small style="color: #94a3b8; font-size: 0.72rem;">9 digits, no leading 0</small>
                     </div>
                     <div class="form-group">
                         <label>Address</label>

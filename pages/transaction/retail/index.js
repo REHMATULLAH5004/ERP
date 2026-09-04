@@ -1020,10 +1020,23 @@
     // 🔥 CUSTOMER EXISTENCE ENSURER
     // ============================================
 
+    // 🔥 ADDED: safeguard against a repeat of the ALL-CAPS-vs-Proper-Case
+    // mess found and cleaned up across customers/products/suppliers/etc.
+    // Only touches a value that is ENTIRELY caps -- anything already
+    // mixed-case is left exactly as typed.
+    function toProperCaseIfAllCaps(str) {
+        if (!str) return str;
+        const trimmed = str.trim();
+        if (trimmed.length > 2 && trimmed === trimmed.toUpperCase() && trimmed !== trimmed.toLowerCase()) {
+            return trimmed.replace(/\w\S*/g, w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase());
+        }
+        return str;
+    }
+
     async function ensureCustomerExists(customerData, clientType) {
         try {
             let phone = customerData.phone;
-            let fullName = customerData.full_name || 'Unknown Customer';
+            let fullName = toProperCaseIfAllCaps(customerData.full_name || 'Unknown Customer');
             let address = customerData.address || '';
             let nhimaNumber = customerData.nhima_number || null;
             let nrc = customerData.nrc || null;
@@ -1037,7 +1050,7 @@
 
                 if (!nhimaError && nhimaMember) {
                     phone = phone || nhimaMember.phone || '';
-                    fullName = fullName || nhimaMember.full_name || 'Unknown Customer';
+                    fullName = fullName || toProperCaseIfAllCaps(nhimaMember.full_name) || 'Unknown Customer';
                     address = address || nhimaMember.address || '';
                     nrc = nrc || nhimaMember.nrc || null;
                 }
@@ -1793,6 +1806,95 @@
     }
 
     // ============================================
+    // CUSTOMER ENTRY VALIDATION (NHIMA / NRC / Phone / Name)
+    // ============================================
+    // 🔥 ADDED: guards against the exact kind of bad data found across
+    // customer records -- digits typed into the name field, malformed NRC
+    // and NHIMA numbers, inconsistent phone formats (some with +260, some
+    // without, some the wrong length entirely). Formats below were
+    // confirmed against the real live data (not guessed):
+    //   - NHIMA Number: 14 digits + "/" + 2 digits (81% of real records,
+    //     e.g. 49310691110129/00), OR "NHA" + 13 digits + "/" + 2 digits
+    //     for the NHA-prefixed variant.
+    //   - NRC: 6 digits + "/" + 2 digits + "/" + 1 digit (e.g. 123456/78/9).
+    //   - Phone: fixed +260 country code + exactly 9 digits, no leading 0.
+    //   - Name: letters only (spaces/hyphens/apostrophes/periods allowed
+    //     for names like "O'Brien" or "Jr."), no digits, no length cap.
+    const ZM_PHONE_DIGITS = 9;
+    const NRC_REGEX = /^\d{6}\/\d{2}\/\d$/;
+    const NHIMA_REGEX = /^(?:\d{14}\/\d{2}|NHA\d{13}\/\d{2})$/;
+    const NAME_REGEX = /^[A-Za-z][A-Za-z '.-]*$/;
+
+    function sanitizeNameInput(el) {
+        if (!el) return;
+        el.addEventListener('input', () => {
+            const cleaned = el.value.replace(/[^A-Za-z '.-]/g, '');
+            if (cleaned !== el.value) el.value = cleaned;
+        });
+    }
+
+    function sanitizePhoneDigitsInput(el) {
+        if (!el) return;
+        el.addEventListener('input', () => {
+            const digits = el.value.replace(/\D/g, '').slice(0, ZM_PHONE_DIGITS);
+            if (digits !== el.value) el.value = digits;
+        });
+    }
+
+    function sanitizeNrcInput(el) {
+        if (!el) return;
+        el.addEventListener('input', () => {
+            const digits = el.value.replace(/\D/g, '').slice(0, 9); // 6 + 2 + 1
+            let formatted = digits.slice(0, 6);
+            if (digits.length > 6) formatted += '/' + digits.slice(6, 8);
+            if (digits.length > 8) formatted += '/' + digits.slice(8, 9);
+            el.value = formatted;
+        });
+    }
+
+    function validateNameValue(value, fieldLabel) {
+        const trimmed = (value || '').trim();
+        if (!trimmed) return null; // required-ness is checked separately
+        if (!NAME_REGEX.test(trimmed)) {
+            return `${fieldLabel} can only contain letters, no numbers -- got "${value}"`;
+        }
+        return null;
+    }
+
+    function validateNrcValue(value) {
+        const trimmed = (value || '').trim();
+        if (!trimmed) return null; // NRC is optional
+        if (!NRC_REGEX.test(trimmed)) {
+            return `NRC must be in the format 123456/78/9 (6 digits / 2 digits / 1 digit) -- got "${value}"`;
+        }
+        return null;
+    }
+
+    function validateNhimaNumberValue(value) {
+        const trimmed = (value || '').trim().toUpperCase();
+        if (!NHIMA_REGEX.test(trimmed)) {
+            return `NHIMA Number must be 14 digits + "/" + 2 digits (e.g. 49310691110129/00), or "NHA" + 13 digits + "/" + 2 digits -- got "${value}"`;
+        }
+        return null;
+    }
+
+    function buildZmPhone(digitsValue) {
+        const digits = (digitsValue || '').replace(/\D/g, '');
+        return digits ? `+260${digits}` : '';
+    }
+
+    function validatePhoneDigitsValue(digitsValue, required) {
+        const digits = (digitsValue || '').replace(/\D/g, '');
+        if (!digits) {
+            return required ? 'Phone Number is required' : null;
+        }
+        if (digits.length !== ZM_PHONE_DIGITS) {
+            return `Phone Number must be exactly ${ZM_PHONE_DIGITS} digits after +260 (e.g. 971234567) -- got ${digits.length} digit(s)`;
+        }
+        return null;
+    }
+
+    // ============================================
     // ADD CONTACT MODAL FUNCTIONS
     // ============================================
 
@@ -1805,7 +1907,8 @@
         document.getElementById('retailModalDynamicFields').innerHTML = `
             <div style="margin-bottom: 12px;">
                 <label style="display: block; font-weight: 500; color: #475569; margin-bottom: 3px; font-size: 0.85rem;">NHIMA Number *</label>
-                <input type="text" id="retailNewNhimaNumber" required placeholder="e.g. 123456789" style="width: 100%; padding: 6px 10px; border: 1px solid #e2e8f0; border-radius: 4px; font-size: 0.9rem;">
+                <input type="text" id="retailNewNhimaNumber" required placeholder="e.g. 49310691110129/00" style="width: 100%; padding: 6px 10px; border: 1px solid #e2e8f0; border-radius: 4px; font-size: 0.9rem;">
+                <small style="color: #94a3b8; font-size: 0.72rem;">14 digits + "/" + 2 digits, or "NHA" + 13 digits + "/" + 2 digits</small>
             </div>
             <div style="margin-bottom: 12px;">
                 <label style="display: block; font-weight: 500; color: #475569; margin-bottom: 3px; font-size: 0.85rem;">Full Name *</label>
@@ -1813,17 +1916,24 @@
             </div>
             <div style="margin-bottom: 12px;">
                 <label style="display: block; font-weight: 500; color: #475569; margin-bottom: 3px; font-size: 0.85rem;">NRC Number</label>
-                <input type="text" id="retailNewNhimaNrc" placeholder="e.g. 123456/78/9" style="width: 100%; padding: 6px 10px; border: 1px solid #e2e8f0; border-radius: 4px; font-size: 0.9rem;">
+                <input type="text" id="retailNewNhimaNrc" placeholder="123456/78/9" maxlength="11" style="width: 100%; padding: 6px 10px; border: 1px solid #e2e8f0; border-radius: 4px; font-size: 0.9rem;">
             </div>
             <div style="margin-bottom: 12px;">
                 <label style="display: block; font-weight: 500; color: #475569; margin-bottom: 3px; font-size: 0.85rem;">Phone Number</label>
-                <input type="text" id="retailNewNhimaPhone" placeholder="e.g. 0971234567" style="width: 100%; padding: 6px 10px; border: 1px solid #e2e8f0; border-radius: 4px; font-size: 0.9rem;">
+                <div style="display: flex; gap: 6px; align-items: center;">
+                    <span style="padding: 6px 10px; background: #f1f5f9; border: 1px solid #e2e8f0; border-radius: 4px; font-size: 0.9rem; color: #475569; flex-shrink: 0;">+260</span>
+                    <input type="text" id="retailNewNhimaPhone" inputmode="numeric" maxlength="9" placeholder="971234567" style="flex: 1; padding: 6px 10px; border: 1px solid #e2e8f0; border-radius: 4px; font-size: 0.9rem;">
+                </div>
+                <small style="color: #94a3b8; font-size: 0.72rem;">9 digits, no leading 0</small>
             </div>
             <div style="margin-bottom: 12px;">
                 <label style="display: block; font-weight: 500; color: #475569; margin-bottom: 3px; font-size: 0.85rem;">Address</label>
                 <input type="text" id="retailNewNhimaAddress" placeholder="Enter address" style="width: 100%; padding: 6px 10px; border: 1px solid #e2e8f0; border-radius: 4px; font-size: 0.9rem;">
             </div>
         `;
+        sanitizeNameInput(document.getElementById('retailNewNhimaName'));
+        sanitizeNrcInput(document.getElementById('retailNewNhimaNrc'));
+        sanitizePhoneDigitsInput(document.getElementById('retailNewNhimaPhone'));
 
         // 🔥 FIX: engage the close-lock so the universal "click outside
         // closes modal" handler ignores clicks for a moment right after
@@ -1855,13 +1965,19 @@
             </div>
             <div style="margin-bottom: 12px;">
                 <label style="display: block; font-weight: 500; color: #475569; margin-bottom: 3px; font-size: 0.85rem;">Phone Number *</label>
-                <input type="text" id="retailNewPhoneNumber" required placeholder="e.g. 0971234567" style="width: 100%; padding: 6px 10px; border: 1px solid #e2e8f0; border-radius: 4px; font-size: 0.9rem;">
+                <div style="display: flex; gap: 6px; align-items: center;">
+                    <span style="padding: 6px 10px; background: #f1f5f9; border: 1px solid #e2e8f0; border-radius: 4px; font-size: 0.9rem; color: #475569; flex-shrink: 0;">+260</span>
+                    <input type="text" id="retailNewPhoneNumber" required inputmode="numeric" maxlength="9" placeholder="971234567" style="flex: 1; padding: 6px 10px; border: 1px solid #e2e8f0; border-radius: 4px; font-size: 0.9rem;">
+                </div>
+                <small style="color: #94a3b8; font-size: 0.72rem;">9 digits, no leading 0</small>
             </div>
             <div style="margin-bottom: 12px;">
                 <label style="display: block; font-weight: 500; color: #475569; margin-bottom: 3px; font-size: 0.85rem;">Address</label>
                 <input type="text" id="retailNewPhoneAddress" placeholder="Enter address" style="width: 100%; padding: 6px 10px; border: 1px solid #e2e8f0; border-radius: 4px; font-size: 0.9rem;">
             </div>
         `;
+        sanitizeNameInput(document.getElementById('retailNewPhoneName'));
+        sanitizePhoneDigitsInput(document.getElementById('retailNewPhoneNumber'));
 
         // 🔥 FIX: same lock as openNhimaModal — prevents the modal from
         // closing itself immediately after opening. See the comment in
@@ -1908,13 +2024,13 @@
             const contactTypeValue = document.getElementById('retailContactType').value;
 
             if (contactTypeValue === 'NHIMA') {
-                const nhimaNumber = document.getElementById('retailNewNhimaNumber')?.value.trim();
+                const nhimaNumberRaw = document.getElementById('retailNewNhimaNumber')?.value.trim();
                 const fullName = document.getElementById('retailNewNhimaName')?.value.trim();
                 const nrc = document.getElementById('retailNewNhimaNrc')?.value.trim();
-                const phone = document.getElementById('retailNewNhimaPhone')?.value.trim();
+                const phoneDigits = document.getElementById('retailNewNhimaPhone')?.value.trim();
                 const address = document.getElementById('retailNewNhimaAddress')?.value.trim();
 
-                if (!nhimaNumber) {
+                if (!nhimaNumberRaw) {
                     alert('NHIMA Number is required');
                     return;
                 }
@@ -1922,6 +2038,20 @@
                     alert('Full Name is required');
                     return;
                 }
+
+                // 🔥 ADDED: format validation -- see the block above
+                // openNhimaModal() for exactly what each field accepts and
+                // why (derived from the real live data, not guessed).
+                const nhimaNumber = nhimaNumberRaw.toUpperCase();
+                const validationError = validateNhimaNumberValue(nhimaNumber)
+                    || validateNameValue(fullName, 'Full Name')
+                    || validateNrcValue(nrc)
+                    || validatePhoneDigitsValue(phoneDigits, false);
+                if (validationError) {
+                    alert(validationError);
+                    return;
+                }
+                const phone = buildZmPhone(phoneDigits);
 
                 retailSaveContactBtn.disabled = true;
                 retailSaveContactBtn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Saving...';
@@ -1998,17 +2128,28 @@
 
             } else if (contactTypeValue === 'PHONE') {
                 const fullName = document.getElementById('retailNewPhoneName')?.value.trim();
-                const phone = document.getElementById('retailNewPhoneNumber')?.value.trim();
+                const phoneDigits = document.getElementById('retailNewPhoneNumber')?.value.trim();
                 const address = document.getElementById('retailNewPhoneAddress')?.value.trim();
 
                 if (!fullName) {
                     alert('Full Name is required');
                     return;
                 }
-                if (!phone) {
+                if (!phoneDigits) {
                     alert('Phone Number is required');
                     return;
                 }
+
+                // 🔥 ADDED: format validation -- see the block above
+                // openNhimaModal() for exactly what each field accepts and
+                // why (derived from the real live data, not guessed).
+                const validationError = validateNameValue(fullName, 'Full Name')
+                    || validatePhoneDigitsValue(phoneDigits, true);
+                if (validationError) {
+                    alert(validationError);
+                    return;
+                }
+                const phone = buildZmPhone(phoneDigits);
 
                 retailSaveContactBtn.disabled = true;
                 retailSaveContactBtn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Saving...';
@@ -5137,6 +5278,34 @@
         // next patient in.
         let ticket = null;
 
+        // 🔥 FIX: THE BUG -- "Send to Dispatch + Call Next" popup never
+        // showing after saving a sale, even though the "Serving Token #N
+        // ... Saving the sale sends them to Dispensing and calls the next
+        // patient automatically" banner was right there promising it
+        // would. This hook used to be assigned ONLY inside the "INIT"
+        // block further down, which is gated behind
+        // `sessionStorage.getItem('activeQueueTicket')` being ALREADY set
+        // at the exact moment this page first loads -- i.e. only true if
+        // you arrived here via "Open in POS" from the queue bar with a
+        // ticket already in hand. The NORMAL day-to-day flow is the
+        // opposite: sit on this POS page, then click the in-page "Call
+        // Next Patient" button (see initManualCallNextButton() below),
+        // which calls hydrateFormFromTicket() mid-session and correctly
+        // sets `ticket` + shows the banner -- but since nothing was in
+        // sessionStorage at PAGE LOAD, that gated block already returned
+        // early and this hook was simply never wired up for the rest of
+        // that page session. The save handler's guard
+        // (typeof window.__onRetailSaleSaved === 'function') then just
+        // silently found nothing to call. Assigning it here instead --
+        // unconditionally, once, up front -- covers both ways a ticket
+        // can become active. Safe to always wire up: showSendToDispatchPopup()
+        // itself already no-ops via `if (!ticket) return;` whenever
+        // there's no active ticket at all (e.g. a walk-in sale with no
+        // queue ticket involved), so this changes nothing for that case.
+        window.__onRetailSaleSaved = function () {
+            showSendToDispatchPopup();
+        };
+
         // ---- Pre-select the customer + show the "Serving Token #N"
         // banner for whichever ticket is current right now. ----
         function hydrateFormFromTicket(t) {
@@ -5385,7 +5554,9 @@
         })();
 
         // ---- INIT: only do anything if this POS session actually
-        // started from "Open in POS" on the queue bar. ----
+        // started from "Open in POS" on the queue bar. (window.__onRetailSaleSaved
+        // is now wired up unconditionally further up -- see that comment --
+        // so it no longer needs to happen here too.) ----
         const raw = sessionStorage.getItem('activeQueueTicket');
         if (!raw) return;
         let initialTicket;
@@ -5393,15 +5564,6 @@
         if (!initialTicket || !initialTicket.id) return;
 
         hydrateFormFromTicket(initialTicket);
-
-        // 🔥 Generic hook core POS calls unconditionally after every
-        // completed, non-quotation save (see the save handler above) --
-        // a no-op unless there's still an active ticket at that moment
-        // (e.g. it wasn't already sent manually via the banner's own
-        // "Send to Dispensing Now" button).
-        window.__onRetailSaleSaved = function () {
-            showSendToDispatchPopup();
-        };
     } catch (e) {
         console.warn('Queue bridge init failed (non-fatal, POS unaffected):', e);
     }
