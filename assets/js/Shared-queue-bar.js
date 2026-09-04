@@ -118,7 +118,7 @@ window.initQueueBar = function initQueueBar() {
                     <span id="queueBarDispensingActions" style="${!isBilling ? 'display:flex;' : 'display:none;'} gap:8px;">
                         <button id="queueBarCompleteDispensingBtn" style="background:#059669; color:white; border:none; border-radius:6px; padding:6px 12px; font-size:0.78rem; cursor:pointer;"><i class="fa-solid fa-check"></i> Mark Complete</button>
                     </span>
-                    <button id="queueBarSkipBtn" style="background:transparent; border:1px solid #334155; color:#cbd5e1; border-radius:6px; padding:6px 12px; font-size:0.78rem; cursor:pointer;">Skip / No Show</button>
+                    <button id="queueBarSkipBtn" style="background:transparent; border:1px solid #334155; color:#cbd5e1; border-radius:6px; padding:6px 12px; font-size:0.78rem; cursor:pointer;"><i class="fa-solid fa-clock"></i> Send to Pending (No Show)</button>
                 </div>
             </div>
         `;
@@ -278,16 +278,28 @@ window.initQueueBar = function initQueueBar() {
         }
     }
 
+    // 🔥 CHANGED: this used to call skip_ticket(), which marked the
+    // ticket 'skipped' -- a dead end nothing in the app could ever
+    // recall. Patients who simply weren't in the waiting area yet when
+    // called need a way back in, so this now sends them to
+    // send_ticket_to_pending() instead: it frees this counter's serving
+    // slot exactly the same way, but the ticket lands in the "Pending
+    // (No-Show)" list on the CRM registration screen, where staff can
+    // recall it back into the correct waiting line whenever the patient
+    // turns up. Immediately calling next() afterwards is the "trigger
+    // next client" behavior that was asked for -- staff don't have to
+    // click "Call Next" a second time after sending someone to pending.
     async function skipCurrent() {
         if (!servingTicket) return;
-        if (!confirm(`Mark token #${servingTicket.token_number} (${servingTicket.patient_name}) as skipped?`)) return;
+        if (!confirm(`Send token #${servingTicket.token_number} (${servingTicket.patient_name}) to Pending? They'll be off this counter and can be recalled later from the CRM screen's Pending list.`)) return;
         try {
-            const { error } = await supabaseClient.rpc('skip_ticket', { p_ticket_id: servingTicket.id });
+            const { error } = await supabaseClient.rpc('send_ticket_to_pending', { p_ticket_id: servingTicket.id });
             if (error) throw error;
             setServing(null);
             loadWaitingCount();
+            await callNext();
         } catch (err) {
-            console.error('Error skipping ticket:', err);
+            console.error('Error sending ticket to pending:', err);
             alert('Error: ' + (err.message || err));
         }
     }
