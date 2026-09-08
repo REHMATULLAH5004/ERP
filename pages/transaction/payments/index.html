@@ -137,14 +137,18 @@
                                  rewritten by updatePaymentSummary() to match whatever
                                  currency is actually being paid out (ZMW cash/bank, or USD
                                  bank when paying directly). -->
-                            <div><strong id="paymentAmountLabel">Amount to Pay (ZMW):</strong> <input type="number" class="form-control" id="paymentAmount" step="0.01" min="0.01" placeholder="Enter ZMW amount" style="width: 150px; display: inline-block;"></div>
+                            <!-- 🔥 CHANGED: this used to be a single free-text amount that
+                                 got auto-allocated across whatever was ticked (no way to
+                                 control how much went to which invoice). It's now a
+                                 read-only total computed from the "Pay Amount" box next to
+                                 each ticked invoice above -- edit those instead of this. -->
+                            <div><strong id="paymentAmountLabel">Total to Pay (ZMW):</strong> <input type="number" class="form-control" id="paymentAmount" step="0.01" min="0.01" readonly style="width: 150px; display: inline-block; background:#f1f5f9; cursor:not-allowed;"></div>
                         </div>
-                        <!-- 🔥 ADDED: explicit, live partial-payment indicator. Entering
-                             less than the full selected total has always been recorded
-                             correctly (status: 'partial', remaining balance carried
-                             forward) -- this just makes that outcome visible BEFORE you
-                             hit Record Payment, instead of it being an invisible side
-                             effect of typing a smaller number. -->
+                        <!-- 🔥 ADDED: explicit, live partial-payment indicator. Editing a
+                             specific invoice's Pay Amount box down below its full remaining
+                             has always been recorded correctly (status: 'partial', remaining
+                             balance carried forward) -- this just makes that outcome visible
+                             BEFORE you hit Record Payment. -->
                         <div id="paymentBalanceNote" style="margin-top: 10px; font-size: 0.82rem;"></div>
                     </div>
 
@@ -520,6 +524,20 @@
 .invoice-item .amount {
     font-weight: 600;
     color: #dc2626;
+}
+/* 🔥 ADDED: the per-invoice "Pay Amount" box that appears once its
+   checkbox is ticked -- lets a specific invoice (or the opening
+   balance row) be paid for less than its full remaining amount. */
+.invoice-item .pay-amount-box {
+    flex: 0 0 110px;
+}
+.invoice-item .pay-amount-box input {
+    width: 100%;
+    padding: 4px 6px;
+    border: 1px solid #cbd5e1;
+    border-radius: 4px;
+    text-align: right;
+    font-size: 0.85rem;
 }
 
 .statement-header {

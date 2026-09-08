@@ -76,9 +76,18 @@
                 <option value="Closed">Closed</option>
                 <option value="Cancelled">Cancelled</option>
             </select>
-            <select class="form-control" id="supplierFilter">
-                <option value="">All Suppliers</option>
-            </select>
+            <!-- 🔥 CHANGED: same type-to-filter searchable dropdown pattern
+                 as the NHIMA Number search in Retail POS -- a plain <select>
+                 got painful to scroll through as the supplier list grew.
+                 The real <select> stays in the DOM (hidden) since all the
+                 filtering code still reads its .value; see
+                 initSearchableSelect() in index.js. -->
+            <div style="position:relative;">
+                <input type="text" class="form-control" id="supplierFilterSearch" placeholder="All Suppliers" autocomplete="off" style="min-width:160px;">
+                <select class="form-control" id="supplierFilter" style="display:none;">
+                    <option value="">All Suppliers</option>
+                </select>
+            </div>
             <select class="form-control" id="overdueFilter">
                 <option value="all">All</option>
                 <option value="overdue">Overdue Only</option>
@@ -137,9 +146,15 @@
                     <div class="po-field">
                         <label>Supplier *</label>
                         <div style="display:flex;gap:6px;">
-                            <select class="form-control" id="poSupplier" required style="flex:1;">
-                                <option value="">Select Supplier</option>
-                            </select>
+                            <!-- 🔥 CHANGED: searchable dropdown, same pattern as
+                                 NHIMA Number search in Retail POS -- see
+                                 initSearchableSelect() in index.js. -->
+                            <div style="position:relative;flex:1;">
+                                <input type="text" class="form-control" id="poSupplierSearch" placeholder="Search supplier..." autocomplete="off">
+                                <select class="form-control" id="poSupplier" required style="display:none;">
+                                    <option value="">Select Supplier</option>
+                                </select>
+                            </div>
                             <button type="button" data-open-add-supplier data-target-select="poSupplier" title="Add Supplier"
                                 style="background:#2563eb;color:white;border:none;width:36px;border-radius:6px;cursor:pointer;flex-shrink:0;">+</button>
                         </div>
@@ -462,9 +477,15 @@
             </div>
             <div class="modal-body">
                 <div class="reorder-filters" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
-                    <select class="form-control" id="reorderSupplier">
-                        <option value="">All Suppliers</option>
-                    </select>
+                    <!-- 🔥 CHANGED: searchable dropdown, same pattern as
+                         NHIMA Number search in Retail POS -- see
+                         initSearchableSelect() in index.js. -->
+                    <div style="position:relative;">
+                        <input type="text" class="form-control" id="reorderSupplierSearch" placeholder="All Suppliers" autocomplete="off" style="min-width:160px;">
+                        <select class="form-control" id="reorderSupplier" style="display:none;">
+                            <option value="">All Suppliers</option>
+                        </select>
+                    </div>
                     <button type="button" data-open-add-supplier data-target-select="reorderSupplier" title="Add Supplier"
                         style="background:#2563eb;color:white;border:none;width:32px;height:32px;border-radius:6px;cursor:pointer;">+</button>
                     <select class="form-control" id="reorderCategory">

@@ -1052,45 +1052,100 @@
         // NHIMA SELECTION FUNCTIONS
         // ============================================
     
+        // 🔥 ADDED: the per-row "Pay Amount" box that appears next to a
+        // ticked claim. Defaults to the full outstanding balance (so
+        // ticking + processing still pays it in full, same as before)
+        // but is editable so a half/partial payment against that one
+        // claim can be typed in directly, instead of the claim always
+        // being settled for its whole balance.
+        function getNhimaAmountInputFor(checkbox) {
+            const row = checkbox.closest('tr');
+            return row ? row.querySelector('.nhima-claim-amount-input') : null;
+        }
+
+        window.onNhimaClaimToggle = function(checkbox) {
+            const amountInput = getNhimaAmountInputFor(checkbox);
+            if (amountInput) {
+                amountInput.style.display = checkbox.checked ? 'inline-block' : 'none';
+                if (checkbox.checked) {
+                    // reset to the full balance each time it's freshly ticked
+                    amountInput.value = (parseFloat(checkbox.dataset.balance) || 0).toFixed(2);
+                }
+            }
+            window.updateNhimaSelection();
+        };
+
+        window.onNhimaAmountInput = function(input) {
+            const balance = parseFloat(input.dataset.balance) || parseFloat(input.max) || 0;
+            let value = parseFloat(input.value);
+            if (isNaN(value) || value < 0) value = 0;
+            if (value > balance) {
+                input.value = balance.toFixed(2);
+            }
+            window.updateNhimaSelection();
+        };
+
         window.updateNhimaSelection = function() {
             // 🔥 FIX: Prevent updateNhimaSelection from reading hidden Bulk Modal checkboxes
             const modal = document.getElementById('nhimaBulkModal');
             if (!modal || !modal.classList.contains('show')) return;
-    
+
             const checked = document.querySelectorAll('.nhima-claim-checkbox:checked');
             const summary = document.getElementById('nhimaSelectionSummary');
-            
+
             if (checked.length === 0) {
                 if (summary) summary.style.display = 'none';
                 return;
             }
-    
-            let totalAmount = 0, totalBalance = 0;
+
+            let totalAmount = 0, totalBalance = 0, totalPayAmount = 0;
             checked.forEach(cb => {
                 totalAmount += parseFloat(cb.dataset.amount) || 0;
                 totalBalance += parseFloat(cb.dataset.balance) || 0;
+                const amountInput = getNhimaAmountInputFor(cb);
+                totalPayAmount += amountInput ? (parseFloat(amountInput.value) || 0) : (parseFloat(cb.dataset.balance) || 0);
             });
-    
+
             document.getElementById('nhimaSelectedCount').textContent = checked.length;
             document.getElementById('nhimaSelectedTotal').textContent = `ZK ${formatNumber(totalAmount)}`;
-            document.getElementById('nhimaSelectedBalance').textContent = `ZK ${formatNumber(totalBalance)}`;
+            // 🔥 CHANGED: reflects what will actually be paid (the sum of
+            // the editable Pay Amount boxes), not always the full
+            // outstanding balance of everything ticked.
+            document.getElementById('nhimaSelectedBalance').textContent = `ZK ${formatNumber(totalPayAmount)}`;
             if (summary) summary.style.display = 'block';
         };
-    
+
         window.selectAllNhimaClaims = function() {
-            document.querySelectorAll('.nhima-claim-checkbox:not(:disabled)').forEach(cb => cb.checked = true);
+            document.querySelectorAll('.nhima-claim-checkbox:not(:disabled)').forEach(cb => {
+                cb.checked = true;
+                const amountInput = getNhimaAmountInputFor(cb);
+                if (amountInput) {
+                    amountInput.style.display = 'inline-block';
+                    amountInput.value = (parseFloat(cb.dataset.balance) || 0).toFixed(2);
+                }
+            });
             window.updateNhimaSelection();
         };
-    
+
         window.deselectAllNhimaClaims = function() {
-            document.querySelectorAll('.nhima-claim-checkbox').forEach(cb => cb.checked = false);
+            document.querySelectorAll('.nhima-claim-checkbox').forEach(cb => {
+                cb.checked = false;
+                const amountInput = getNhimaAmountInputFor(cb);
+                if (amountInput) amountInput.style.display = 'none';
+            });
             window.updateNhimaSelection();
         };
-    
+
         window.toggleAllNhimaClaims = function() {
             const selectAll = document.getElementById('selectAllNhima');
+            const isChecked = selectAll?.checked || false;
             document.querySelectorAll('.nhima-claim-checkbox:not(:disabled)').forEach(cb => {
-                cb.checked = selectAll?.checked || false;
+                cb.checked = isChecked;
+                const amountInput = getNhimaAmountInputFor(cb);
+                if (amountInput) {
+                    amountInput.style.display = isChecked ? 'inline-block' : 'none';
+                    if (isChecked) amountInput.value = (parseFloat(cb.dataset.balance) || 0).toFixed(2);
+                }
             });
             window.updateNhimaSelection();
         };
@@ -1120,8 +1175,25 @@
                     const balance = parseFloat(cb.dataset.balance) || 0;
                     const customerName = cb.dataset.customer || 'Unknown';
                     const nhimaNumber = cb.dataset.nhima || 'N/A';
-    
+
                     if (balance <= 0) continue;
+
+                    // 🔥 FIX: this used to always settle the claim for its
+                    // FULL outstanding balance, with no way to record a
+                    // half/partial payment against a single selected
+                    // claim. Now reads the editable "Pay Amount" box next
+                    // to each ticked claim -- defaults to the full balance
+                    // (unchanged behavior if left as-is) but can be typed
+                    // down to any smaller amount.
+                    const amountRow = cb.closest('tr');
+                    const amountInput = amountRow ? amountRow.querySelector('.nhima-claim-amount-input') : null;
+                    let payAmount = amountInput ? parseFloat(amountInput.value) : balance;
+                    if (isNaN(payAmount) || payAmount <= 0) {
+                        errors.push(`Claim ${claimNumber}: Enter a valid pay amount greater than 0`);
+                        failCount++;
+                        continue;
+                    }
+                    if (payAmount > balance) payAmount = balance;
     
                     let customerId = null;
                     
@@ -1185,12 +1257,12 @@
                     const receiptData = {
                         receipt_number: receiptNumber,
                         receipt_date: settlementDate,
-                        amount: balance,
+                        amount: payAmount,
                         payment_method: 'Bank Transfer',
                         status: 'Received',
                         customer_type: 'NHIMA',
                         customer_id: customerId,
-                        notes: `NHIMA Settlement - ${claimNumber} - ${customerName}`,
+                        notes: `NHIMA Settlement - ${claimNumber} - ${customerName}${payAmount < balance ? ' (Partial)' : ''}`,
                         nhima_claim_number: claimNumber
                     };
                     if (nhimaNumber && nhimaNumber !== 'N/A') receiptData.nhima_number = nhimaNumber;
@@ -1211,10 +1283,10 @@
                     const linkData = {
                         receipt_id: receiptId,
                         sale_id: claimId,
-                        amount_paid: balance,
+                        amount_paid: payAmount,
                         payment_date: settlementDate,
                         payment_method: 'Bank Transfer',
-                        status: 'paid',
+                        status: payAmount >= balance ? 'paid' : 'partial',
                         customer_id: customerId,
                         nhima_claim_number: claimNumber
                     };
@@ -1231,11 +1303,17 @@
                         continue;
                     }
     
-                    await supabaseClient.from('sales').update({ status: 'Paid' }).eq('id', claimId);
+                    // 🔥 FIX: only mark the claim fully 'Paid' when the
+                    // pay amount actually covers the whole balance -- a
+                    // partial payment leaves it as 'Partial' so it still
+                    // shows up here with its remaining balance next time,
+                    // matching the same convention used by the CSV bulk
+                    // settlement path above.
+                    await supabaseClient.from('sales').update({ status: payAmount >= balance ? 'Paid' : 'Partial' }).eq('id', claimId);
                     await createReceiptGLEntry({
                         receipt_number: receiptNumber,
                         receipt_date: settlementDate,
-                        amount: balance,
+                        amount: payAmount,
                         payment_method: 'Bank Transfer',
                         customer_type: 'NHIMA'
                     });
@@ -1331,6 +1409,7 @@
                                 <th style="padding:8px 12px;text-align:right;">Amount</th>
                                 <th style="padding:8px 12px;text-align:right;">Paid</th>
                                 <th style="padding:8px 12px;text-align:right;">Balance</th>
+                                <th style="padding:8px 12px;text-align:right;">Pay Amount</th>
                                 <th style="padding:8px 12px;text-align:center;">Status</th>
                             </tr>
                         </thead>
@@ -1340,7 +1419,7 @@
                                 return `
                                 <tr style="border-bottom:1px solid #f1f5f9;${claim.isSettled ? 'opacity:0.6;' : ''}">
                                     <td style="padding:8px 12px;text-align:center;">
-                                        <input type="checkbox" class="nhima-claim-checkbox" 
+                                        <input type="checkbox" class="nhima-claim-checkbox"
                                             data-index="${index}"
                                             data-claim-id="${claim.saleId}"
                                             data-claim-number="${claim.claimNumber}"
@@ -1349,7 +1428,7 @@
                                             data-customer="${claim.customerName}"
                                             data-nhima="${claim.nhimaNumber}"
                                             ${claim.isSettled ? 'disabled' : ''}
-                                            onchange="updateNhimaSelection()">
+                                            onchange="onNhimaClaimToggle(this)">
                                     </td>
                                     <td style="padding:8px 12px;font-weight:500;">${claim.claimNumber}</td>
                                     <td style="padding:8px 12px;">${claim.customerName}</td>
@@ -1357,6 +1436,20 @@
                                     <td style="padding:8px 12px;text-align:right;">ZK ${formatNumber(claim.amount)}</td>
                                     <td style="padding:8px 12px;text-align:right;color:#10b981;">ZK ${formatNumber(claim.paidAmount)}</td>
                                     <td style="padding:8px 12px;text-align:right;font-weight:600;color:${claim.balance > 0 ? '#dc2626' : '#10b981'};">ZK ${formatNumber(claim.balance)}</td>
+                                    <td style="padding:8px 12px;text-align:right;">
+                                        <!-- 🔥 ADDED: appears (and defaults to the full balance)
+                                             the moment this claim is ticked -- edit it down to
+                                             record a half/partial payment against just this
+                                             claim instead of always settling it in full. -->
+                                        <input type="number" class="nhima-claim-amount-input"
+                                            data-index="${index}"
+                                            data-balance="${claim.balance || 0}"
+                                            min="0.01" max="${claim.balance || 0}" step="0.01"
+                                            value="${(claim.balance || 0).toFixed(2)}"
+                                            placeholder="Amount"
+                                            style="width:100px;padding:4px 6px;border:1px solid #cbd5e1;border-radius:4px;text-align:right;display:none;"
+                                            oninput="onNhimaAmountInput(this)">
+                                    </td>
                                     <td style="padding:8px 12px;text-align:center;">
                                         <span style="background:${statusColor}20;color:${statusColor};padding:2px 10px;border-radius:10px;font-size:0.7rem;font-weight:600;">${claim.isSettled ? 'Settled' : 'Pending'}</span>
                                     </td>
@@ -1369,7 +1462,7 @@
                     <div style="display:flex;gap:20px;flex-wrap:wrap;">
                         <span>Selected: <strong id="nhimaSelectedCount">0</strong> claims</span>
                         <span>Total Amount: <strong id="nhimaSelectedTotal">ZK 0.00</strong></span>
-                        <span>Outstanding Balance: <strong id="nhimaSelectedBalance">ZK 0.00</strong></span>
+                        <span>Amount to Pay: <strong id="nhimaSelectedBalance">ZK 0.00</strong></span>
                     </div>
                 </div>
                 <div style="margin-top:15px;padding:12px;background:#f0fdf4;border-radius:6px;border-left:4px solid #10b981;">

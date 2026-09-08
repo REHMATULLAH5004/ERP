@@ -1293,7 +1293,13 @@
             }
         });
 
-        if (stockErrors.length > 0) {
+        // 🔥 CHANGED: insufficient stock still blocks an actual sale
+        // (COMPLETED) -- we can't sell what isn't on the shelf -- but a
+        // QUOTATION is just a price estimate for the customer, not a
+        // stock commitment (and doesn't deduct stock either way), so it
+        // shouldn't be blocked by what's physically available right now.
+        // The requested quantity is still saved as entered.
+        if (stockErrors.length > 0 && status !== 'QUOTATION') {
             let errorMsg = '❌ Stock validation failed:\n\n';
             stockErrors.forEach(err => {
                 errorMsg += `• ${err.product} (${err.batch}): Requested ${err.requested}, Available ${err.available}\n`;

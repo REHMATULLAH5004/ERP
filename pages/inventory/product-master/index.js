@@ -1666,7 +1666,25 @@ ${errorMessages.length > 5 ? `\n... and ${errorMessages.length - 5} more errors`
         }
 
         const input = document.getElementById('quickAddInput');
-        const name = input.value.trim();
+        // 🔥 FIX: "Add Generic Name" (and every other quick-add here --
+        // Dosage Form, Category, Sub-Category, Brand -- share this exact
+        // same insert path) was throwing the RAW Postgres error straight
+        // at the user the moment the typed name already existed --
+        // "duplicate key value violates unique constraint
+        // generic_names_name_key" -- which reads as "the system is
+        // broken" rather than "this already exists." Two fixes:
+        //   1. Auto-Proper-Case the typed name if it's ALL CAPS, same
+        //      safeguard already applied to Product Name and Supplier
+        //      Name elsewhere in this file -- stops a fresh ALL-CAPS
+        //      entry here from becoming yet another casing inconsistency
+        //      to clean up later.
+        //   2. Check for an existing match CASE-INSENSITIVELY before
+        //      ever attempting the insert. If one exists, just select it
+        //      instead of erroring -- "Paracetamol" and "paracetamol"
+        //      are the same generic name to any pharmacist typing it in,
+        //      even though the database's UNIQUE constraint (correctly)
+        //      only catches an exact-case duplicate.
+        const name = toProperCaseIfAllCaps(input.value.trim());
         if (!name) {
             showToast("Please enter a name.", "error");
             return;
@@ -1680,9 +1698,19 @@ ${errorMessages.length > 5 ? `\n... and ${errorMessages.length - 5} more errors`
             'brand': 'brands',
             'supplier': 'suppliers'
         };
+        // Human-readable labels for the toast messages below.
+        const typeLabels = {
+            'generic': 'Generic Name',
+            'dosage': 'Dosage Form',
+            'category': 'Category',
+            'subcategory': 'Sub-Category',
+            'brand': 'Brand',
+            'supplier': 'Supplier'
+        };
 
         try {
             let insertData = { name };
+            let categoryIdForSubcategory = null;
 
             // 🔥 FIX (issue #3): subcategory now also saves its Location
             // field, same as category already did.
@@ -1701,12 +1729,51 @@ ${errorMessages.length > 5 ? `\n... and ${errorMessages.length - 5} more errors`
                     return;
                 }
                 insertData.category_id = catId;
+                categoryIdForSubcategory = catId;
             }
 
-            const { data, error } = await supabaseClient
+            // Case-insensitive existing-match check, scoped to the same
+            // Category for a Sub-Category (its uniqueness is per-category
+            // -- "Tablets" can legitimately exist under more than one
+            // Category) and by name alone for everything else (each of
+            // those is globally unique).
+            let existingQuery = supabaseClient
                 .from(tableMap[type])
-                .insert([insertData])
-                .select();
+                .select('id, name')
+                .ilike('name', name);
+            if (type === 'subcategory') {
+                existingQuery = existingQuery.eq('category_id', categoryIdForSubcategory);
+            }
+            const { data: existingMatches } = await existingQuery.limit(1);
+
+            let data, error;
+            let wasExisting = false;
+            if (existingMatches && existingMatches.length > 0) {
+                data = existingMatches;
+                wasExisting = true;
+                showToast(`${typeLabels[type] || type} "${existingMatches[0].name}" already exists -- selected it instead of creating a duplicate.`, 'info');
+            } else {
+                ({ data, error } = await supabaseClient
+                    .from(tableMap[type])
+                    .insert([insertData])
+                    .select());
+
+                // Fallback for the rare race (two people adding the exact
+                // same name at almost the same moment) -- the pre-check
+                // above just missed it by a beat. Re-select instead of
+                // showing the raw duplicate-key error in that case too.
+                if (error && error.code === '23505') {
+                    let retryQuery = supabaseClient.from(tableMap[type]).select('id, name').ilike('name', name);
+                    if (type === 'subcategory') retryQuery = retryQuery.eq('category_id', categoryIdForSubcategory);
+                    const { data: retryMatch } = await retryQuery.limit(1);
+                    if (retryMatch && retryMatch.length > 0) {
+                        data = retryMatch;
+                        error = null;
+                        wasExisting = true;
+                        showToast(`${typeLabels[type] || type} "${retryMatch[0].name}" already exists -- selected it instead of creating a duplicate.`, 'info');
+                    }
+                }
+            }
 
             if (error) throw error;
 
@@ -1734,7 +1801,13 @@ ${errorMessages.length > 5 ? `\n... and ${errorMessages.length - 5} more errors`
                 }
             }
 
-            showToast(`${type} added and selected successfully!`, 'success');
+            // Only announce "added" for an actual new row -- the reuse
+            // path above already showed its own "already exists" toast,
+            // so a second "added successfully" right after it would be
+            // confusing (nothing was actually added).
+            if (!wasExisting) {
+                showToast(`${typeLabels[type] || type} added and selected successfully!`, 'success');
+            }
         } catch (error) {
             showToast("Error saving: " + error.message, "error");
         }

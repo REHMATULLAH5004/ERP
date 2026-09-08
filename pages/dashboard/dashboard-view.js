@@ -592,6 +592,33 @@
         `;
     }
 
+    // 🔥 ADDED: same pattern as retail/index.js and hr/employee/index.js --
+    // a write that gets rejected by RLS because the session's token was
+    // stale (not because the user actually lacks permission) gets ONE
+    // retry after a session refresh, instead of just failing quietly.
+    // This is exactly what was silently breaking "Print Labels" not
+    // clearing the pending queue: the sticker printed fine (that part
+    // never touches Supabase), but the labels_printed_at update that's
+    // supposed to remove it from the list was being rejected by RLS and
+    // swallowed by a bare console.warn -- so the sale just sat in
+    // "Pending Labels" forever even though it had genuinely been printed,
+    // making the dashboard look permanently uncleaned.
+    async function withAuthRetry(operationFn) {
+        let result = await operationFn();
+        const err = result?.error;
+        const looksLikeAuthRejection = err && (
+            err.code === '42501' ||
+            err.code === 'PGRST301' ||
+            /row-level security|jwt|permission denied/i.test(err.message || '')
+        );
+        if (looksLikeAuthRejection) {
+            console.warn('⚠️ Write rejected (looks like a stale session) -- refreshing session and retrying once:', err.message);
+            try { await supabaseClient.auth.refreshSession(); } catch (refreshError) { console.error('Session refresh failed:', refreshError); }
+            result = await operationFn();
+        }
+        return result;
+    }
+
     // Opens the print window for one sale's labels and marks
     // labels_printed_at so it drops off the pending queue everywhere --
     // any device/terminal viewing this page sees the same state. Always
@@ -608,13 +635,20 @@
         stickerWindow.document.close();
         stickerWindow.print();
 
-        try {
-            await supabaseClient
+        const { error: markPrintedError } = await withAuthRetry(() =>
+            supabaseClient
                 .from('sales')
                 .update({ labels_printed_at: new Date().toISOString() })
-                .eq('id', sale.id);
-        } catch (err) {
-            console.warn('Could not mark labels_printed_at:', err);
+                .eq('id', sale.id)
+        );
+
+        if (markPrintedError) {
+            // 🔥 CHANGED: this used to be swallowed with just a
+            // console.warn, so staff had no idea the sale hadn't actually
+            // dropped off the pending list -- it would just keep
+            // reappearing after every refresh with no explanation.
+            console.error('Could not mark labels_printed_at even after retry:', markPrintedError);
+            alert(`The label(s) for ${sale.sale_id} printed, but this device could not mark it as printed in the system (it will still show as pending here). Please try clicking "Print Labels" again for this sale, or refresh the page. Error: ${markPrintedError.message || markPrintedError}`);
         }
 
         await loadDispenseQueue();
@@ -655,6 +689,23 @@
     // just to get the items it already has in front of it.
     const dispenseSaleCache = {};
 
+    // 🔥 ADDED: only TODAY's unprinted sales show here -- a sale from a
+    // previous day drops off this list once the day rolls over, even if
+    // it was never printed. This is a deliberate stopgap: some sales
+    // (e.g. a cash sale of pure surgicals/non-drug items) never get their
+    // "Print Labels" clicked because there's genuinely no dispensing
+    // label to print, and with no date filter those sat here forever,
+    // cluttering the dashboard indefinitely. Once every product carries a
+    // "needs a label" flag (planned once all stock is in the system),
+    // this date cutoff can be replaced with filtering by that flag
+    // instead, so a genuinely forgotten DRUG label doesn't just silently
+    // vanish at midnight the way this stopgap allows today.
+    function startOfTodayIso() {
+        const startOfToday = new Date();
+        startOfToday.setHours(0, 0, 0, 0);
+        return startOfToday.toISOString();
+    }
+
     async function loadDispenseQueue() {
         const tbody = document.getElementById('dashDispenseQueueBody');
         if (!tbody) return;
@@ -666,6 +717,7 @@
                 .eq('client_type', 'RETAIL')
                 .neq('is_quotation', true)
                 .is('labels_printed_at', null)
+                .gte('created_at', startOfTodayIso())
                 .order('created_at', { ascending: false })
                 .limit(30);
 

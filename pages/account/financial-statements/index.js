@@ -117,14 +117,30 @@
     // CALCULATE PERIOD BALANCES
     // ============================================
 
-    async function calculateAccountBalances(startDate, endDate) {
+    // 🔥 FIX: this used to be called with the SAME period-bounded
+    // startDate/endDate for every report type, including the Balance
+    // Sheet. That's correct for a "for the period" report like the Income
+    // Statement, but a Balance Sheet is a snapshot of everything as of one
+    // date -- it must include every posted transaction from account
+    // inception through endDate, not just what falls inside whatever
+    // period filter ("This Month", "This Quarter", etc.) happens to be
+    // selected. Confirmed against real data: an opening-balance entry (or
+    // a supplier's opening payable, once posted) dated before the
+    // selected period's start silently vanished from the Balance Sheet's
+    // asset/liability/equity totals even though it was correctly posted
+    // and Trial Balance showed it fine. `cumulative: true` drops the
+    // lower bound entirely so callers building the Balance Sheet get
+    // every Posted line through endDate; period-based reports
+    // (Income Statement, Cash Flow, Retained Earnings) keep calling this
+    // the original way and are unaffected.
+    async function calculateAccountBalances(startDate, endDate, { cumulative = false } = {}) {
         const balances = {};
-        
+
         // 1. Initialize all accounts
         state.accounts.forEach(acc => {
-            balances[acc.code] = { 
-                ...acc, 
-                period_debit: 0, 
+            balances[acc.code] = {
+                ...acc,
+                period_debit: 0,
                 period_credit: 0,
                 net_balance: 0
             };
@@ -139,7 +155,7 @@
             let entryDate = l.entry_date || l.journal_entries?.entry_date;
             if (!entryDate) return false;
             const entryTime = new Date(entryDate).getTime();
-            return entryTime >= start && entryTime <= end;
+            return cumulative ? (entryTime <= end) : (entryTime >= start && entryTime <= end);
         });
 
         // 4. Sum debits and credits
@@ -180,7 +196,14 @@
             }
         });
 
-        state.accountBalances = balances;
+        // Cumulative (Balance Sheet) results are kept separate from the
+        // period-bounded ones other reports read, so computing one never
+        // clobbers the other.
+        if (cumulative) {
+            state.cumulativeBalances = balances;
+        } else {
+            state.accountBalances = balances;
+        }
         return balances;
     }
 
@@ -309,8 +332,11 @@
     // ============================================
 
     function generateBalanceSheet(startDate, endDate) {
-        const balances = state.accountBalances;
-        
+        // 🔥 FIX: reads the CUMULATIVE (inception-through-endDate) balances
+        // computed separately below, not the period-bounded ones the other
+        // three report types use -- see calculateAccountBalances' comment.
+        const balances = state.cumulativeBalances || state.accountBalances;
+
         // 1. Filter accounts. For Balance Sheet, we must use net_balance
         const assetAccounts = state.accounts.filter(a => a.type === 'Asset' && Math.abs(balances[a.code]?.net_balance || 0) > 0.01);
         const liabilityAccounts = state.accounts.filter(a => a.type === 'Liability' && Math.abs(balances[a.code]?.net_balance || 0) > 0.01);
@@ -575,6 +601,14 @@
         // resolved, rendering against whatever was left over from the
         // PREVIOUS calculation (or nothing, on first load).
         await calculateAccountBalances(startDate, endDate);
+        // 🔥 ADDED: the Balance Sheet additionally needs the CUMULATIVE
+        // (inception-through-endDate) balances -- computed only when
+        // that's the report being viewed, so switching period filters on
+        // Income Statement/Cash Flow/Retained Earnings doesn't do this
+        // extra pass for nothing.
+        if (reportType === 'balance-sheet') {
+            await calculateAccountBalances(startDate, endDate, { cumulative: true });
+        }
 
         let html = '';
         switch (reportType) {

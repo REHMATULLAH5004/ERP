@@ -43,25 +43,49 @@
     let lastResults = null;
 
     // ============================================
+    // 🔥 FIX: PostgREST/Supabase caps a query with no .range() at 1000 rows
+    // by default. journal_entries alone just crossed that (1154 rows and
+    // growing), so the plain .select() below was silently truncating --
+    // whichever entries happened to fall outside the first 1000 (which, as
+    // the table grows, is an ever-larger and unpredictable slice) vanished
+    // from this report's "ground truth" GL totals, making Bank (ZMW)/(USD)
+    // Opening and Closing intermittently show K0.00 for no visible reason.
+    // Every raw journal_entries/journal_lines fetch in this file now pages
+    // through in batches of 1000 until exhausted, so nothing is ever
+    // silently dropped no matter how large these tables get.
+    // ============================================
+    async function fetchAllRows(query) {
+        const PAGE_SIZE = 1000;
+        let allRows = [];
+        let from = 0;
+        while (true) {
+            const { data, error } = await query.range(from, from + PAGE_SIZE - 1);
+            if (error) throw error;
+            allRows = allRows.concat(data || []);
+            if (!data || data.length < PAGE_SIZE) break;
+            from += PAGE_SIZE;
+        }
+        return allRows;
+    }
+
+    // ============================================
     // 1. GL-BASED OPENING/CLOSING (ground truth -- unchanged approach)
     // ============================================
     async function computeGLTotals(reportDate) {
         const ACCOUNTS = ['1400', '1111', '1121', '1120'];
 
-        const { data: entries, error: entriesError } = await supabaseClient
-            .from('journal_entries')
-            .select('id, entry_date')
-            .lte('entry_date', reportDate);
-        if (entriesError) throw entriesError;
+        const entries = await fetchAllRows(
+            supabaseClient.from('journal_entries').select('id, entry_date').lte('entry_date', reportDate)
+        );
 
         const allEntryIds = new Set((entries || []).map(e => e.id));
         const todayEntryIds = new Set((entries || []).filter(e => e.entry_date === reportDate).map(e => e.id));
 
-        const { data: lines, error: linesError } = await supabaseClient
-            .from('journal_lines')
-            .select('journal_entry_id, account_code, debit, credit, description')
-            .in('account_code', ACCOUNTS);
-        if (linesError) throw linesError;
+        const lines = await fetchAllRows(
+            supabaseClient.from('journal_lines')
+                .select('journal_entry_id, account_code, debit, credit, description')
+                .in('account_code', ACCOUNTS)
+        );
 
         const results = {};
         ACCOUNTS.forEach(code => { results[code] = { closing: 0, inward: 0, outward: 0 }; });
@@ -255,13 +279,25 @@
             });
         }
 
+        // 🔥 FIX: was filtering payments by `currency` (the SETTLED
+        // invoice's currency -- USD or ZMW), not by which account the
+        // money actually left. A USD invoice paid via the ZMW bank still
+        // moves real ZMW out of Cash/Bank-ZMW (see createPaymentGLEntry's
+        // zmwTotal = amount_zmw + amount_usd*exchange_rate), so filtering
+        // on currency='ZMW' silently dropped it here -- and the matching
+        // bug in computeBankUsdBreakdown below double-counted the SAME
+        // payment as if it had come out of the USD bank instead, which it
+        // never touched. `payment_method` is the only field that actually
+        // says which account paid; use that, and convert with the
+        // payment's own exchange_rate exactly as the GL entry did.
         const { data: payments } = await supabaseClient
             .from('payments')
-            .select('payment_method, currency, amount_zmw')
-            .eq('currency', 'ZMW')
+            .select('payment_method, amount_usd, amount_zmw, exchange_rate')
             .gte('payment_date', reportDate).lte('payment_date', reportDate);
         (payments || []).forEach(p => {
-            if (p.payment_method !== 'Bank Transfer') outward.payable += p.amount_zmw || 0;
+            if (p.payment_method === 'Cash') {
+                outward.payable += (p.amount_zmw || 0) + (p.amount_usd || 0) * (p.exchange_rate || 1);
+            }
         });
 
         const { data: payroll } = await supabaseClient
@@ -325,13 +361,19 @@
             if (e.account === 'Bank (ZMW)') outward.expense += e.amount || 0;
         });
 
+        // 🔥 FIX: same issue as Cash's breakdown above -- classify by
+        // payment_method (which account actually paid), not by the
+        // settled invoice's currency. A USD invoice settled via "Bank
+        // Transfer" (ZMW bank) belongs here, converted at the payment's
+        // own exchange_rate, exactly like createPaymentGLEntry does.
         const { data: payments } = await supabaseClient
             .from('payments')
-            .select('payment_method, currency, amount_zmw')
-            .eq('currency', 'ZMW')
+            .select('payment_method, amount_usd, amount_zmw, exchange_rate')
             .gte('payment_date', reportDate).lte('payment_date', reportDate);
         (payments || []).forEach(p => {
-            if (p.payment_method === 'Bank Transfer') outward.payable += p.amount_zmw || 0;
+            if (p.payment_method === 'Bank Transfer') {
+                outward.payable += (p.amount_zmw || 0) + (p.amount_usd || 0) * (p.exchange_rate || 1);
+            }
         });
 
         const { data: payroll } = await supabaseClient
@@ -359,10 +401,16 @@
             transferToZmw: pairing['1120'].to1121
         };
 
+        // 🔥 FIX: only a payment_method of 'Bank Transfer USD' actually
+        // moves money out of this account (see createPaymentGLEntry's
+        // payCurrency==='USD' branch) -- filtering on the settled
+        // invoice's `currency` instead wrongly counted a USD invoice paid
+        // via the ZMW bank as if it had come from here too, even though
+        // this account was never touched.
         const { data: payments } = await supabaseClient
             .from('payments')
-            .select('currency, amount_usd')
-            .eq('currency', 'USD')
+            .select('payment_method, amount_usd')
+            .eq('payment_method', 'Bank Transfer USD')
             .gte('payment_date', reportDate).lte('payment_date', reportDate);
         (payments || []).forEach(p => { outward.paidUsd += p.amount_usd || 0; });
 

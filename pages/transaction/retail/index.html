@@ -240,10 +240,28 @@
                         <input type="text" id="retailNrc" placeholder="e.g. 123456/78/1" class="pos-input">
                     </div>
 
-                    <!-- Claim Number (Mandatory for NHIMA) -->
+                    <!-- Claim Number (required unless a Bypass Number is used below --
+                         see the fingerprint-bypass note on that field) -->
                     <div class="pos-form-group">
-                        <label class="pos-label">Claim Number *</label>
-                        <input type="text" id="retailClaimNumber" required placeholder="e.g. NHIMA-CLAIM-2026-001" class="pos-input">
+                        <label class="pos-label">Claim Number</label>
+                        <input type="text" id="retailClaimNumber" placeholder="e.g. NHIMA-CLAIM-2026-001" class="pos-input">
+                    </div>
+
+                    <!-- 🔥 ADDED: some patients can't give a fingerprint at the
+                         till -- NHIMA's own process for that is a temporary
+                         Bypass Number, with the real Claim Number only
+                         released once NHIMA approves it (can take days). This
+                         lets the sale save with just the bypass number instead
+                         of forcing a placeholder into Claim Number. Whoever
+                         handles NHIMA paperwork later searches for this sale
+                         (Search Invoices -- by bypass number, name, etc.) and
+                         edits it in to fill in the real Claim Number. -->
+                    <div class="pos-form-group">
+                        <label class="pos-label">Bypass Number</label>
+                        <input type="text" id="retailBypassNumber" placeholder="If fingerprint could not be used" class="pos-input">
+                        <p class="helper-text" style="font-size: 0.72rem; margin-top: 4px;">
+                            Only if fingerprint verification failed. Fill in the real Claim Number above later, once NHIMA approves it.
+                        </p>
                     </div>
 
                     <div class="pos-form-group">

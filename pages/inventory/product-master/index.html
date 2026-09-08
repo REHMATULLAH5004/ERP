@@ -462,8 +462,8 @@
                                 </select>
                             </div>
                             <div class="form-group" style="margin-bottom: 0;">
-                                <label>Exchange Rate</label>
-                                <input type="number" id="batchExchangeRate" step="0.01" placeholder="e.g. 25.50" style="width: 100%; padding: 8px; border: 1px solid #e2e8f0; border-radius: 4px;">
+                                <label>Exchange Rate <i class="fa-solid fa-lock" style="font-size: 0.7rem; color: #94a3b8;" title="Locked to the shared rate set on the Dashboard"></i></label>
+                                <input type="number" id="batchExchangeRate" step="0.01" placeholder="e.g. 25.50" readonly style="width: 100%; padding: 8px; border: 1px solid #e2e8f0; border-radius: 4px; background:#f1f5f9; color:#64748b; cursor:not-allowed;" title="Locked to today's shared exchange rate. Change it on the Dashboard if it's wrong.">
                             </div>
                         </div>
                         <div style="margin-top: 8px; font-size: 0.9rem; color: #64748b; text-align: right;">
@@ -558,4 +558,3 @@
         </form>
     </div>
 </div>
-

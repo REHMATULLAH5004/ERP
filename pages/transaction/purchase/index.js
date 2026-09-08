@@ -255,9 +255,11 @@
     
     async function loadSuppliers() {
         try {
+            // 🔥 CHANGED: added `phone` -- needed for the WhatsApp PO
+            // notification in createNewPO() below.
             const { data, error } = await supabaseClient
                 .from('suppliers')
-                .select('id, name')
+                .select('id, name, phone')
                 .order('name', { ascending: true });
 
             if (error) throw error;
@@ -528,30 +530,13 @@
             const categoryMap = await fetchCategoryNames(products);
             const stockMap = await fetchStockLevels(products);
 
-            const reorderItems = products.filter(p => {
-                const stock = stockMap[p.id] || 0;
-                const minQty = p.min_order_qty || 1;
-                return stock < minQty;
-            });
-
-            // 🔥 ADDED: "same generic name" suggestions. For every product
-            // that IS due for reorder, also surface sibling products that
-            // share its generic_name_id but aren't below min level yet --
-            // so staff can optionally top them up while already ordering
-            // from that supplier, or ignore them this time. Scoped to
-            // whatever the current Supplier/Category filters already
-            // pulled into `products` -- no extra query needed.
-            const dueGenericIds = new Set(reorderItems.map(p => p.generic_name_id).filter(Boolean));
-            const dueIds = new Set(reorderItems.map(p => p.id));
-            const suggestedItems = dueGenericIds.size > 0
-                ? products.filter(p => p.generic_name_id && dueGenericIds.has(p.generic_name_id) && !dueIds.has(p.id))
-                : [];
-
-            // 🔥 ADDED: last purchase cost for everything on screen, so
-            // staff can compare today's rate against what was actually
-            // paid last time before committing to a quantity/price.
-            const relevantIds = [...new Set([...reorderItems, ...suggestedItems].map(p => p.id))];
-            const lastPurchaseMap = await fetchLastPurchaseCosts(relevantIds);
+            // 🔥 ADDED: last purchase cost + 3-month sales for every
+            // product in the current filter (not just the ones already
+            // known to be due) -- needed up front now because the "due"
+            // decision itself depends on combined generic-level sales,
+            // computed below.
+            const allIds = products.map(p => p.id);
+            const lastPurchaseMap = await fetchLastPurchaseCosts(allIds);
 
             // 🔥 FIX: reorder_qty used to just top current_stock back up
             // to min_order_qty (e.g. min 300, stock 290 -> reorder 10).
@@ -563,32 +548,86 @@
             // Falls back to the old top-up-to-min behavior only when
             // there's no 3-month sales history to go on (e.g. a brand new
             // product), since "0" would be a worse suggestion than that.
-            const salesMap = await fetchLast3MonthSales(relevantIds);
+            const salesMap = await fetchLast3MonthSales(allIds);
 
-            const mapReorderItem = (p) => {
+            // 🔥 CHANGED: reorder decisions now happen at the GENERIC
+            // NAME level, not per individual brand/product. Two brands of
+            // the same generic (e.g. Panadol and a generic Paracetamol)
+            // are the same medicine to a patient -- 40 units of Panadol
+            // plus 30 of the generic is 70 units of "Paracetamol" on the
+            // shelf, not two separate low-stock situations that happen to
+            // both be half-empty. So stock, min level, and 3-month sales
+            // are all SUMMED across every brand sharing a generic_name_id
+            // before comparing against the reorder threshold -- only
+            // products with no generic name set (surgicals/instruments,
+            // per the earlier "some categories can't have a generic name"
+            // conversation) keep the old per-product-only comparison,
+            // since there's nothing to group them by. The Product column
+            // still shows each specific BRAND, exactly as before -- this
+            // only changes what decides "is this due", not what's shown.
+            const genericGroups = {}; // generic_name_id -> { stock, min, sales, hasSales, brandCount }
+            products.forEach(p => {
+                if (!p.generic_name_id) return;
+                const g = genericGroups[p.generic_name_id] || { stock: 0, min: 0, sales: 0, hasSales: false, brandCount: 0 };
+                g.stock += stockMap[p.id] || 0;
+                g.min += p.min_order_qty || 1;
+                if (salesMap[p.id] !== undefined) { g.sales += salesMap[p.id]; g.hasSales = true; }
+                g.brandCount += 1;
+                genericGroups[p.generic_name_id] = g;
+            });
+
+            const reorderItems = products.filter(p => {
+                const group = p.generic_name_id ? genericGroups[p.generic_name_id] : null;
+                if (group) return group.stock < group.min;
                 const stock = stockMap[p.id] || 0;
                 const minQty = p.min_order_qty || 1;
-                const threeMonthSales = salesMap[p.id]; // undefined = no sales history in the window
+                return stock < minQty;
+            });
+
+            const mapReorderItem = (p) => {
+                const ownStock = stockMap[p.id] || 0;
+                const ownMin = p.min_order_qty || 1;
+                const group = p.generic_name_id ? genericGroups[p.generic_name_id] : null;
+                // groupStock/groupMin/groupSales are the combined-across-brands
+                // figures actually used for the reorder math; ownStock/ownMin
+                // stay available for display ("brand just for viewing").
+                const groupStock = group ? group.stock : ownStock;
+                const groupMin = group ? group.min : ownMin;
+                const groupSales = group ? (group.hasSales ? group.sales : undefined) : salesMap[p.id];
 
                 return {
                     ...p,
                     generic_name: genericMap[p.generic_name_id] || '',
                     supplier_name: supplierMap[p.supplier_id] || '',
                     category_name: categoryMap[p.category_id] || '',
-                    current_stock: stock,
-                    min_qty: minQty,
-                    three_month_sales: threeMonthSales,
-                    reorder_qty: (threeMonthSales !== undefined)
-                        ? Math.max(1, threeMonthSales - stock)
-                        : Math.max(1, minQty - stock),
+                    current_stock: ownStock,
+                    min_qty: ownMin,
+                    is_grouped: !!group && group.brandCount > 1,
+                    group_stock: groupStock,
+                    group_min: groupMin,
+                    three_month_sales: groupSales,
+                    // 🔥 Same total suggested-order figure is shown on
+                    // EVERY brand row that shares the due generic --
+                    // deliberately not auto-split between brands, since
+                    // which specific brand(s) to actually order from is a
+                    // purchasing decision for staff to make (via the
+                    // checkboxes + editable qty already on this table),
+                    // not something to guess at automatically.
+                    reorder_qty: (groupSales !== undefined)
+                        ? Math.max(1, groupSales - groupStock)
+                        : Math.max(1, groupMin - groupStock),
                     last_purchase: lastPurchaseMap[p.id] || null
                 };
             };
 
             state.reorderItems = reorderItems.map(mapReorderItem);
-            state.reorderSuggestedItems = suggestedItems.map(mapReorderItem);
+            // Superseded by the generic-grouped logic above: every brand
+            // that shares a due generic is now itself listed as due
+            // (they're evaluated together), so there's nothing left that
+            // needs a separate "not due yet, but related" section.
+            state.reorderSuggestedItems = [];
 
-            console.log(`✅ Found ${state.reorderItems.length} items below reorder level, ${state.reorderSuggestedItems.length} related suggestions`);
+            console.log(`✅ Found ${state.reorderItems.length} items below reorder level (generic-combined)`);
             renderReorderReport();
         } catch (error) {
             console.error('Error generating reorder report:', error);
@@ -806,20 +845,32 @@
         const lastPurchaseHtml = item.last_purchase
             ? `<br><span style="font-size: 0.68rem; color: #059669;">Last: ${item.last_purchase.currency === 'ZMW' ? 'ZK' : '$'}${Number(item.last_purchase.rate).toFixed(2)} &middot; ${formatDate(item.last_purchase.date)}</span>`
             : '';
-        const suggestedBadge = isSuggested
-            ? `<span style="margin-left: 6px; background: #dbeafe; color: #1d4ed8; padding: 1px 7px; border-radius: 8px; font-size: 0.65rem; font-weight: 600;">Suggested</span>`
+        // 🔥 CHANGED: "Suggested" (not-yet-due sibling) badge is gone --
+        // superseded by generic-level grouping, see generateReorderReport().
+        // In its place: a flag on rows that ARE due as part of a group,
+        // so it's clear the numbers below are combined across brands, not
+        // this one brand's own stock.
+        const groupedBadge = item.is_grouped
+            ? `<span style="margin-left: 6px; background: #dbeafe; color: #1d4ed8; padding: 1px 7px; border-radius: 8px; font-size: 0.65rem; font-weight: 600;" title="Reorder decision uses the combined stock of every brand sharing this generic name">Combined w/ other brands</span>`
             : '';
-        const stockStyle = isSuggested ? 'color: #475569; font-weight: 500;' : 'color: #dc2626; font-weight: 600;';
+        const stockStyle = 'color: #dc2626; font-weight: 600;';
+        // Own brand stock stays the headline number (this is "the brand,
+        // just for viewing"); the combined generic-level total that
+        // actually drove the reorder decision shows underneath it when
+        // this product is part of a group.
+        const groupStockHtml = item.is_grouped
+            ? `<br><span style="font-size: 0.65rem; color: #64748b;">Generic total: ${item.group_stock} / min ${item.group_min}</span>`
+            : '';
 
         return `
-            <tr ${isSuggested ? 'style="background: #fafbfc;"' : ''}>
+            <tr>
                 <td><input type="checkbox" class="reorder-checkbox" data-id="${item.id}" onchange="updateReorderSelection()"></td>
                 <td>
-                    <strong>${item.product_name}</strong>${suggestedBadge}
+                    <strong>${item.product_name}</strong>${groupedBadge}
                     ${lastPurchaseHtml}
                 </td>
                 <td>${item.generic_name || '-'}</td>
-                <td style="${stockStyle}">${item.current_stock}</td>
+                <td style="${stockStyle}">${item.current_stock}${groupStockHtml}</td>
                 <td>${item.min_qty}</td>
                 <td>${item.supplier_name || '-'}</td>
                 <td>
@@ -829,7 +880,7 @@
                         onchange="updateReorderSelection()">
                     <br><span style="font-size: 0.68rem; color: #64748b;">${
                         item.three_month_sales !== undefined
-                            ? `3-mo sales: ${item.three_month_sales}`
+                            ? `3-mo sales${item.is_grouped ? ' (all brands)' : ''}: ${item.three_month_sales}`
                             : 'No sales history -- topped up to min'
                     }</span>
                 </td>
@@ -1171,23 +1222,189 @@
         if (countDisplay) countDisplay.textContent = `${count} orders`;
     }
 
+    // ============================================
+    // 🔥 ADDED: SEARCHABLE SUPPLIER DROPDOWN
+    // ============================================
+    // Same type-to-filter dropdown pattern as the NHIMA Number / Phone
+    // Number search boxes in Retail POS (initSearchableSelect() there) --
+    // generalized here with getLabel(), since a plain <select> matches on
+    // its option VALUE, but here the value needs to stay the supplier's
+    // database id (what actually gets saved) while the search/display
+    // text is the supplier's NAME. The real <select> stays in the DOM,
+    // hidden -- every place that reads e.g. document.getElementById
+    // ('poSupplier').value keeps working unchanged.
+    function initSearchableSelect({ searchInputId, selectId, panelId, normalize, matchMode, getLabel }) {
+        const searchInput = document.getElementById(searchInputId);
+        const select = document.getElementById(selectId);
+        if (!searchInput || !select) return;
+        const normalizeFn = normalize || (v => (v || '').toLowerCase());
+        const mode = matchMode || 'prefix';
+        const labelFn = getLabel || (opt => opt.value);
+
+        let panel = document.getElementById(panelId);
+        if (!panel) {
+            panel = document.createElement('div');
+            panel.id = panelId;
+            panel.style.cssText = 'display:none; position:fixed; z-index:2000; background:white; border:1px solid #e2e8f0; border-radius:8px; box-shadow:0 12px 28px rgba(15,23,42,0.18); max-height:260px; overflow-y:auto; font-size:0.82rem;';
+            document.body.appendChild(panel);
+        }
+
+        let matches = [];
+        let highlightIndex = -1;
+
+        function liveOptions() {
+            return Array.from(select.options).filter(o => o.value !== '');
+        }
+
+        function position() {
+            const rect = searchInput.getBoundingClientRect();
+            panel.style.left = `${Math.round(rect.left)}px`;
+            panel.style.top = `${Math.round(rect.bottom + 4)}px`;
+            panel.style.width = `${Math.max(180, Math.round(rect.width))}px`;
+        }
+
+        function render() {
+            if (matches.length === 0) {
+                panel.innerHTML = `<div style="padding:10px 12px; color:#94a3b8;">No matches.</div>`;
+                return;
+            }
+            panel.innerHTML = matches.map((opt, i) => `
+                <div class="searchable-select-result" data-index="${i}" style="padding:8px 12px; cursor:pointer; border-bottom:1px solid #f1f5f9; ${i === highlightIndex ? 'background:#eff6ff;' : ''}">${labelFn(opt)}</div>
+            `).join('');
+        }
+
+        function scrollHighlightIntoView() {
+            const el = panel.querySelector(`.searchable-select-result[data-index="${highlightIndex}"]`);
+            if (el) el.scrollIntoView({ block: 'nearest' });
+        }
+
+        function hide() {
+            panel.style.display = 'none';
+            matches = [];
+            highlightIndex = -1;
+        }
+
+        function show(query) {
+            const term = normalizeFn(query.trim());
+            const all = liveOptions();
+            matches = (term
+                ? all.filter(opt => {
+                    const nv = normalizeFn(labelFn(opt));
+                    return mode === 'contains' ? nv.includes(term) : nv.startsWith(term);
+                })
+                : all
+            ).slice(0, 30);
+            highlightIndex = matches.length ? 0 : -1;
+            render();
+            position();
+            panel.style.display = 'block';
+        }
+
+        function commit(opt) {
+            select.value = opt ? opt.value : '';
+            searchInput.value = opt ? labelFn(opt) : '';
+            select.dispatchEvent(new Event('change', { bubbles: true }));
+            hide();
+        }
+
+        function selectHighlighted() {
+            if (highlightIndex < 0 || !matches[highlightIndex]) return false;
+            commit(matches[highlightIndex]);
+            return true;
+        }
+
+        searchInput.addEventListener('focus', () => {
+            searchInput.select();
+            show(searchInput.value);
+        });
+        searchInput.addEventListener('input', () => show(searchInput.value));
+        searchInput.addEventListener('keydown', (e) => {
+            if (panel.style.display === 'none') return;
+            if (e.key === 'ArrowDown') {
+                e.preventDefault();
+                if (!matches.length) return;
+                highlightIndex = Math.min(highlightIndex + 1, matches.length - 1);
+                render();
+                scrollHighlightIntoView();
+            } else if (e.key === 'ArrowUp') {
+                e.preventDefault();
+                if (!matches.length) return;
+                highlightIndex = Math.max(highlightIndex - 1, 0);
+                render();
+                scrollHighlightIntoView();
+            } else if (e.key === 'Enter') {
+                if (selectHighlighted()) e.preventDefault();
+            } else if (e.key === 'Tab') {
+                selectHighlighted();
+            } else if (e.key === 'Escape') {
+                hide();
+            }
+        });
+
+        // mousedown (not click) + preventDefault so the search input never
+        // blurs before the pick registers.
+        document.addEventListener('mousedown', (e) => {
+            if (panel.style.display === 'none') return;
+            const resultEl = e.target.closest(`#${panelId} .searchable-select-result`);
+            if (resultEl) {
+                e.preventDefault();
+                const idx = parseInt(resultEl.dataset.index, 10);
+                commit(matches[idx]);
+                return;
+            }
+            if (!e.target.closest(`#${panelId}`) && e.target !== searchInput) {
+                hide();
+            }
+        });
+
+        window.addEventListener('scroll', () => hide(), true);
+        window.addEventListener('resize', () => hide());
+
+        function currentLabel() {
+            const opt = select.options[select.selectedIndex];
+            return (opt && opt.value) ? labelFn(opt) : '';
+        }
+
+        // Same "don't stomp what's being typed" fix as Retail POS's
+        // version of this: only auto-sync the visible text from a
+        // programmatic change (populateSupplierSelects() re-running,
+        // loadPO() setting a value, etc), never while the cashier/staff
+        // member is actively typing in this box themselves.
+        select.addEventListener('change', () => {
+            if (document.activeElement === searchInput) return;
+            searchInput.value = currentLabel();
+        });
+
+        // Reflect whatever the select already holds right now, and expose
+        // a manual re-sync for populateSupplierSelects() -- that function
+        // replaces select.innerHTML directly (no 'change' event fires on
+        // its own from that), so without this the search box would keep
+        // showing stale/blank text after suppliers reload.
+        searchInput.value = currentLabel();
+        select.__syncSearchLabel = () => { searchInput.value = currentLabel(); };
+    }
+
     function populateSupplierSelects() {
         const selects = ['poSupplier', 'supplierFilter', 'reorderSupplier'];
         const suppliers = state.suppliers || [];
-        
+
         selects.forEach(id => {
             const select = document.getElementById(id);
             if (!select) return;
-            
+
             const placeholder = id === 'poSupplier' ? 'Select Supplier' : 'All Suppliers';
             const currentVal = select.value;
-            
-            select.innerHTML = `<option value="">${placeholder}</option>` + 
+
+            select.innerHTML = `<option value="">${placeholder}</option>` +
                 suppliers.map(s => `<option value="${s.id}">${s.name}</option>`).join('');
-            
+
             if (currentVal && Array.from(select.options).some(opt => opt.value === currentVal)) {
                 select.value = currentVal;
             }
+            // 🔥 ADDED: .innerHTML above doesn't fire 'change', so the
+            // searchable dropdown's visible text (if wired up for this
+            // select) needs an explicit nudge to stay in sync.
+            if (typeof select.__syncSearchLabel === 'function') select.__syncSearchLabel();
         });
     }
 
@@ -1647,7 +1864,12 @@
         
         if (editId) editId.value = '';
         if (title) title.innerHTML = '<i class="fa-solid fa-file-invoice"></i> New Purchase Order';
-        if (supplier) supplier.value = '';
+        // 🔥 CHANGED: dispatch 'change' -- see the same fix's comment in
+        // populatePOForm() just above.
+        if (supplier) {
+            supplier.value = '';
+            supplier.dispatchEvent(new Event('change'));
+        }
         if (currency) currency.value = 'USD';
         // 🔒 LOCKED: always today's shared exchange rate -- the field is
         // read-only now, so this is the only way it ever gets set for a
@@ -1673,7 +1895,16 @@
         
         if (editId) editId.value = order.id;
         if (title) title.innerHTML = `<i class="fa-solid fa-pen-to-square"></i> Edit PO: ${order.po_number}`;
-        if (supplier) supplier.value = order.supplier_id || '';
+        // 🔥 CHANGED: dispatch 'change' after setting .value directly --
+        // that's what the searchable Supplier dropdown's sync listener
+        // (initSearchableSelect()) needs to update its visible search
+        // text to match; without this, editing a PO left the search box
+        // showing whatever it last had (or blank) instead of this PO's
+        // actual supplier.
+        if (supplier) {
+            supplier.value = order.supplier_id || '';
+            supplier.dispatchEvent(new Event('change'));
+        }
         if (currency) currency.value = order.currency || 'USD';
         // 🔒 LOCKED: shows the rate this PO was actually created with
         // (read-only) -- editing other fields on an existing PO no longer
@@ -1770,6 +2001,31 @@
         await savePO('Approved');
     }
 
+    // ============================================
+    // 🔥 ADDED: AUTH-RETRY ON WRITE
+    // ============================================
+    // Same pattern already used elsewhere in the app (Retail POS's label
+    // printing, the Dashboard's notice board, Payments' financial writes)
+    // for a stale/expired login session getting rejected by RLS on a
+    // write -- refresh the session once and retry the SAME write once
+    // before giving up, instead of failing outright and forcing a
+    // half-entered Purchase Order to be re-typed from scratch.
+    async function withAuthRetry(operationFn) {
+        let result = await operationFn();
+        const err = result?.error;
+        const looksLikeAuthRejection = err && (
+            err.code === '42501' ||
+            err.code === 'PGRST301' ||
+            /row-level security|jwt|permission denied/i.test(err.message || '')
+        );
+        if (looksLikeAuthRejection) {
+            console.warn('⚠️ Write rejected (looks like a stale session) -- refreshing session and retrying once:', err.message);
+            try { await supabaseClient.auth.refreshSession(); } catch (refreshError) { console.error('Session refresh failed:', refreshError); }
+            result = await operationFn();
+        }
+        return result;
+    }
+
     async function savePO(status) {
         if (!validatePO()) return;
         
@@ -1816,7 +2072,7 @@
         
         const remainingQty = totalQty - totalReceived - totalCancelled;
 
-        const { error } = await supabaseClient
+        const { error } = await withAuthRetry(() => supabaseClient
             .from('purchase_orders')
             .update({
                 supplier_id: poData.supplier_id,
@@ -1830,22 +2086,71 @@
                 remaining_quantity: Math.max(0, remainingQty),
                 updated_at: new Date().toISOString()
             })
-            .eq('id', poId);
+            .eq('id', poId));
 
         if (error) throw error;
 
-        await supabaseClient
+        await withAuthRetry(() => supabaseClient
             .from('purchase_order_lines')
             .delete()
-            .eq('purchase_order_id', poId);
+            .eq('purchase_order_id', poId));
 
         if (poData.lines.length > 0) {
             await insertPOLines(poId, poData.lines, poData.currency);
         }
     }
 
+    // ============================================
+    // 🔥 ADDED: WHATSAPP SUPPLIER NOTIFICATION (New PO)
+    // ============================================
+    // Calls the already-deployed send-whatsapp-message Edge Function using
+    // whichever phone number is saved on the supplier's record.
+    //
+    // IMPORTANT -- this does not actually send anything yet. WhatsApp
+    // Cloud API requires (1) the pharmacy's WhatsApp Business phone number
+    // to be verified in Meta Business Manager (in progress -- pending
+    // being physically at the pharmacy to confirm it) and (2) the message
+    // template below to be submitted to and APPROVED by Meta before it
+    // can be used -- a business can't just send free-form WhatsApp
+    // messages. WHATSAPP_TEMPLATES.PO_CREATED below is a PLACEHOLDER
+    // name -- once a real template is approved in Meta, update this name
+    // (and the order/count of parameters in notifySupplierWhatsApp's call
+    // below, if the approved template's variables differ) to match
+    // exactly. Until then, every call here fails harmlessly -- logged to
+    // the console only, never blocking the PO save itself (fire-and-forget,
+    // not awaited).
+    const WHATSAPP_TEMPLATES = {
+        PO_CREATED: 'po_created_supplier_notice'
+    };
+
+    async function notifySupplierWhatsApp(phone, templateName, bodyParams) {
+        if (!phone) {
+            console.log('WhatsApp: this supplier has no phone number on file -- skipping notification.');
+            return;
+        }
+        try {
+            const { data, error } = await supabaseClient.functions.invoke('send-whatsapp-message', {
+                body: {
+                    to: phone,
+                    template_name: templateName,
+                    components: [{
+                        type: 'body',
+                        parameters: bodyParams.map(p => ({ type: 'text', text: String(p) }))
+                    }]
+                }
+            });
+            if (error) {
+                console.warn(`WhatsApp notification (${templateName}) did not send -- expected until the WhatsApp number is verified and this template is approved in Meta:`, error);
+                return;
+            }
+            console.log(`✅ WhatsApp notification sent (${templateName}):`, data);
+        } catch (err) {
+            console.warn(`WhatsApp notification (${templateName}) failed:`, err);
+        }
+    }
+
     async function createNewPO(poData, totalQty) {
-        const { data, error } = await supabaseClient
+        const { data, error } = await withAuthRetry(() => supabaseClient
             .from('purchase_orders')
             .insert([{
                 po_number: poData.po_number,
@@ -1865,12 +2170,33 @@
                 remaining_amount: poData.total_amount,
                 fully_received: false
             }])
-            .select();
+            .select());
 
         if (error) throw error;
 
         if (data && data.length > 0 && poData.lines.length > 0) {
             await insertPOLines(data[0].id, poData.lines, poData.currency);
+        }
+
+        // 🔥 ADDED: notify the supplier on WhatsApp that a new PO was
+        // raised -- see notifySupplierWhatsApp()'s comment above for why
+        // this won't actually send anything until WhatsApp is fully set
+        // up. Fire-and-forget (not awaited) -- never delays or blocks the
+        // PO save itself. Only on a genuinely NEW PO, not on every edit of
+        // an existing one (see updateExistingPO()) -- a supplier shouldn't
+        // get repeat notifications for the same order being adjusted.
+        const supplierRecord = (state.suppliers || []).find(s => s.id === poData.supplier_id);
+        if (supplierRecord) {
+            notifySupplierWhatsApp(
+                supplierRecord.phone,
+                WHATSAPP_TEMPLATES.PO_CREATED,
+                [
+                    supplierRecord.name || '',
+                    poData.po_number || '',
+                    `${poData.currency} ${Number(poData.total_amount || 0).toFixed(2)}`,
+                    poData.expected_delivery_date || 'TBC'
+                ]
+            );
         }
     }
 
@@ -1891,9 +2217,9 @@
             cancelled_quantity: 0
         }));
 
-        const { error: lineError } = await supabaseClient
+        const { error: lineError } = await withAuthRetry(() => supabaseClient
             .from('purchase_order_lines')
-            .insert(linesToInsert);
+            .insert(linesToInsert));
 
         if (lineError) throw lineError;
     }
@@ -3174,27 +3500,32 @@
         return data.supplier_id;
     }
 
-    async function generateGRNNumber() {
-        try {
-            const { count, error } = await supabaseClient
-                .from('goods_receipt_notes')
-                .select('id', { count: 'exact', head: true });
-            if (error) throw error;
-            const next = (count || 0) + 1;
-            return `GRN-${new Date().getFullYear()}-${String(next).padStart(5, '0')}`;
-        } catch (e) {
-            console.warn('Could not compute sequential GRN number, falling back to timestamp-based:', e);
-            return `GRN-${new Date().getFullYear()}-${Date.now().toString().slice(-6)}`;
-        }
+    async function generateGRNNumber(attempt = 0) {
+        const { count, error } = await supabaseClient
+            .from('goods_receipt_notes')
+            .select('id', { count: 'exact', head: true });
+        if (error) throw error;
+        const next = (count || 0) + 1 + attempt;
+        return `GRN-${new Date().getFullYear()}-${String(next).padStart(5, '0')}`;
     }
 
-    async function createGRN(orderId, supplierId, currency, exchangeRate, grnTotal, invoiceTotal, invoiceNumber) {
+    // 🔥 FIX: GRN numbers were generated as COUNT(*)+1 and inserted
+    // outside any retry logic, same as the employee_code bug -- two GRNs
+    // created close together (or one double-click) could compute the
+    // same number and the second insert would fail with a raw
+    // "duplicate key value violates unique constraint
+    // goods_receipt_notes_grn_number_key" error. Now retries with the
+    // next number on that specific collision instead of surfacing the
+    // raw error (the old timestamp-based fallback only covered the count
+    // query itself failing, not this).
+    async function createGRN(orderId, supplierId, currency, exchangeRate, grnTotal, invoiceTotal, invoiceNumber, attempt = 0) {
+        const MAX_ATTEMPTS = 5;
         const freight = parseFloat(document.getElementById('grnFreight')?.value) || 0;
         const insurance = parseFloat(document.getElementById('grnInsurance')?.value) || 0;
         const entryDate = document.getElementById('grnEntryDate')?.value || new Date().toISOString().split('T')[0];
         const invoiceDate = document.getElementById('grnInvoiceDate')?.value || new Date().toISOString().split('T')[0];
         const notes = document.getElementById('grnNotes')?.value || '';
-        const grnNumber = await generateGRNNumber();
+        const grnNumber = await generateGRNNumber(attempt);
 
         const record = {
             grn_number: grnNumber,
@@ -3217,7 +3548,14 @@
             .from('goods_receipt_notes')
             .insert([record])
             .select();
-        if (error) throw error;
+        if (error) {
+            const isNumberCollision = error.code === '23505'
+                && (error.message || '').includes('grn_number');
+            if (isNumberCollision && attempt < MAX_ATTEMPTS - 1) {
+                return createGRN(orderId, supplierId, currency, exchangeRate, grnTotal, invoiceTotal, invoiceNumber, attempt + 1);
+            }
+            throw error;
+        }
         return { id: data[0].id, grn_number: grnNumber };
     }
 
@@ -4425,6 +4763,14 @@
     await loadSuppliers();
     await loadPurchaseOrders();
     setupEventListeners();
+
+    // 🔥 ADDED: searchable Supplier dropdowns -- same pattern as NHIMA
+    // Number search in Retail POS. 'contains' matching (not 'prefix')
+    // since staff may remember any part of a supplier's name, not just
+    // how it starts.
+    initSearchableSelect({ searchInputId: 'poSupplierSearch', selectId: 'poSupplier', panelId: 'poSupplierSearchPanel', matchMode: 'contains', getLabel: opt => opt.textContent });
+    initSearchableSelect({ searchInputId: 'supplierFilterSearch', selectId: 'supplierFilter', panelId: 'supplierFilterSearchPanel', matchMode: 'contains', getLabel: opt => opt.textContent });
+    initSearchableSelect({ searchInputId: 'reorderSupplierSearch', selectId: 'reorderSupplier', panelId: 'reorderSupplierSearchPanel', matchMode: 'contains', getLabel: opt => opt.textContent });
 
     console.log("✅ Purchase module initialized successfully!");
 })();

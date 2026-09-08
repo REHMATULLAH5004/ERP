@@ -356,12 +356,19 @@
                     <h3 style="margin: 0;"><i class="fa-solid fa-magnifying-glass" style="color: #2563eb;"></i> Search Invoices &amp; Quotations</h3>
                     <button id="retailCloseSearchModalBtn" type="button" style="background: none; border: none; font-size: 1.5rem; cursor: pointer; color: #64748b;">&times;</button>
                 </div>
-                <div style="display: flex; gap: 10px; margin-bottom: 20px;">
-                    <input type="text" id="retailSearchInput" placeholder="Invoice #, Quotation #, customer name, or NHIMA claim number..." style="flex: 1; padding: 10px 14px; border: 1px solid #e2e8f0; border-radius: 6px; font-size: 0.9rem;">
+                <div style="display: flex; gap: 10px; margin-bottom: 10px;">
+                    <input type="text" id="retailSearchInput" placeholder="Invoice #, Quotation #, customer name, claim number, or bypass number..." style="flex: 1; padding: 10px 14px; border: 1px solid #e2e8f0; border-radius: 6px; font-size: 0.9rem;">
                     <button id="retailSearchGoBtn" type="button" style="background: #2563eb; color: white; border: none; padding: 10px 24px; border-radius: 6px; cursor: pointer;">
                         <i class="fa-solid fa-magnifying-glass"></i> Search
                     </button>
                 </div>
+                <!-- 🔥 ADDED: quick worklist for the fingerprint-bypass
+                     workflow -- see searchSalesRecords()'s onlyPendingClaim
+                     handling. -->
+                <label style="display:flex; align-items:center; gap:6px; margin-bottom:20px; font-size:0.8rem; color:#475569; cursor:pointer;">
+                    <input type="checkbox" id="retailPendingClaimOnlyCheckbox">
+                    Only NHIMA sales still needing a Claim Number (bypass approved &amp; waiting to be filled in)
+                </label>
                 <div id="retailSearchResults">
                     <div style="text-align: center; padding: 30px; color: #94a3b8;">
                         <i class="fa-solid fa-receipt" style="font-size: 2rem; display: block; margin-bottom: 10px; opacity: 0.3;"></i>
@@ -1017,6 +1024,73 @@
     }
 
     // ============================================
+    // 🔥 ADDED: auth-retry wrapper for writes to tables that have no
+    // server-side safety net (unlike sales, whose accounting entries
+    // are now posted by a DB trigger -- see
+    // post_retail_sale_accounting()). `customers` was one of the
+    // tables actually caught failing RLS in today's (2026-09-05)
+    // Postgres logs ("new row violates row-level security policy for
+    // table \"customers\"", 08:03-08:10, 6 rejections) -- consistent
+    // with a browser tab's session token going stale (e.g. an
+    // auto-refresh timer throttled while the tab was backgrounded)
+    // and the request going out with a dead token before the client
+    // noticed. A single `insert()` there fails silently (see
+    // ensureCustomerExists() below, which just returns null), so the
+    // sale proceeds with no customer attached and nobody is told.
+    //
+    // This wraps one write attempt: if it comes back looking like an
+    // auth/RLS rejection, force a session refresh and try exactly
+    // once more before giving up for real. `operationFn` must be a
+    // function returning the awaited {data, error} result of a
+    // Supabase call (so it can be safely re-invoked).
+    async function withAuthRetry(operationFn) {
+        let result = await operationFn();
+        const err = result?.error;
+        const looksLikeAuthRejection = err && (
+            err.code === '42501' ||
+            err.code === 'PGRST301' ||
+            /row-level security|jwt|permission denied/i.test(err.message || '')
+        );
+
+        if (looksLikeAuthRejection) {
+            console.warn('⚠️ Write rejected (looks like a stale session) -- refreshing session and retrying once:', err.message);
+            try {
+                await supabaseClient.auth.refreshSession();
+            } catch (refreshError) {
+                console.error('Session refresh failed:', refreshError);
+            }
+            result = await operationFn();
+        }
+
+        return result;
+    }
+
+    // 🔥 ADDED: a persistent, dismiss-yourself banner for failures that
+    // must not go unnoticed -- replaces alert(), which blocks the page
+    // until clicked and is easy to dismiss without really reading (this
+    // is exactly how the real accounting-post failures on 2026-09-05
+    // went unnoticed for hours). Stacks if more than one fires; each
+    // stays until someone clicks "Dismiss".
+    function showPersistentFailureBanner(message) {
+        let container = document.getElementById('persistentFailureBannerContainer');
+        if (!container) {
+            container = document.createElement('div');
+            container.id = 'persistentFailureBannerContainer';
+            container.style.cssText = 'position:fixed; top:0; left:0; right:0; z-index:9999; display:flex; flex-direction:column; gap:2px;';
+            document.body.appendChild(container);
+        }
+
+        const banner = document.createElement('div');
+        banner.style.cssText = 'background:#fef2f2; border-bottom:2px solid #dc2626; color:#7f1d1d; padding:12px 16px; font-size:0.9rem; display:flex; align-items:center; justify-content:space-between; gap:16px; box-shadow:0 2px 6px rgba(0,0,0,0.15);';
+        banner.innerHTML = `
+            <span style="flex:1;">${message}</span>
+            <button type="button" style="flex-shrink:0; background:#dc2626; color:white; border:none; border-radius:6px; padding:6px 14px; font-weight:600; cursor:pointer;">Dismiss</button>
+        `;
+        banner.querySelector('button').addEventListener('click', () => banner.remove());
+        container.appendChild(banner);
+    }
+
+    // ============================================
     // 🔥 CUSTOMER EXISTENCE ENSURER
     // ============================================
 
@@ -1108,10 +1182,12 @@
                 customerRecord.nrc = nrc || '';
             }
 
-            const { data: newCustomer, error: insertError } = await supabaseClient
-                .from('customers')
-                .insert([customerRecord])
-                .select();
+            const { data: newCustomer, error: insertError } = await withAuthRetry(() =>
+                supabaseClient
+                    .from('customers')
+                    .insert([customerRecord])
+                    .select()
+            );
 
             if (insertError) {
                 console.error('Error creating customer:', insertError);
@@ -1560,6 +1636,7 @@
         const address = document.getElementById('retailAddress');
         const nhimaNumber = document.getElementById('retailNhimaNumber');
         const claimNumber = document.getElementById('retailClaimNumber');
+        const bypassNumber = document.getElementById('retailBypassNumber');
         // 🔥 ADDED: the visible search inputs sitting in front of the
         // NHIMA/Phone selects don't get cleared just by resetting the
         // hidden select's .value (that assignment doesn't dispatch
@@ -1574,6 +1651,7 @@
         if (nhimaNumber) nhimaNumber.value = '';
         if (nhimaNumberSearch) nhimaNumberSearch.value = '';
         if (claimNumber) claimNumber.value = '';
+        if (bypassNumber) bypassNumber.value = '';
 
         const regName = document.getElementById('retailRegName');
         const regAddress = document.getElementById('retailRegAddress');
@@ -3578,7 +3656,7 @@
         try {
             let dbQuery = supabaseClient
                 .from('sales')
-                .select('id, sale_id, created_at, grand_total, status, is_quotation, customer_data, client_type, claim_number')
+                .select('id, sale_id, created_at, grand_total, status, is_quotation, customer_data, client_type, client_sub_type, claim_number, bypass_number')
                 // 🔥 FIX: this used to search across ALL sale types --
                 // Retail, Wholesale, Donation. Wholesale stores rate as a
                 // pack-adjusted price, completely different from how
@@ -3587,23 +3665,42 @@
                 // the "amount is per unit, not the real total" confusion.
                 // This is Retail's own search, so it should only ever
                 // return Retail sales.
-                .eq('client_type', 'RETAIL')
+                .eq('client_type', 'RETAIL');
+
+            // 🔥 ADDED: "Only NHIMA sales still needing a Claim Number" --
+            // this is the worklist for the fingerprint-bypass workflow:
+            // sales that were saved with a Bypass Number instead of a real
+            // Claim Number, still waiting for someone to come back and
+            // fill the real one in once NHIMA approves it. Skips
+            // quotations (never had a claim number to begin with) and
+            // widens the limit since this can legitimately turn up more
+            // than 20 at a time.
+            const onlyPendingClaim = document.getElementById('retailPendingClaimOnlyCheckbox')?.checked;
+            if (onlyPendingClaim) {
+                dbQuery = dbQuery
+                    .eq('client_sub_type', 'NHIMA')
+                    .is('claim_number', null)
+                    .not('bypass_number', 'is', null)
+                    .neq('is_quotation', true);
+            }
+
+            dbQuery = dbQuery
                 .order('created_at', { ascending: false })
-                .limit(20);
+                .limit(onlyPendingClaim ? 100 : 20);
 
             // Blank search shows the most recent 20; otherwise match the
-            // invoice/quotation number, customer name, or NHIMA claim
-            // number (partial, case-insensitive). 🔥 ADDED: this used to
-            // only ever match the invoice number -- there was no way to
-            // find an older invoice by the patient's name or claim number
-            // alone, which is exactly what you'd have on hand if you
-            // don't remember the invoice number itself. No date limit
-            // here either -- this already searches every RETAIL sale ever
-            // saved, not just today's.
+            // invoice/quotation number, customer name, NHIMA claim
+            // number, or bypass number (partial, case-insensitive). 🔥
+            // ADDED: this used to only ever match the invoice number --
+            // there was no way to find an older invoice by the patient's
+            // name or claim number alone, which is exactly what you'd
+            // have on hand if you don't remember the invoice number
+            // itself. No date limit here either -- this already searches
+            // every RETAIL sale ever saved, not just today's.
             if (query && query.trim() !== '') {
                 const term = query.trim().replace(/[%_]/g, '\\$&');
                 dbQuery = dbQuery.or(
-                    `sale_id.ilike.%${term}%,claim_number.ilike.%${term}%,customer_data->>full_name.ilike.%${term}%`
+                    `sale_id.ilike.%${term}%,claim_number.ilike.%${term}%,bypass_number.ilike.%${term}%,customer_data->>full_name.ilike.%${term}%`
                 );
             }
 
@@ -3648,12 +3745,24 @@
                 ${isAdmin ? `<button class="search-delete-btn" data-id="${r.id}" data-sale-number="${r.sale_id}" style="background:#dc2626; color:white; border:none; padding:5px 12px; border-radius:4px; cursor:pointer; font-size:0.75rem;"><i class="fa-solid fa-trash"></i> Delete</button>` : ''}
             `;
 
+            // 🔥 ADDED: a bypass-only sale (no Claim Number yet, but a
+            // Bypass Number on file) gets a visible amber flag here so
+            // it's obvious which invoices are still waiting on NHIMA to
+            // release the real claim number -- these are exactly what
+            // the "Only NHIMA sales still needing a Claim Number"
+            // checkbox above the search box filters down to.
+            const claimStatusHtml = r.claim_number
+                ? ` &middot; Claim# ${r.claim_number}`
+                : (r.bypass_number
+                    ? ` &middot; <span style="background:#fef3c7; color:#92400e; padding:1px 8px; border-radius:8px; font-weight:600;">Bypass# ${r.bypass_number} -- Claim Pending</span>`
+                    : '');
+
             return `
                 <div style="padding:12px; margin-bottom:8px; background:#f8fafc; border-radius:6px; border:1px solid #e2e8f0;">
                     <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;">
                         <div>
                             <span style="font-weight:600;">${r.sale_id}</span> ${typeLabel}
-                            <div style="font-size:0.8rem; color:#64748b; margin-top:2px;">${customerName}${r.claim_number ? ` &middot; Claim# ${r.claim_number}` : ''} &middot; ${date} &middot; K${(r.grand_total || 0).toFixed(2)}</div>
+                            <div style="font-size:0.8rem; color:#64748b; margin-top:2px;">${customerName}${claimStatusHtml} &middot; ${date} &middot; K${(r.grand_total || 0).toFixed(2)}</div>
                         </div>
                         <div style="display:flex; gap:6px;">${actions}</div>
                     </div>
@@ -3891,13 +4000,19 @@
         if (currentClientType === 'NHIMA') {
             const nhimaNumber = document.getElementById('retailNhimaNumber')?.value;
             const claimNumber = document.getElementById('retailClaimNumber')?.value.trim();
+            // 🔥 ADDED: see the Bypass Number field's own comment in
+            // retail/index.html. Either a real Claim Number or a
+            // fingerprint-bypass number is enough to save the sale now --
+            // the real claim number gets filled in later (Search Invoices
+            // -> Edit) once NHIMA approves the bypass.
+            const bypassNumber = document.getElementById('retailBypassNumber')?.value.trim();
 
             if (!nhimaNumber) {
                 alert('Please select an NHIMA member.');
                 return null;
             }
-            if (!claimNumber) {
-                alert('Please enter the Claim Number for this NHIMA sale.');
+            if (!claimNumber && !bypassNumber) {
+                alert('Please enter either the Claim Number, or -- if the fingerprint could not be used -- the Bypass Number for this NHIMA sale.');
                 return null;
             }
 
@@ -3907,10 +4022,13 @@
             // get applied to both in the receivables calculation --
             // this stops the duplicate at the source rather than only
             // patching the calculation that reads it later. Only checked
-            // for real sales (status !== QUOTATION) -- a draft quotation
-            // shouldn't be blocked by a claim number that might still
-            // change before it's finalized.
-            if (status !== 'QUOTATION') {
+            // for real sales (status !== QUOTATION) with an actual claim
+            // number entered -- a draft quotation shouldn't be blocked by
+            // a claim number that might still change before it's
+            // finalized, and a bypass-only sale has no claim number yet
+            // to check (checking an empty string would wrongly match
+            // every other bypass-only sale that also has none yet).
+            if (status !== 'QUOTATION' && claimNumber) {
                 // 🔥 FIX: .maybeSingle() throws an error if MORE than one
                 // row matches -- confirmed this is exactly what happens
                 // here, since the existing data already has two sales
@@ -3951,7 +4069,8 @@
             customerData = {
                 type: 'NHIMA',
                 nhima_number: nhimaNumber,
-                claim_number: claimNumber,
+                claim_number: claimNumber || null,
+                bypass_number: bypassNumber || null,
                 full_name: document.getElementById('retailCustomerName')?.value || '',
                 nrc: document.getElementById('retailNrc')?.value || '',
                 phone: document.getElementById('retailPhoneNumber')?.value || '',
@@ -4087,6 +4206,7 @@
                 customer_data: saleData.customer,
                 customer_id: customerId || null,
                 claim_number: saleData.customer.claim_number || null,
+                bypass_number: saleData.customer.bypass_number || null,
                 items: saleData.items,
                 payment: saleData.payment,
                 subtotal: saleData.totals.subtotal,
@@ -4323,11 +4443,49 @@
                     }));
                 })();
 
-                const accountingPromise = createSaleAccountingEntries(saleData, savedData)
-                    .catch(accError => {
+                // 🔥 CHANGED: accounting entries are now posted SERVER-SIDE
+                // by a Postgres trigger (post_retail_sale_accounting(),
+                // migration server_side_retail_sale_accounting_trigger) the
+                // instant this sale row is inserted -- in the same DB
+                // transaction, running as the database itself. That's
+                // immune to the browser-session/token-timing gap that was
+                // causing this exact insert to get rejected by RLS all
+                // morning on 2026-09-05 (proven via Postgres logs: 92
+                // rejections, stopping the instant a fresh login occurred).
+                // This no longer POSTS from the client -- it just confirms
+                // the trigger did its job, and only falls back to the old
+                // client-side createSaleAccountingEntries() in the unlikely
+                // case it didn't (e.g. the trigger gets disabled by a future
+                // change). Checking first, instead of always calling
+                // createSaleAccountingEntries() directly, is what prevents
+                // this from creating a SECOND, duplicate journal entry
+                // alongside the trigger's on every normal sale.
+                const accountingPromise = (async () => {
+                    try {
+                        // 🔥 FIX: journal_entries' own SELECT policy only
+                        // allows Admin/Accountant/Manager -- most till
+                        // staff are Cashiers, so a plain
+                        // `.from('journal_entries').select()` here would
+                        // come back empty for them even when the trigger
+                        // DID post the entry, wrongly triggering the
+                        // client-side fallback below and creating a
+                        // DUPLICATE entry on every sale. This RPC
+                        // (SECURITY DEFINER, returns only a boolean) is
+                        // readable by any authenticated role regardless of
+                        // that policy.
+                        const { data: alreadyPosted, error: checkError } = await supabaseClient
+                            .rpc('sale_accounting_entry_exists', { p_sale_id: saleData.sale_id });
+
+                        if (checkError) throw checkError;
+                        if (alreadyPosted) return true; // server-side trigger already posted it
+
+                        console.warn(`⚠️ No server-side accounting entry found for ${saleData.sale_id} -- falling back to client-side posting.`);
+                        return await createSaleAccountingEntries(saleData, savedData);
+                    } catch (accError) {
                         console.error('Accounting entry error:', accError);
                         return false;
-                    });
+                    }
+                })();
 
                 const [, accountingOk] = await Promise.all([stockUpdatePromise, accountingPromise]);
 
@@ -4343,13 +4501,17 @@
                 // is at the till knows to flag it, instead of it silently
                 // vanishing.
                 if (accountingOk === false) {
-                    alert(
-                        '⚠️ Sale saved, but the accounting entries FAILED to post.\n\n' +
-                        `Sale ${saleData.sale_id} is saved and stock has been deducted, ` +
-                        'but no journal entries were created for it (often caused by an ' +
-                        'expired login session -- try logging out and back in).\n\n' +
-                        'Please tell an admin/accountant so the journal entries can be ' +
-                        'posted manually for this sale.'
+                    // 🔥 CHANGED: was a blocking alert() -- easy to
+                    // dismiss/miss in a busy till queue, and it froze the
+                    // page until clicked. Now a persistent banner that
+                    // stays on screen (across this page's other actions)
+                    // until someone explicitly dismisses it, so it can't
+                    // vanish unnoticed the way it did for real on
+                    // 2026-09-05.
+                    showPersistentFailureBanner(
+                        `⚠️ Sale ${saleData.sale_id} saved and stock deducted, but the accounting entries FAILED to post ` +
+                        `(often a stale login session -- try logging out and back in). Tell an admin/accountant so the ` +
+                        `journal entries can be posted manually for this sale.`
                     );
                 }
             } else {
@@ -4710,6 +4872,12 @@
                     // customer_data, same as every other field here.
                     const claimNumberEl = document.getElementById('retailClaimNumber');
                     if (claimNumberEl) claimNumberEl.value = customer.claim_number || '';
+                    // 🔥 ADDED: restore the Bypass Number the same way -- this
+                    // is also how the real Claim Number gets filled in later:
+                    // search for the sale, Edit, type the Claim Number NHIMA
+                    // has now issued, Save (updates this same row).
+                    const bypassNumberEl = document.getElementById('retailBypassNumber');
+                    if (bypassNumberEl) bypassNumberEl.value = customer.bypass_number || '';
                 } else {
                     const phoneSelectEl = document.getElementById('retailRegPhone');
                     if (phoneSelectEl && customer.phone) {
@@ -5065,6 +5233,7 @@
     const retailCloseSearchModalBtn = document.getElementById('retailCloseSearchModalBtn');
     const retailSearchInput = document.getElementById('retailSearchInput');
     const retailSearchGoBtn = document.getElementById('retailSearchGoBtn');
+    const retailPendingClaimOnlyCheckbox = document.getElementById('retailPendingClaimOnlyCheckbox');
 
     if (searchSalesBtn && retailSearchModal) {
         searchSalesBtn.addEventListener('click', () => {
@@ -5073,8 +5242,18 @@
                 retailSearchInput.value = '';
                 retailSearchInput.focus();
             }
+            if (retailPendingClaimOnlyCheckbox) retailPendingClaimOnlyCheckbox.checked = false;
             // Show the most recent 20 immediately, before any typing.
             searchSalesRecords('');
+        });
+    }
+
+    // 🔥 ADDED: re-run the search the instant the "still needing a Claim
+    // Number" filter is toggled, using whatever text (if any) is already
+    // in the search box.
+    if (retailPendingClaimOnlyCheckbox) {
+        retailPendingClaimOnlyCheckbox.addEventListener('change', () => {
+            searchSalesRecords(retailSearchInput?.value || '');
         });
     }
 

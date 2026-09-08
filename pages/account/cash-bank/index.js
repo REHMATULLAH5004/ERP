@@ -432,38 +432,85 @@ if (typeof exchangeRate === 'undefined') { var exchangeRate = { zmwPerUsd: 25.00
     // ============================================
     // 🔥 ADDED: OPENING BALANCE
     // ============================================
-    // Kept deliberately simple: one small modal, one number field per
-    // account, one journal entry per non-zero field on submit --
     // Debit the account, Credit Opening Balance Equity (3000), same
     // pattern already used for suppliers elsewhere in this system.
-    window.openOpeningBalanceModal = function() {
-        ensureOpeningBalanceModal();
-        document.getElementById('openingBalanceModal').classList.add('show');
+    //
+    // 🔥 FIX: this used to be a plain "run it once" modal with only a
+    // warning ("running it again adds another opening entry on top") --
+    // nothing actually stopped a second run from silently stacking a
+    // second opening entry on an account that already had one, which is
+    // exactly how a mistyped opening balance got compounded instead of
+    // corrected. Each account is now locked once it has an opening entry:
+    // its field shows the amount already on record and an explicit
+    // "Adjust" action posts a separate correcting journal entry for the
+    // difference, instead of re-running the same "opening balance" insert
+    // on top of itself.
+
+    // Sums this account's existing "Opening balance" journal line(s) --
+    // normally just one, but summed defensively in case an old duplicate
+    // is already sitting there from before this lock existed.
+    function getExistingOpeningBalance(code) {
+        return state.glJournalLines
+            .filter(l => l.account_code === code && l.description === 'Opening balance')
+            .reduce((sum, l) => sum + (parseFloat(l.debit) || 0) - (parseFloat(l.credit) || 0), 0);
+    }
+
+    function buildOpeningBalanceRow(code, label) {
+        const existing = getExistingOpeningBalance(code);
+        if (existing > 0.009) {
+            // Locked -- already has an opening entry.
+            return `
+                <div style="margin-bottom:12px;">
+                    <label style="display:block;font-weight:500;color:#475569;margin-bottom:4px;font-size:0.85rem;">${label}</label>
+                    <div style="display:flex;align-items:center;gap:8px;">
+                        <div style="flex:1;padding:8px 10px;border:1px solid #e2e8f0;border-radius:6px;background:#f8fafc;color:#0f172a;font-weight:600;">
+                            ${code === '1120' ? '$' : 'ZK'} ${formatNumber(existing)}
+                        </div>
+                        <button type="button" onclick="toggleOpeningBalanceAdjust('${code}')" style="background:white;border:1px solid #cbd5e1;color:#475569;padding:8px 12px;border-radius:6px;cursor:pointer;font-size:0.8rem;white-space:nowrap;">
+                            <i class="fa-solid fa-pen"></i> Adjust
+                        </button>
+                    </div>
+                    <small style="color:#94a3b8;">Opening balance already set for this account.</small>
+                    <div id="obAdjustRow_${code}" style="display:none;margin-top:8px;">
+                        <label style="display:block;font-weight:500;color:#b45309;margin-bottom:4px;font-size:0.8rem;">Correct opening balance to:</label>
+                        <input type="number" id="obAdjust${code}" step="0.01" min="0" value="${existing.toFixed(2)}" style="width:100%;padding:8px 10px;border:1px solid #f59e0b;border-radius:6px;">
+                        <small style="color:#64748b;">Saving posts a separate adjustment entry for the difference -- the original opening entry is left as a record, not edited or deleted.</small>
+                    </div>
+                </div>
+            `;
+        }
+        // Not set yet -- normal editable field.
+        return `
+            <div style="margin-bottom:12px;">
+                <label style="display:block;font-weight:500;color:#475569;margin-bottom:4px;font-size:0.85rem;">${label}</label>
+                <input type="number" id="ob${code}" step="0.01" min="0" placeholder="0.00" style="width:100%;padding:8px 10px;border:1px solid #e2e8f0;border-radius:6px;">
+            </div>
+        `;
+    }
+
+    window.toggleOpeningBalanceAdjust = function(code) {
+        const row = document.getElementById(`obAdjustRow_${code}`);
+        if (row) row.style.display = row.style.display === 'none' ? 'block' : 'none';
     };
 
-    function ensureOpeningBalanceModal() {
-        if (document.getElementById('openingBalanceModal')) return;
+    window.openOpeningBalanceModal = function() {
+        // Always rebuilt fresh so the lock state (which accounts already
+        // have an opening entry) is current every time this is opened.
+        const existingModal = document.getElementById('openingBalanceModal');
+        if (existingModal) existingModal.remove();
+
         const html = `
         <div id="openingBalanceModal" class="modal">
-            <div class="modal-dialog" style="max-width:420px;">
+            <div class="modal-dialog" style="max-width:440px;">
                 <div style="background:white;padding:25px;border-radius:10px;">
                     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">
                         <h4 style="margin:0;"><i class="fa-solid fa-coins" style="color:#f59e0b;"></i> Set Opening Balance</h4>
                         <button onclick="closeModal('openingBalanceModal')" style="background:none;border:none;font-size:1.4rem;cursor:pointer;color:#94a3b8;">&times;</button>
                     </div>
-                    <p style="color:#64748b;font-size:0.85rem;margin-bottom:16px;">Leave any field blank/zero to skip it. Only run this once per account -- running it again adds another opening entry on top.</p>
-                    <div style="margin-bottom:12px;">
-                        <label style="display:block;font-weight:500;color:#475569;margin-bottom:4px;font-size:0.85rem;">Cash in Hand (ZMW)</label>
-                        <input type="number" id="obCash1111" step="0.01" min="0" placeholder="0.00" style="width:100%;padding:8px 10px;border:1px solid #e2e8f0;border-radius:6px;">
-                    </div>
-                    <div style="margin-bottom:12px;">
-                        <label style="display:block;font-weight:500;color:#475569;margin-bottom:4px;font-size:0.85rem;">Bank (USD)</label>
-                        <input type="number" id="obBank1120" step="0.01" min="0" placeholder="0.00" style="width:100%;padding:8px 10px;border:1px solid #e2e8f0;border-radius:6px;">
-                    </div>
-                    <div style="margin-bottom:12px;">
-                        <label style="display:block;font-weight:500;color:#475569;margin-bottom:4px;font-size:0.85rem;">Bank (ZMW)</label>
-                        <input type="number" id="obBank1121" step="0.01" min="0" placeholder="0.00" style="width:100%;padding:8px 10px;border:1px solid #e2e8f0;border-radius:6px;">
-                    </div>
+                    <p style="color:#64748b;font-size:0.85rem;margin-bottom:16px;">Leave a blank field's account for later. An account that already has an opening balance is locked here -- use its Adjust button to correct it.</p>
+                    ${buildOpeningBalanceRow('1111', 'Cash in Hand (ZMW)')}
+                    ${buildOpeningBalanceRow('1120', 'Bank (USD)')}
+                    ${buildOpeningBalanceRow('1121', 'Bank (ZMW)')}
                     <div style="margin-bottom:16px;">
                         <label style="display:block;font-weight:500;color:#475569;margin-bottom:4px;font-size:0.85rem;">Date</label>
                         <input type="date" id="obDate" style="width:100%;padding:8px 10px;border:1px solid #e2e8f0;border-radius:6px;">
@@ -481,18 +528,39 @@ if (typeof exchangeRate === 'undefined') { var exchangeRate = { zmwPerUsd: 25.00
         document.getElementById('openingBalanceModal').addEventListener('click', (e) => {
             if (e.target.id === 'openingBalanceModal') e.target.classList.remove('show');
         });
-    }
+        document.getElementById('openingBalanceModal').classList.add('show');
+    };
 
     window.saveOpeningBalance = async function() {
         const date = document.getElementById('obDate').value || new Date().toISOString().split('T')[0];
-        const entries = [
-            { code: '1111', amount: parseFloat(document.getElementById('obCash1111').value) || 0 },
-            { code: '1120', amount: parseFloat(document.getElementById('obBank1120').value) || 0 },
-            { code: '1121', amount: parseFloat(document.getElementById('obBank1121').value) || 0 }
-        ].filter(e => e.amount > 0);
+        const codes = ['1111', '1120', '1121'];
 
-        if (entries.length === 0) {
-            showToast('Enter at least one opening balance amount', 'error');
+        // New opening entries -- only for accounts that don't have one yet
+        // (their plain "ob<code>" input only exists when unlocked).
+        const newEntries = codes
+            .map(code => {
+                const input = document.getElementById(`ob${code}`);
+                return input ? { code, amount: parseFloat(input.value) || 0 } : null;
+            })
+            .filter(e => e && e.amount > 0);
+
+        // Adjustments -- only for accounts whose "Adjust" panel was opened
+        // and edited to a different total than what's already on record.
+        const adjustments = codes
+            .map(code => {
+                const input = document.getElementById(`obAdjust${code}`);
+                if (!input) return null;
+                const newAmount = parseFloat(input.value);
+                if (isNaN(newAmount) || newAmount < 0) return null;
+                const existing = getExistingOpeningBalance(code);
+                const delta = newAmount - existing;
+                if (Math.abs(delta) < 0.01) return null;
+                return { code, delta, newAmount };
+            })
+            .filter(Boolean);
+
+        if (newEntries.length === 0 && adjustments.length === 0) {
+            showToast('Enter an opening balance, or change an Adjust amount, for at least one account', 'error');
             return;
         }
 
@@ -501,7 +569,7 @@ if (typeof exchangeRate === 'undefined') { var exchangeRate = { zmwPerUsd: 25.00
         btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Saving...';
 
         try {
-            for (const entry of entries) {
+            for (const entry of newEntries) {
                 const journalNumber = `OPEN-${new Date().getFullYear()}-${String(Math.floor(Math.random() * 10000)).padStart(4, '0')}`;
                 const journal = {
                     entry_date: date,
@@ -520,7 +588,40 @@ if (typeof exchangeRate === 'undefined') { var exchangeRate = { zmwPerUsd: 25.00
                 ]);
             }
 
-            showToast('Opening balance(s) posted successfully!', 'success');
+            for (const adj of adjustments) {
+                const journalNumber = `ADJ-${new Date().getFullYear()}-${String(Math.floor(Math.random() * 10000)).padStart(4, '0')}`;
+                const accountName = state.glAccounts[adj.code] || adj.code;
+                const journal = {
+                    entry_date: date,
+                    reference: journalNumber,
+                    description: `Adjustment to opening balance - ${accountName} (corrected to ${adj.newAmount.toFixed(2)})`,
+                    journal_number: journalNumber,
+                    status: 'Posted',
+                    created_at: new Date().toISOString()
+                };
+                const { data: journalData, error: jError } = await supabaseClient.from('journal_entries').insert([journal]).select();
+                if (jError) throw jError;
+
+                // delta > 0: the corrected balance is HIGHER -- debit more
+                // into the account, credit more into equity. delta < 0:
+                // the reverse.
+                const amount = Math.abs(adj.delta);
+                const increasing = adj.delta > 0;
+                await supabaseClient.from('journal_lines').insert([
+                    {
+                        journal_entry_id: journalData[0].id, account_code: adj.code,
+                        debit: increasing ? amount : 0, credit: increasing ? 0 : amount,
+                        description: `Adjustment to opening balance`
+                    },
+                    {
+                        journal_entry_id: journalData[0].id, account_code: '3000',
+                        debit: increasing ? 0 : amount, credit: increasing ? amount : 0,
+                        description: `Adjustment to opening balance - ${accountName}`
+                    }
+                ]);
+            }
+
+            showToast('Opening balance(s) saved successfully!', 'success');
             closeModal('openingBalanceModal');
             await refreshCashData();
         } catch (error) {

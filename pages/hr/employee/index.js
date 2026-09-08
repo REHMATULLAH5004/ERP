@@ -280,6 +280,56 @@
         }
     };
 
+    // 🔥 ADDED: generates the next EMP#### code and inserts the employee
+    // row, retrying with the next code if a concurrent save (or a
+    // double-click) already took the one we computed. Postgres reports
+    // that as a 23505 unique-violation on employees_employee_code_key --
+    // without this retry, that raw error was shown straight to the user
+    // ("duplicate key value violates unique constraint ..."), which is
+    // what "every new employee entry shows an error" actually was.
+    async function insertNewEmployeeWithUniqueCode(empDataWithoutCode, attempt = 0, retriedAuth = false) {
+        const MAX_ATTEMPTS = 5;
+
+        const { count, error: countError } = await supabaseClient
+            .from('employees')
+            .select('*', { count: 'exact', head: true });
+        if (countError) throw countError;
+
+        const code = 'EMP' + String((count || 0) + 1 + attempt).padStart(4, '0');
+
+        const { data, error } = await supabaseClient
+            .from('employees')
+            .insert([{ ...empDataWithoutCode, employee_code: code }])
+            .select();
+
+        if (error) {
+            const isCodeCollision = error.code === '23505'
+                && (error.message || '').includes('employee_code');
+            if (isCodeCollision && attempt < MAX_ATTEMPTS - 1) {
+                return insertNewEmployeeWithUniqueCode(empDataWithoutCode, attempt + 1, retriedAuth);
+            }
+
+            // 🔥 ADDED: a stale/expired session token shows up here as an
+            // RLS rejection on the insert (proven in today's, 2026-09-05,
+            // Postgres logs -- "new row violates row-level security
+            // policy for table \"employees\"" at 08:08:15), and previously
+            // just threw the raw error straight at the user with no
+            // recovery. Force one session refresh and retry once before
+            // giving up for real.
+            const looksLikeAuthRejection = error.code === '42501' ||
+                /row-level security|jwt|permission denied/i.test(error.message || '');
+            if (looksLikeAuthRejection && !retriedAuth) {
+                console.warn('⚠️ Employee insert rejected (looks like a stale session) -- refreshing session and retrying once:', error.message);
+                try { await supabaseClient.auth.refreshSession(); } catch (e) { console.error('Session refresh failed:', e); }
+                return insertNewEmployeeWithUniqueCode(empDataWithoutCode, attempt, true);
+            }
+
+            throw error;
+        }
+
+        return { data, code };
+    }
+
     // ============================================
     // HANDLE SAVE / UPDATE (FIXED)
     // ============================================
@@ -289,19 +339,23 @@
         saveBtn.innerHTML = `<i class="fa-solid fa-spinner fa-spin"></i> Saving...`;
 
         const isEditing = hiddenId.value !== '';
-        
+
+        // 🔥 FIX: employee_code used to be computed ONCE here as
+        // COUNT(*)+1 and then inserted outside any retry logic. Two
+        // people saving a new employee at close to the same moment (or
+        // one impatient double-click, since the button is disabled
+        // slightly AFTER this count query already ran) both read the
+        // same count and both compute the SAME "next" code, so the
+        // second insert always failed with a raw Postgres
+        // "duplicate key value violates unique constraint
+        // employees_employee_code_key" error -- shown to the user as-is
+        // via the catch block below. That's a race condition, not a data
+        // problem, so the fix is to retry with a freshly recomputed code
+        // (see insertNewEmployeeWithUniqueCode) instead of computing it
+        // once up front.
         let newEmpCode = null;
-        if (!isEditing) {
-            const { count, error: countError } = await supabaseClient
-                .from('employees')
-                .select('*', { count: 'exact', head: true });
-            
-            if (countError) throw countError;
-            newEmpCode = 'EMP' + String((count || 0) + 1).padStart(4, '0');
-        }
 
         const empData = {
-            employee_code: isEditing ? undefined : newEmpCode, 
             first_name: document.getElementById('empFirstName').value,
             middle_name: document.getElementById('empMiddleName').value || null,
             last_name: document.getElementById('empLastName').value,
@@ -399,14 +453,15 @@
 
             } else {
                 // ✅ INSERT NEW EMPLOYEE
-                const { data, error } = await supabaseClient
-                    .from('employees')
-                    .insert([empData])
-                    .select();
-                
-                if (error) throw error;
-                employeeResult = data;
-                employeeId = data[0].employee_id;
+                // 🔥 FIX: generate + insert with retry so a concurrent
+                // save (or a double-click) that collides on employee_code
+                // recovers by trying the next code, instead of surfacing
+                // a raw unique-constraint error to the user.
+                const { data, code: assignedCode } = await insertNewEmployeeWithUniqueCode(empData);
+                newEmpCode = assignedCode;
+                const employeeResultAll = data;
+                employeeResult = employeeResultAll;
+                employeeId = employeeResultAll[0].employee_id;
 
                 const { error: empErr } = await supabaseClient
                     .from('employee_employment')

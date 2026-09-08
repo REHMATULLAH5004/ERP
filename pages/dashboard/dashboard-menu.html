@@ -3,6 +3,25 @@
     Your exchange rate, leave, advance, and attendance are all in the sidebar here.
 </p>
 
+<!-- 🔥 MOVED HERE: NOTICE BOARD (was at the very bottom of this sidebar --
+     moved to the top so it's the first thing seen on the Dashboard).
+     Populated by loadSidebarNotices() in dashboard-view.js -- the "+ Post"
+     button is shown/hidden by role from that same function -- kept
+     display:none here by default so a non-Admin never sees it flash
+     before the role check runs. -->
+<div style="padding: 0 20px; margin-top: 20px;">
+    <div style="display:flex; justify-content:space-between; align-items:center;">
+        <div style="font-size:0.7rem; font-weight:700; color:#94a3b8; letter-spacing:0.5px; text-transform:uppercase;">Notice Board</div>
+        <button id="dashSidebarPostNoticeBtn" style="display:none; background:none; border:none; color:#2563eb; cursor:pointer; font-size:0.8rem; font-weight:600;"
+            onclick="const m=document.getElementById('dashPostNoticeModal'); if(m) m.style.display='flex';">
+            <i class="fa-solid fa-plus"></i> Post
+        </button>
+    </div>
+    <div id="dashSidebarNotices" style="margin-top:8px;">
+        <p class="helper-text" style="font-size:0.75rem; padding:8px 0;"><i class="fa-solid fa-spinner fa-spin"></i> Loading...</p>
+    </div>
+</div>
+
 <!-- 🔥 CHANGED: QUICK ACTIONS -->
 <!-- Used to shortcut to Request Leave / Request Advance / Exchange Rate
      -- but those already have their own full cards further down THIS
@@ -128,7 +147,10 @@
      anyway (browsers don't execute scripts inserted via innerHTML, same
      reason app.js's loadModule() injects view.js as a real <script>
      element instead of relying on markup). -->
-<div style="padding: 0 20px; margin-top: 24px;">
+<!-- 🔥 CHANGED: this is now the LAST section in the sidebar (Notice Board
+     moved to the top), so it carries the bottom breathing-room margin
+     that used to live on Notice Board's wrapper. -->
+<div style="padding: 0 20px; margin-top: 24px; margin-bottom: 20px;">
     <div style="font-size:0.7rem; font-weight:700; color:#94a3b8; letter-spacing:0.5px; text-transform:uppercase; margin-bottom:8px;">Today at a Glance</div>
     <div style="background:#f8fafc; border-radius:8px; padding:12px; margin-bottom:8px; display:flex; justify-content:space-between; align-items:center;">
         <span style="font-size:0.8rem; color:#64748b;">Sales Today</span>
@@ -137,23 +159,5 @@
     <div id="dashSidebarApprovalsRow" style="background:#f8fafc; border-radius:8px; padding:12px; display:none; justify-content:space-between; align-items:center;">
         <span style="font-size:0.8rem; color:#64748b;">Pending Approvals</span>
         <span style="font-weight:700; color:#dc2626;" id="dashSidebarPendingApprovals">--</span>
-    </div>
-</div>
-
-<!-- 🔥 ADDED: NOTICE BOARD -->
-<!-- Populated by loadSidebarNotices() in dashboard-view.js. The "+ Post"
-     button is shown/hidden by role from that same function -- kept
-     display:none here by default so a non-Admin never sees it flash
-     before the role check runs. -->
-<div style="padding: 0 20px; margin-top: 24px; margin-bottom: 20px;">
-    <div style="display:flex; justify-content:space-between; align-items:center;">
-        <div style="font-size:0.7rem; font-weight:700; color:#94a3b8; letter-spacing:0.5px; text-transform:uppercase;">Notice Board</div>
-        <button id="dashSidebarPostNoticeBtn" style="display:none; background:none; border:none; color:#2563eb; cursor:pointer; font-size:0.8rem; font-weight:600;"
-            onclick="const m=document.getElementById('dashPostNoticeModal'); if(m) m.style.display='flex';">
-            <i class="fa-solid fa-plus"></i> Post
-        </button>
-    </div>
-    <div id="dashSidebarNotices" style="margin-top:8px;">
-        <p class="helper-text" style="font-size:0.75rem; padding:8px 0;"><i class="fa-solid fa-spinner fa-spin"></i> Loading...</p>
     </div>
 </div>

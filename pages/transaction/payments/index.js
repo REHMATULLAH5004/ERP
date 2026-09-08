@@ -603,18 +603,28 @@
                 html += `
                     <div class="invoice-item">
                         <div class="checkbox">
-                            <input type="checkbox" class="invoice-checkbox" 
+                            <input type="checkbox" class="invoice-checkbox"
                                 data-id="opening_${settlingCurrency.toLowerCase()}"
                                 data-amount="${remaining}"
                                 data-currency="${settlingCurrency}"
                                 data-is-opening="true"
-                                onchange="updatePaymentSummary()">
+                                onchange="onPaymentInvoiceToggle(this)">
                         </div>
                         <div class="info">
                             <div class="number">Opening Balance (${settlingCurrency})</div>
                             <div class="date">Previous balance</div>
                         </div>
                         <div class="amount">${symbol}${formatNumber(remaining)}</div>
+                        <!-- 🔥 ADDED: appears the moment this item is ticked, defaulting to
+                             its full remaining amount -- edit it down to pay only part of
+                             this specific opening balance instead of always paying it in full. -->
+                        <div class="pay-amount-box" style="display:none;">
+                            <input type="number" class="invoice-pay-amount"
+                                data-remaining="${remaining}"
+                                min="0.01" max="${remaining}" step="0.01"
+                                value="${remaining.toFixed(2)}"
+                                oninput="onPaymentAmountInput(this)">
+                        </div>
                     </div>
                 `;
                 totalSelected += remaining;
@@ -676,20 +686,30 @@
             html += `
                 <div class="invoice-item">
                     <div class="checkbox">
-                        <input type="checkbox" class="invoice-checkbox" 
+                        <input type="checkbox" class="invoice-checkbox"
                             data-id="${item.id}"
                             data-payable-id="${item.id}"
                             data-po-id="${item.po_id || ''}"
                             data-amount="${item.total}"
                             data-currency="${settlingCurrency}"
                             data-is-opening="false"
-                            onchange="updatePaymentSummary()">
+                            onchange="onPaymentInvoiceToggle(this)">
                     </div>
                     <div class="info">
                         <div class="number">${item.invoice_number}</div>
                         <div class="date">Date: ${invoiceDate} | ${settlingCurrency} | Remaining: ${symbol}${formatNumber(item.total)}</div>
                     </div>
                     <div class="amount">${symbol}${formatNumber(item.total)}</div>
+                    <!-- 🔥 ADDED: appears the moment this invoice is ticked, defaulting to
+                         its full remaining amount -- edit it down to pay only part of this
+                         specific invoice (a half payment) instead of always paying it in full. -->
+                    <div class="pay-amount-box" style="display:none;">
+                        <input type="number" class="invoice-pay-amount"
+                            data-remaining="${item.total}"
+                            min="0.01" max="${item.total}" step="0.01"
+                            value="${item.total.toFixed(2)}"
+                            oninput="onPaymentAmountInput(this)">
+                    </div>
                 </div>
             `;
             totalSelected += item.total;
@@ -711,6 +731,42 @@
     }
 
     // ============================================
+    // PER-INVOICE PAY AMOUNT HANDLERS
+    // ============================================
+    // 🔥 ADDED: previously there was one free-text "Amount to Pay" that
+    // got auto-allocated (oldest first) across everything ticked -- there
+    // was no way to say "pay half of THIS specific invoice" when more than
+    // one invoice existed, and even with only one ticked, the field's
+    // intent wasn't obviously "how much against this invoice". Now each
+    // invoice/opening-balance row gets its own "Pay Amount" box, shown the
+    // moment it's ticked and defaulting to that item's full remaining
+    // amount, so a partial/half payment is just editing that one box down.
+
+    function getPaymentAmountInputFor(checkbox) {
+        const row = checkbox.closest('.invoice-item');
+        return row ? row.querySelector('.invoice-pay-amount') : null;
+    }
+
+    window.onPaymentInvoiceToggle = function(checkbox) {
+        const amountBox = checkbox.closest('.invoice-item')?.querySelector('.pay-amount-box');
+        const amountInput = getPaymentAmountInputFor(checkbox);
+        if (amountBox) amountBox.style.display = checkbox.checked ? 'flex' : 'none';
+        if (amountInput && checkbox.checked) {
+            // reset to the full remaining amount each time it's freshly ticked
+            amountInput.value = (parseFloat(checkbox.dataset.amount) || 0).toFixed(2);
+        }
+        updatePaymentSummary();
+    };
+
+    window.onPaymentAmountInput = function(input) {
+        const remaining = parseFloat(input.dataset.remaining) || parseFloat(input.max) || 0;
+        let value = parseFloat(input.value);
+        if (isNaN(value) || value < 0) value = 0;
+        if (value > remaining) input.value = remaining.toFixed(2);
+        updatePaymentSummary();
+    };
+
+    // ============================================
     // UPDATE PAYMENT SUMMARY
     // ============================================
 
@@ -725,36 +781,28 @@
         // 🔥 FIX: checkboxes are now all the same currency (loadInvoicesForSupplier
         // only ever renders one currency's invoices at a time), so this is
         // just a straight sum -- no more cross-currency blending.
+        // 🔥 CHANGED: totalSelected now reflects what's actually going to be
+        // PAID (the sum of each row's editable Pay Amount box), not always
+        // the full remaining balance of everything ticked.
         let totalSelected = 0;
         checkboxes.forEach(cb => {
-            totalSelected += parseFloat(cb.dataset.amount) || 0;
+            const amountInput = getPaymentAmountInputFor(cb);
+            totalSelected += amountInput ? (parseFloat(amountInput.value) || 0) : (parseFloat(cb.dataset.amount) || 0);
         });
 
         const amountLabel = document.getElementById('paymentAmountLabel');
         const amountInput = document.getElementById('paymentAmount');
 
-        // 🔥 ADDED: how much is actually due in whatever currency the
-        // Amount input itself is in -- used below to build the live
-        // partial-payment note. Computed here (before either branch
-        // overwrites amountInput.value with a default) so it always
-        // reflects the true "amount due" regardless of what happens next.
-        let dueInInputCurrency;
-        let dueSymbol;
-
         if (payingDirectlyInUsd) {
             // Amount due IS the USD total selected -- nothing to convert.
             document.getElementById('selectedTotal').textContent = `Total Selected: $${formatNumber(totalSelected)}`;
 
-            amountLabel.textContent = 'Amount to Pay (USD):';
-            amountInput.max = totalSelected;
-            amountInput.placeholder = `Enter USD amount (max ${formatNumber(totalSelected)})`;
-
-            if (!amountInput.value || parseFloat(amountInput.value) === 0) {
-                amountInput.value = totalSelected.toFixed(2);
-            }
-
-            dueInInputCurrency = totalSelected;
-            dueSymbol = '$';
+            amountLabel.textContent = 'Total to Pay (USD):';
+            // 🔥 CHANGED: this field is now read-only and purely reflects
+            // the sum of the per-invoice Pay Amount boxes above -- editing
+            // a specific invoice's pay amount is what changes this, not
+            // typing directly into this field.
+            amountInput.value = totalSelected.toFixed(2);
         } else {
             // The amount actually paid is ZMW cash/bank. If settling USD
             // invoices, convert the selected USD total to the ZMW amount due.
@@ -767,16 +815,8 @@
             }
             document.getElementById('selectedTotal').textContent = displayText;
 
-            amountLabel.textContent = 'Amount to Pay (ZMW):';
-            amountInput.max = totalDueZmw;
-            amountInput.placeholder = `Enter ZMW amount (max ${formatNumber(totalDueZmw)})`;
-
-            if (!amountInput.value || parseFloat(amountInput.value) === 0) {
-                amountInput.value = totalDueZmw.toFixed(2);
-            }
-
-            dueInInputCurrency = totalDueZmw;
-            dueSymbol = 'ZK';
+            amountLabel.textContent = 'Total to Pay (ZMW):';
+            amountInput.value = totalDueZmw.toFixed(2);
         }
 
         // 🔥 FIX: never shown while paying directly from the USD bank
@@ -786,20 +826,32 @@
         const exchangeGroup = document.getElementById('exchangeRateGroup');
         exchangeGroup.style.display = (settlingCurrency === 'USD' && !payingDirectlyInUsd) ? 'block' : 'none';
 
-        // 🔥 ADDED: live partial-payment indicator. Entering less than the
-        // full amount due has always been recorded correctly (the save
-        // logic below tags it status:'partial' and carries the remaining
-        // balance forward) -- this just surfaces that outcome before you
-        // click Record Payment, instead of it being a silent side effect
-        // of typing a smaller number into the box.
+        // 🔥 CHANGED: live partial-payment indicator, now driven by the
+        // per-invoice Pay Amount boxes rather than one overall figure --
+        // compares each ticked item's own remaining balance against what
+        // was actually typed into its Pay Amount box, in the invoice's own
+        // currency (not the ZMW-cash-equivalent), so it's correct even
+        // when only one of several ticked invoices is being half-paid.
         const noteEl = document.getElementById('paymentBalanceNote');
         if (noteEl) {
-            const enteredNow = parseFloat(amountInput.value) || 0;
-            const shortfall = dueInInputCurrency - enteredNow;
-            if (checkboxes.length === 0 || enteredNow <= 0) {
+            const invoiceSymbol = settlingCurrency === 'USD' ? '$' : 'ZK';
+            let partialCount = 0;
+            let shortfallInSettlingCurrency = 0;
+            checkboxes.forEach(cb => {
+                const remaining = parseFloat(cb.dataset.amount) || 0;
+                const amountInputForRow = getPaymentAmountInputFor(cb);
+                const payAmount = amountInputForRow ? (parseFloat(amountInputForRow.value) || 0) : remaining;
+                const rowShortfall = remaining - payAmount;
+                if (rowShortfall > 0.01) {
+                    partialCount++;
+                    shortfallInSettlingCurrency += rowShortfall;
+                }
+            });
+
+            if (checkboxes.length === 0 || totalSelected <= 0) {
                 noteEl.innerHTML = '';
-            } else if (shortfall > 0.01) {
-                noteEl.innerHTML = `<span style="color:#b45309;"><i class="fa-solid fa-triangle-exclamation"></i> Partial payment -- ${dueSymbol}${formatNumber(shortfall)} will still be due on the selected invoice(s) after this payment.</span>`;
+            } else if (partialCount > 0) {
+                noteEl.innerHTML = `<span style="color:#b45309;"><i class="fa-solid fa-triangle-exclamation"></i> Partial payment on ${partialCount} item(s) -- ${invoiceSymbol}${formatNumber(shortfallInSettlingCurrency)} will still be due on ${partialCount > 1 ? 'them' : 'it'} after this payment.</span>`;
             } else {
                 noteEl.innerHTML = `<span style="color:#15803d;"><i class="fa-solid fa-circle-check"></i> Full payment -- this clears the selected invoice(s) completely.</span>`;
             }
@@ -1331,6 +1383,72 @@
     // SAVE PAYMENT (UPDATED WITH PAYABLE_ID)
     // ============================================
 
+    // ============================================
+    // 🔥 ADDED: WHATSAPP SUPPLIER NOTIFICATION (Payment made)
+    // ============================================
+    // Same helper/pattern as Purchase's PO-created notification -- see
+    // that file's comment for the full explanation of why this won't
+    // actually send anything until (1) the WhatsApp number is verified in
+    // Meta and (2) WHATSAPP_TEMPLATES.PAYMENT_MADE below is a real,
+    // Meta-approved template name (this one is a placeholder). Every call
+    // fails harmlessly -- console-only -- until then, and is never
+    // awaited, so it can't delay or block the payment save.
+    const WHATSAPP_TEMPLATES = {
+        PAYMENT_MADE: 'supplier_payment_notice'
+    };
+
+    async function notifySupplierWhatsApp(phone, templateName, bodyParams) {
+        if (!phone) {
+            console.log('WhatsApp: this supplier has no phone number on file -- skipping notification.');
+            return;
+        }
+        try {
+            const { data, error } = await supabaseClient.functions.invoke('send-whatsapp-message', {
+                body: {
+                    to: phone,
+                    template_name: templateName,
+                    components: [{
+                        type: 'body',
+                        parameters: bodyParams.map(p => ({ type: 'text', text: String(p) }))
+                    }]
+                }
+            });
+            if (error) {
+                console.warn(`WhatsApp notification (${templateName}) did not send -- expected until the WhatsApp number is verified and this template is approved in Meta:`, error);
+                return;
+            }
+            console.log(`✅ WhatsApp notification sent (${templateName}):`, data);
+        } catch (err) {
+            console.warn(`WhatsApp notification (${templateName}) failed:`, err);
+        }
+    }
+
+    // ============================================
+    // 🔥 ADDED: AUTH-RETRY ON WRITE
+    // ============================================
+    // Same pattern already used elsewhere in the app (Retail POS's label
+    // printing, the Dashboard's notice board) for a stale/expired login
+    // session getting rejected by RLS on a write -- refresh the session
+    // once and retry the SAME write once before giving up. Wraps the
+    // financial writes below (payment record, supplier_payables sync) so
+    // a stale session doesn't force staff to lose a half-entered payment
+    // and start over.
+    async function withAuthRetry(operationFn) {
+        let result = await operationFn();
+        const err = result?.error;
+        const looksLikeAuthRejection = err && (
+            err.code === '42501' ||
+            err.code === 'PGRST301' ||
+            /row-level security|jwt|permission denied/i.test(err.message || '')
+        );
+        if (looksLikeAuthRejection) {
+            console.warn('⚠️ Write rejected (looks like a stale session) -- refreshing session and retrying once:', err.message);
+            try { await supabaseClient.auth.refreshSession(); } catch (refreshError) { console.error('Session refresh failed:', refreshError); }
+            result = await operationFn();
+        }
+        return result;
+    }
+
     async function savePayment() {
         const supplierId = document.getElementById('paymentSupplier').value;
         const paymentDate = document.getElementById('paymentDate').value;
@@ -1340,7 +1458,6 @@
         // 🔥 ADDED: paying directly out of the USD bank account -- the cash
         // movement is USD, not ZMW, and no exchange rate applies at all.
         const payingDirectlyInUsd = method === 'Bank Transfer USD';
-        const amountEntered = parseFloat(document.getElementById('paymentAmount').value);
         const reference = document.getElementById('paymentReference').value.trim();
         const notes = document.getElementById('paymentNotes').value.trim();
         const exchangeRate = parseFloat(document.getElementById('paymentExchangeRate').value) || 0;
@@ -1351,10 +1468,6 @@
         }
         if (!paymentDate) {
             showToast('Please select a payment date', 'error');
-            return;
-        }
-        if (!amountEntered || amountEntered <= 0) {
-            showToast(`Please enter a valid ${payingDirectlyInUsd ? 'USD' : 'ZMW'} amount`, 'error');
             return;
         }
         // Exchange rate is mandatory whenever settling USD invoices with
@@ -1369,13 +1482,24 @@
         // Get selected items -- FIX: all checkboxes are now the SAME
         // currency (settlingCurrency), since loadInvoicesForSupplier only
         // ever renders one currency's invoices at a time. No more mixing.
+        // 🔥 CHANGED: each item now carries its OWN pay amount, read from
+        // the Pay Amount box next to its checkbox, instead of a single
+        // overall figure getting auto-allocated across all of them. This
+        // is what actually makes a half/partial payment on one specific
+        // selected invoice possible.
         const selectedItems = [];
         document.querySelectorAll('.invoice-checkbox:checked').forEach(cb => {
+            const remaining = parseFloat(cb.dataset.amount) || 0;
+            const amountInputForRow = getPaymentAmountInputFor(cb);
+            let payAmount = amountInputForRow ? parseFloat(amountInputForRow.value) : remaining;
+            if (isNaN(payAmount) || payAmount <= 0) payAmount = 0;
+            if (payAmount > remaining) payAmount = remaining;
             selectedItems.push({
                 id: cb.dataset.id,
                 payableId: cb.dataset.payableId || null,
                 poId: cb.dataset.poId || null,
-                remaining: parseFloat(cb.dataset.amount) || 0,
+                remaining: remaining,
+                payAmount: payAmount,
                 isOpening: cb.dataset.isOpening === 'true'
             });
         });
@@ -1385,21 +1509,24 @@
             return;
         }
 
-        const totalSelected = selectedItems.reduce((sum, item) => sum + item.remaining, 0);
-
-        // How much of the SELECTED CURRENCY's debt does this payment
-        // clear? Paying directly in USD, or settling ZMW invoices, is a
-        // direct 1:1. Only "USD invoices paid via ZMW cash" needs
-        // converting the ZMW cash paid back into the USD amount it settles.
-        const amountInSelectedCurrency = (settlingCurrency === 'USD' && !payingDirectlyInUsd)
-            ? amountEntered / exchangeRate
-            : amountEntered;
-
-        if (amountInSelectedCurrency > totalSelected + 0.01) {
-            const symbol = settlingCurrency === 'USD' ? '$' : 'ZK';
-            showToast(`Payment amount exceeds total selected (${symbol}${formatNumber(totalSelected)})`, 'error');
+        // Drop anything ticked with a zero/blank Pay Amount rather than
+        // silently including it as a no-op line.
+        const itemsToPay = selectedItems.filter(item => item.payAmount > 0);
+        if (itemsToPay.length === 0) {
+            showToast('Enter a pay amount greater than 0 for at least one selected item', 'error');
             return;
         }
+
+        // How much of the SELECTED CURRENCY's debt does this payment
+        // clear -- now the sum of each item's own pay amount, not one
+        // overall figure. Paying directly in USD, or settling ZMW
+        // invoices, is a direct 1:1 with the cash moved. Only "USD
+        // invoices paid via ZMW cash" needs converting this into the ZMW
+        // amount actually handed over.
+        const amountInSelectedCurrency = itemsToPay.reduce((sum, item) => sum + item.payAmount, 0);
+        const amountEntered = (settlingCurrency === 'USD' && !payingDirectlyInUsd)
+            ? amountInSelectedCurrency * exchangeRate
+            : amountInSelectedCurrency;
 
         // FIX: single-currency distribution -- no more bidirectional
         // USD<->ZMW blending. Exactly one of these two is non-zero.
@@ -1437,10 +1564,14 @@
                 exchange_rate: (settlingCurrency === 'USD') ? displayZmwRate : 1
             };
 
-            const { data: payment, error: paymentError } = await supabaseClient
+            // 🔥 ADDED: withAuthRetry -- a stale session here used to mean
+            // the whole payment failed outright and had to be re-entered
+            // from scratch; now retried once after a session refresh
+            // before actually giving up.
+            const { data: payment, error: paymentError } = await withAuthRetry(() => supabaseClient
                 .from('payments')
                 .insert([paymentData])
-                .select();
+                .select());
 
             if (paymentError) throw paymentError;
 
@@ -1461,12 +1592,15 @@
             // after the distribution loop below.
             const payableUpdates = [];
 
-            // Distribute across the selected (single-currency) items only.
-            let remainingToDistribute = amountInSelectedCurrency;
-            for (const item of selectedItems) {
-                if (remainingToDistribute <= 0) break;
-
-                const amountToPay = Math.min(item.remaining, remainingToDistribute);
+            // 🔥 CHANGED: each item now settles for exactly the amount typed
+            // into its own Pay Amount box (already clamped to that item's
+            // remaining balance above), instead of one overall figure being
+            // distributed oldest-first across everything ticked. This is
+            // what actually lets one specific selected invoice be paid in
+            // half while another ticked alongside it is paid in full (or
+            // not touched further at all).
+            for (const item of itemsToPay) {
+                const amountToPay = item.payAmount;
                 if (amountToPay > 0) {
                     paymentInvoicesToInsert.push({
                         payment_id: paymentId,
@@ -1481,7 +1615,6 @@
                         status: amountToPay >= item.remaining ? 'paid' : 'partial',
                         is_opening_balance: item.isOpening
                     });
-                    remainingToDistribute -= amountToPay;
 
                     // Opening-balance items have no payableId (they're not
                     // a real supplier_payables row) -- only real payables
@@ -1493,9 +1626,9 @@
             }
 
             if (paymentInvoicesToInsert.length > 0) {
-                const { error: piError } = await supabaseClient
+                const { error: piError } = await withAuthRetry(() => supabaseClient
                     .from('payment_invoices')
-                    .insert(paymentInvoicesToInsert);
+                    .insert(paymentInvoicesToInsert));
 
                 if (piError) throw piError;
             }
@@ -1515,14 +1648,19 @@
                     const newAmountPaid = priorPaid + amountToPay;
                     const newAmountRemaining = Math.max(0, totalAmount - newAmountPaid);
 
-                    const { error: payableUpdateError } = await supabaseClient
+                    // 🔥 ADDED: withAuthRetry -- this is exactly the write
+                    // the comment above already flagged as having gone
+                    // stale for real in the past (permanently stuck
+                    // 'Pending' rows). A retry after a session refresh
+                    // fixes the most common cause of that outright.
+                    const { error: payableUpdateError } = await withAuthRetry(() => supabaseClient
                         .from('supplier_payables')
                         .update({
                             amount_paid: newAmountPaid,
                             amount_remaining: newAmountRemaining,
                             status: newAmountRemaining <= 0.01 ? 'Paid' : 'Partial'
                         })
-                        .eq('id', payableId);
+                        .eq('id', payableId));
 
                     if (payableUpdateError) {
                         console.error('Error updating supplier_payables record:', payableUpdateError);
@@ -1543,11 +1681,37 @@
             // side effect of having typed a smaller number. Same shortfall
             // check the distribution loop above already used.
             const invoiceSymbol = settlingCurrency === 'USD' ? '$' : 'ZK';
-            const shortfallInSelectedCurrency = totalSelected - amountInSelectedCurrency;
+            // 🔥 FIX: `totalSelected` was a stale reference to a variable
+            // scoped inside updatePaymentSummary() (undefined here), left
+            // over from before per-item pay amounts existed -- this threw
+            // a ReferenceError and aborted savePayment() before it could
+            // reach the success toast/refresh, even though the payment had
+            // already been inserted. The correct analog now is the sum of
+            // each PAID item's own full remaining balance (not just what
+            // was actually entered), compared against what was entered.
+            const totalRemainingSelected = itemsToPay.reduce((sum, item) => sum + item.remaining, 0);
+            const shortfallInSelectedCurrency = totalRemainingSelected - amountInSelectedCurrency;
             const paidSummary = `${payingDirectlyInUsd ? '$' : 'ZK'}${formatNumber(amountEntered)} paid`;
             const toastMessage = shortfallInSelectedCurrency > 0.01
                 ? `Partial payment recorded! ${paidSummary}. ${invoiceSymbol}${formatNumber(shortfallInSelectedCurrency)} still due on the selected invoice(s).`
                 : `Payment recorded successfully! ${paidSummary} -- selected invoice(s) fully cleared.`;
+            // 🔥 ADDED: notify the supplier on WhatsApp that a payment was
+            // made -- see notifySupplierWhatsApp()'s comment above.
+            // Fire-and-forget, never awaited.
+            const supplierRecord = (state.suppliers || []).find(s => s.id === supplierId);
+            if (supplierRecord) {
+                notifySupplierWhatsApp(
+                    supplierRecord.phone,
+                    WHATSAPP_TEMPLATES.PAYMENT_MADE,
+                    [
+                        supplierRecord.name || '',
+                        paidSummary,
+                        paymentNumber,
+                        formatDate(paymentDate)
+                    ]
+                );
+            }
+
             showToast(toastMessage, 'success');
             closeModal('paymentModal');
             await refreshPaymentList();
@@ -1678,18 +1842,11 @@
             updatePaymentSummary();
         });
 
-        document.getElementById('paymentAmount').addEventListener('input', function() {
-            const max = parseFloat(this.max) || 0;
-            const value = parseFloat(this.value) || 0;
-            if (value > max) {
-                this.value = max;
-            }
-            // 🔥 ADDED: refresh the partial/full payment note as the user
-            // types -- safe to call here since updatePaymentSummary() only
-            // ever overwrites this field when it's empty/zero, never while
-            // it already holds a value the user is actively editing.
-            updatePaymentSummary();
-        });
+        // 🔥 REMOVED: "Total to Pay" used to be free-text with its own
+        // clamp-on-input listener here. It's now read-only and computed
+        // entirely from each invoice's own Pay Amount box (see
+        // onPaymentAmountInput / updatePaymentSummary above), so there's
+        // nothing left for the user to type into it directly.
     }
 
     // ============================================
