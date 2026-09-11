@@ -83,6 +83,42 @@
     }
 
     // ============================================
+    // 🔥 ADDED: WHATSAPP ADMIN NOTIFICATIONS -- LEAVE / ADVANCE REQUESTS
+    // ============================================
+    // Fires a WhatsApp message to the admin/HR number whenever a staff
+    // member submits a leave or advance request, so it doesn't sit
+    // unseen until someone opens the dashboard. This is a business-
+    // initiated message to a number that may not have an open 24h
+    // conversation window, so it MUST use a Meta-approved template
+    // (unlike the free-form text path used for ad-hoc testing
+    // elsewhere) -- same send-whatsapp-message edge function already
+    // used for Purchase Order / Supplier Payment notifications.
+    const ADMIN_WHATSAPP_NUMBER = '260777603560';
+    const WHATSAPP_TEMPLATES = {
+        LEAVE_REQUEST: 'leave_request_notice',
+        ADVANCE_REQUEST: 'advance_request_notice',
+    };
+
+    async function notifyAdminWhatsApp(templateName, bodyParams) {
+        try {
+            await supabaseClient.functions.invoke('send-whatsapp-message', {
+                body: {
+                    to: ADMIN_WHATSAPP_NUMBER,
+                    template_name: templateName,
+                    language_code: 'en_US',
+                    components: [{
+                        type: 'body',
+                        parameters: bodyParams.map(p => ({ type: 'text', text: String(p) }))
+                    }]
+                }
+            });
+        } catch (err) {
+            // Non-fatal -- never block the actual request submission on WhatsApp delivery.
+            console.warn('WhatsApp admin notification failed:', err);
+        }
+    }
+
+    // ============================================
     // LEAVE REQUEST -- MY OWN
     // ============================================
     // 🔥 REMOVED: "My Attendance Today" (loadTodayAttendance /
@@ -150,6 +186,14 @@
                 requested_at: new Date().toISOString()
             }]);
             if (error) throw error;
+
+            // 🔥 ADDED: fire-and-forget WhatsApp notice to admin/HR number.
+            notifyAdminWhatsApp(WHATSAPP_TEMPLATES.LEAVE_REQUEST, [
+                currentEmployeeName || 'An employee',
+                start,
+                end,
+                String(days)
+            ]);
 
             document.getElementById('dashLeaveForm').reset();
             document.getElementById('dashLeaveModal').style.display = 'none';
@@ -510,15 +554,25 @@
         submitBtn.disabled = true;
         submitBtn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Submitting...';
 
+        const advanceAmount = parseFloat(document.getElementById('dashAdvanceAmount').value);
+        const advanceReason = document.getElementById('dashAdvanceReason').value.trim();
+
         try {
             const { error } = await supabaseClient.from('advance_requests').insert([{
                 employee_id: currentEmployeeId,
-                amount: parseFloat(document.getElementById('dashAdvanceAmount').value),
-                reason: document.getElementById('dashAdvanceReason').value.trim(),
+                amount: advanceAmount,
+                reason: advanceReason,
                 status: 'Pending',
                 requested_at: new Date().toISOString()
             }]);
             if (error) throw error;
+
+            // 🔥 ADDED: fire-and-forget WhatsApp notice to admin/HR number.
+            notifyAdminWhatsApp(WHATSAPP_TEMPLATES.ADVANCE_REQUEST, [
+                currentEmployeeName || 'An employee',
+                advanceAmount.toFixed(2),
+                advanceReason || 'No reason given'
+            ]);
 
             document.getElementById('dashAdvanceForm').reset();
             document.getElementById('dashAdvanceModal').style.display = 'none';
@@ -583,13 +637,79 @@
                     <div class="sticker">
                         <div class="pharmacy">Griffins Medicals Limited</div>
                         <div class="item-name">${item.product_name}</div>
-                        <div class="how-to-take">${item.how_to_take || 'As directed'}</div>
+                        ${item.how_to_take ? `<div class="how-to-take">${item.how_to_take}</div>` : ''}
                         <div class="qty">Qty: ${item.qty} ${item.pack_size}${item.days_supplied ? ` (Supplied for ${item.days_supplied} Days)` : ''}</div>
                     </div>
                 `).join('')}
             </body>
             </html>
         `;
+    }
+
+    // 🔥 ADDED: DISPENSING -- "NEXT UP" PREVIEW invoice reprint. Same
+    // self-contained approach as buildStickerHTML() just above -- this
+    // page never loads company_settings (only Retail POS does, for the
+    // live checkout invoice's header/footer), so this reuses the same
+    // hardcoded pharmacy name already used on the sticker labels rather
+    // than pulling that whole dependency in just for a reprint. Good
+    // enough for the dispenser to check the order against while
+    // preparing it; the copy printed at checkout remains the
+    // authoritative original.
+    function buildDispatchInvoiceHTML(sale) {
+        const customer = sale.customer_data || {};
+        const items = sale.items || [];
+        return `<!DOCTYPE html>
+            <html>
+            <head>
+                <title>Invoice - ${sale.sale_id}</title>
+                <style>
+                    @page { size: 80mm auto; margin: 0; }
+                    body { font-family: 'Courier New', monospace; margin: 0; padding: 4mm; font-size: 11px; color:#000; }
+                    h1 { font-size: 13px; margin: 0 0 2px 0; text-align:center; }
+                    .center { text-align:center; }
+                    .row { display:flex; justify-content:space-between; }
+                    .divider { border-top: 1px dashed #000; margin: 6px 0; }
+                    .item { margin-bottom: 4px; }
+                    .item-name { font-weight:bold; }
+                    .totals .row { font-weight:bold; }
+                </style>
+            </head>
+            <body>
+                <h1>Griffins Medicals Limited</h1>
+                <div class="center">Invoice #: ${sale.sale_id}</div>
+                <div class="center">${new Date(sale.created_at).toLocaleString()}</div>
+                <div class="divider"></div>
+                <div>Customer: ${customer.full_name || 'Walk-in'}</div>
+                ${customer.phone ? `<div>Phone: ${customer.phone}</div>` : ''}
+                <div class="divider"></div>
+                ${items.map((item, i) => `
+                    <div class="item">
+                        <div class="item-name">${i + 1}. ${item.product_name}</div>
+                        <div class="row"><span>Qty ${item.qty} x K${Number(item.rate || 0).toFixed(2)}</span><span>K${Number(item.total || 0).toFixed(2)}</span></div>
+                    </div>
+                `).join('')}
+                <div class="divider"></div>
+                <div class="totals">
+                    ${sale.subtotal != null ? `<div class="row"><span>Subtotal</span><span>K${Number(sale.subtotal).toFixed(2)}</span></div>` : ''}
+                    ${sale.tax != null ? `<div class="row"><span>Tax</span><span>K${Number(sale.tax).toFixed(2)}</span></div>` : ''}
+                    <div class="row"><span>TOTAL</span><span>K${Number(sale.grand_total || 0).toFixed(2)}</span></div>
+                </div>
+                <div class="divider"></div>
+                <div class="center">Thank you for choosing Griffins Medicals Limited.</div>
+            </body>
+            </html>
+        `;
+    }
+
+    // Opens the print window for one sale's invoice -- unlike labels,
+    // reprinting an invoice doesn't mark anything in the database, so
+    // this is always safe to click again (e.g. to double-check an item
+    // while preparing the order).
+    function printInvoiceForSale(sale) {
+        const invWindow = window.open('', '_blank', 'width=420,height=600');
+        invWindow.document.write(buildDispatchInvoiceHTML(sale));
+        invWindow.document.close();
+        invWindow.print();
     }
 
     // 🔥 ADDED: same pattern as retail/index.js and hr/employee/index.js --
@@ -748,12 +868,19 @@
         resultsEl.innerHTML = `<p style="color:#94a3b8; padding:10px 0;"><i class="fa-solid fa-spinner fa-spin"></i> Searching...</p>`;
 
         try {
+            // 🔥 CHANGED: was invoice-number-only, which is exactly what
+            // made this hard to use -- a dispenser trying to find a
+            // specific patient in a long pending list had no way to
+            // search by name, only by an invoice number they usually
+            // don't have memorized. Now matches EITHER the invoice
+            // number OR the customer's name (same .or()/ilike pattern
+            // already used for Retail POS's own invoice search).
             const { data, error } = await supabaseClient
                 .from('sales')
                 .select('id, sale_id, customer_data, items, created_at, labels_printed_at')
                 .eq('client_type', 'RETAIL')
                 .neq('is_quotation', true)
-                .ilike('sale_id', `%${query}%`)
+                .or(`sale_id.ilike.%${query}%,customer_data->>full_name.ilike.%${query}%`)
                 .order('created_at', { ascending: false })
                 .limit(10);
 
@@ -883,6 +1010,144 @@
             badge.textContent = `${count || 0} waiting`;
         }
 
+        // 🔥 ADDED: "NEXT UP" PREVIEW -- lets the dispenser see (and print)
+        // the upcoming patient's label/invoice BEFORE clicking "Call Next
+        // Patient", so the medicine is already prepared by the time that
+        // patient is actually called up. Previously the only way to find
+        // a specific patient's invoice was to scroll/search the whole
+        // "Pending Labels" queue below, which is exactly what made this
+        // slow with a long list -- this surfaces the RIGHT one
+        // automatically, no searching needed.
+        //
+        // ensureNextUpPanel() creates its container once and re-uses it
+        // on every refresh (this function can be re-entered many times
+        // per page visit) rather than re-appending a new one each time.
+        function ensureNextUpPanel() {
+            let panel = document.getElementById('dashDispatchNextUpPanel');
+            if (panel) return panel;
+            panel = document.createElement('div');
+            panel.id = 'dashDispatchNextUpPanel';
+            panel.style.cssText = 'margin-top:14px; border-top:1px solid #f1f5f9; padding-top:14px;';
+            card.appendChild(panel);
+            return panel;
+        }
+
+        // Reads who's next WITHOUT calling call_next_ticket() -- that RPC
+        // actually dequeues a ticket (marks it "serving"), so using it
+        // just to look would jump the patient's turn. This is a plain
+        // SELECT using the exact same ordering call_next_ticket() itself
+        // uses (priority desc, token_number asc), so "who's next" here
+        // always agrees with who Call Next Patient will actually pull.
+        async function loadNextUpPreview() {
+            const panel = ensureNextUpPanel();
+            panel.innerHTML = `<p style="color:#94a3b8; font-size:0.8rem; margin:0;"><i class="fa-solid fa-spinner fa-spin"></i> Checking who's next...</p>`;
+
+            try {
+                const today = new Date().toISOString().split('T')[0];
+                const { data: nextTicket, error: ticketError } = await supabaseClient
+                    .from('queue_tickets')
+                    .select('id, token_number, patient_name, customer_id')
+                    .eq('queue_date', today)
+                    .eq('status', 'waiting_dispensing')
+                    .order('priority', { ascending: false })
+                    .order('token_number', { ascending: true })
+                    .limit(1)
+                    .maybeSingle();
+
+                if (ticketError) throw ticketError;
+
+                if (!nextTicket) {
+                    panel.innerHTML = '';
+                    return;
+                }
+
+                // No direct ticket<->invoice link exists in the schema
+                // yet, so this matches on customer_id first (set on both
+                // the ticket at registration and the sale at checkout in
+                // the normal billing flow), falling back to matching the
+                // patient's name on today's Retail sales if that comes up
+                // empty -- e.g. a walk-in never tied to a customer record.
+                const saleColumns = 'id, sale_id, customer_data, items, created_at, labels_printed_at, subtotal, tax, grand_total, customer_id';
+                let sale = null;
+
+                if (nextTicket.customer_id) {
+                    const { data } = await supabaseClient
+                        .from('sales')
+                        .select(saleColumns)
+                        .eq('client_type', 'RETAIL')
+                        .neq('is_quotation', true)
+                        .eq('customer_id', nextTicket.customer_id)
+                        .gte('created_at', startOfTodayIso())
+                        .order('created_at', { ascending: false })
+                        .limit(1)
+                        .maybeSingle();
+                    sale = data || null;
+                }
+
+                if (!sale && nextTicket.patient_name) {
+                    const { data } = await supabaseClient
+                        .from('sales')
+                        .select(saleColumns)
+                        .eq('client_type', 'RETAIL')
+                        .neq('is_quotation', true)
+                        .ilike('customer_data->>full_name', nextTicket.patient_name)
+                        .gte('created_at', startOfTodayIso())
+                        .order('created_at', { ascending: false })
+                        .limit(1)
+                        .maybeSingle();
+                    sale = data || null;
+                }
+
+                if (sale) dispenseSaleCache[sale.id] = sale;
+                renderNextUpPanel(panel, nextTicket, sale);
+            } catch (err) {
+                console.warn('Could not load next-up preview:', err);
+                panel.innerHTML = '';
+            }
+        }
+
+        function renderNextUpPanel(panel, ticket, sale) {
+            const header = `
+                <div style="font-size:0.75rem; color:#94a3b8; text-transform:uppercase; letter-spacing:0.5px; margin-bottom:6px;">
+                    <i class="fa-solid fa-mortar-pestle"></i> Next Up -- Prepare Before Calling
+                </div>
+                <div style="font-weight:600; color:#0f172a; margin-bottom:8px;">#${ticket.token_number} -- ${ticket.patient_name}</div>
+            `;
+
+            if (!sale) {
+                panel.innerHTML = header + `
+                    <p style="color:#b45309; background:#fffbeb; border:1px solid #fde68a; border-radius:6px; padding:8px 10px; font-size:0.8rem; margin:0;">
+                        <i class="fa-solid fa-triangle-exclamation"></i> No matching invoice found yet for this patient -- search by name below once billing is done, or check with the billing counter.
+                    </p>
+                `;
+                return;
+            }
+
+            const printedBadge = sale.labels_printed_at
+                ? `<span style="margin-left:8px; background:#dcfce7; color:#166534; padding:1px 8px; border-radius:8px; font-size:0.68rem; font-weight:600;">Labels Printed</span>`
+                : '';
+
+            panel.innerHTML = header + `
+                <div style="background:#f8fafc; border-radius:8px; padding:10px 12px;">
+                    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
+                        <strong style="font-size:0.85rem;">${sale.sale_id}</strong>${printedBadge}
+                    </div>
+                    <div style="font-size:0.8rem; color:#475569; margin-bottom:8px;">
+                        ${(sale.items || []).map(item => `${item.product_name} (Qty ${item.qty})`).join(', ') || 'No items on this invoice.'}
+                    </div>
+                    <div style="display:flex; gap:8px;">
+                        <button type="button" class="btn btn-outline btn-sm dash-nextup-print-invoice-btn"><i class="fa-solid fa-file-invoice"></i> Print Invoice</button>
+                        <button type="button" class="btn btn-outline btn-sm dash-nextup-print-labels-btn"><i class="fa-solid fa-print"></i> Print Label(s)</button>
+                    </div>
+                </div>
+            `;
+
+            panel.querySelector('.dash-nextup-print-invoice-btn')?.addEventListener('click', () => printInvoiceForSale(sale));
+            panel.querySelector('.dash-nextup-print-labels-btn')?.addEventListener('click', () => {
+                printLabelsForSale(sale).then(loadNextUpPreview);
+            });
+        }
+
         // 🔥 Window-level listeners are replaced (not stacked) on every
         // Dashboard revisit -- this script re-runs each time the module
         // loads, and a plain addEventListener here would otherwise add
@@ -908,6 +1173,10 @@
             if (!e.detail || e.detail.stage !== 'dispensing') return;
             const badge = document.getElementById('dashDispatchWaitingBadge');
             if (badge) badge.textContent = `${e.detail.count} waiting`;
+            // A waiting-count change (new patient sent to dispensing,
+            // priority escalation, etc.) can change who's next -- refresh
+            // the preview so it never shows a stale patient.
+            loadNextUpPreview();
         };
         window.addEventListener('queueWaitingCountChanged', window.__dispatchWaitingHandler);
 
@@ -918,12 +1187,26 @@
             try {
                 const { data, error } = await supabaseClient.rpc('call_next_ticket', { p_stage: 'dispensing', p_counter: 'Dispatch' });
                 if (error) throw error;
-                if (!data) {
+                // 🔥 FIX: call_next_ticket() is declared to RETURN a single
+                // queue_tickets row (not SETOF), so when there's genuinely
+                // no one left waiting, Postgres doesn't hand back "no rows"
+                // -- it hands back ONE row where every column is null. That
+                // object is still truthy in JS, so the old `if (!data)`
+                // check never caught it: the "no one waiting" case fell
+                // through to setServing(data) and the UI ended up showing
+                // "Serving #null -- null" instead of going idle. Checking
+                // .id specifically (present on every real ticket, always
+                // null on the empty row) tells the two cases apart.
+                if (!data || !data.id) {
                     alert('No patients waiting for dispensing right now.');
                 } else {
                     setServing(data);
                 }
                 loadWaitingBadge();
+                // The ticket just called was (almost always) the one the
+                // preview below was just showing -- refresh it so it now
+                // shows whoever is next in line to prepare for.
+                loadNextUpPreview();
             } catch (err) {
                 console.error('Error calling next ticket:', err);
                 alert('Error calling next patient: ' + (err.message || err));
@@ -940,6 +1223,7 @@
                 if (error) throw error;
                 setServing(null);
                 loadWaitingBadge();
+                loadNextUpPreview();
             } catch (err) {
                 console.error('Error completing dispensing:', err);
                 alert('Error: ' + (err.message || err));
@@ -954,6 +1238,7 @@
                 if (error) throw error;
                 setServing(null);
                 loadWaitingBadge();
+                loadNextUpPreview();
             } catch (err) {
                 console.error('Error skipping ticket:', err);
                 alert('Error: ' + (err.message || err));
@@ -962,6 +1247,7 @@
 
         render();
         loadWaitingBadge(); // one-off -- live updates after this come via 'queueWaitingCountChanged' from the top bar's own polling/realtime, so this card doesn't need its own interval or channel subscription (which would otherwise stack up on every Dashboard revisit).
+        loadNextUpPreview();
     }
 
     // ============================================

@@ -215,7 +215,17 @@ window.initQueueBar = function initQueueBar() {
         try {
             const { data, error } = await supabaseClient.rpc('call_next_ticket', { p_stage: stage, p_counter: counter });
             if (error) throw error;
-            if (!data) {
+            // 🔥 FIX: call_next_ticket() RETURNS a single queue_tickets row
+            // (not SETOF) -- when nobody is waiting, Postgres still hands
+            // back ONE row with every column null instead of "no rows",
+            // and that object is truthy in JS. The old `if (!data)` check
+            // never caught that case, so this bar ended up showing
+            // "Serving #null -- null" the moment the queue actually ran
+            // dry (exactly what was reported: attending the last patient
+            // shows "null" instead of going back to idle). .id is null
+            // only on that empty row, never on a real ticket, so checking
+            // it tells the two cases apart.
+            if (!data || !data.id) {
                 alert(`No patients waiting for ${isBilling ? 'billing' : 'dispensing'} right now.`);
             } else {
                 setServing(data);
@@ -361,7 +371,21 @@ window.initQueueBar = function initQueueBar() {
     // guard), but fixing it here too means staff don't even see a
     // misleading "idle" button in the first place after a refresh --
     // the bar just quietly shows who they're really still serving.
-    (async function resyncServingFromDb() {
+    //
+    // 🔥 CHANGED: this used to run ONCE, right after login. That left a
+    // real gap: queue_tickets resets its numbering every day (queries
+    // elsewhere filter on queue_date = today), but if a terminal is just
+    // left logged in overnight (never closed/reloaded -- common on a
+    // pharmacy counter machine), this bar and the Dashboard's "Now
+    // Serving" card kept showing YESTERDAY's last patient name and token
+    // number indefinitely the next morning, since nothing ever re-checked
+    // after that first load. Turning this into a function that also
+    // re-runs on an interval means the moment the date rolls over (this
+    // function always computes "today" fresh), today's query stops
+    // matching yesterday's ticket, comes back empty, and the stale label
+    // gets cleared automatically -- same as it already does today when
+    // another device completes/skips the ticket out from under this one.
+    async function resyncServingFromDb() {
         try {
             const today = new Date().toISOString().split('T')[0];
             const counterField = isBilling ? 'billing_counter' : 'dispensing_counter';
@@ -387,12 +411,17 @@ window.initQueueBar = function initQueueBar() {
                 }
             } else if (servingTicket) {
                 // sessionStorage thought we were serving someone, but the
-                // database disagrees (e.g. completed/sent to pending from
-                // another tab/device) -- clear the stale local state.
+                // database disagrees -- either completed/sent to pending
+                // from another tab/device, or (most commonly) it's simply
+                // a new day now and that ticket belongs to yesterday.
+                // Clear the stale local state either way.
                 setServing(null);
             }
         } catch (e) {
             console.warn('Queue bar: resync from DB failed (non-fatal):', e);
         }
-    })();
+    }
+
+    resyncServingFromDb();
+    setInterval(resyncServingFromDb, 60000);
 };

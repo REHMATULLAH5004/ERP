@@ -94,7 +94,7 @@
                     <span>Selected: <strong id="nhimaSelectedCount">0</strong> claims</span>
                     <span>Total Amount: <strong id="nhimaSelectedTotal">ZK0.00</strong></span>
                     <span>Outstanding Balance: <strong id="nhimaSelectedBalance">ZK0.00</strong></span>
-                    <button class="btn btn-primary btn-sm" onclick="processNhimaBulkSettlement()" style="background: #2563eb; color: white; border: none; padding: 6px 16px; border-radius: 4px; cursor: pointer;">
+                    <button class="btn btn-primary btn-sm" id="processNhimaBulkBtn" onclick="processNhimaBulkSettlement()" style="background: #2563eb; color: white; border: none; padding: 6px 16px; border-radius: 4px; cursor: pointer;">
                         <i class="fa-solid fa-file-invoice"></i> Process Selected
                     </button>
                 </div>
@@ -296,7 +296,7 @@
             </div>
             <div class="modal-footer">
                 <button class="btn btn-outline" onclick="closeRetailReceiptModal()">Cancel</button>
-                <button class="btn btn-primary" onclick="saveRetailReceipt()">
+                <button class="btn btn-primary" id="saveRetailReceiptBtn" onclick="saveRetailReceipt()">
                     <i class="fa-solid fa-floppy-disk"></i> Record Receipt
                 </button>
             </div>
@@ -370,7 +370,7 @@
             </div>
             <div class="modal-footer">
                 <button class="btn btn-outline" onclick="closeWholesaleReceiptModal()">Cancel</button>
-                <button class="btn btn-primary" onclick="saveWholesaleReceipt()">
+                <button class="btn btn-primary" id="saveWholesaleReceiptBtn" onclick="saveWholesaleReceipt()">
                     <i class="fa-solid fa-floppy-disk"></i> Record Receipt
                 </button>
             </div>

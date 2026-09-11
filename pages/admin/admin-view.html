@@ -146,8 +146,12 @@
                 <!-- COMPANY DETAILS -->
                 <div class="card" style="padding: 20px;">
                     <h4 style="margin: 0 0 4px 0;"><i class="fa-solid fa-building" style="color:#2563eb;"></i> Company Details</h4>
-                    <p class="helper-text" style="margin: 0 0 16px 0;">Shown on the header of every printed invoice, quotation, and receipt.</p>
-    
+                    <p class="helper-text" style="margin: 0 0 16px 0;">
+                        Used on Purchase Orders, Donation notes, Write-offs, Stock Movement notes,
+                        Receipts and Expense vouchers. Retail and Wholesale sales invoices use their
+                        own company name set below instead.
+                    </p>
+
                     <div class="form-group">
                         <label>Company Name *</label>
                         <input type="text" id="invCompanyName" class="form-control" required>
@@ -171,53 +175,166 @@
                         <input type="text" id="invZamra" class="form-control">
                     </div>
                 </div>
-    
-                <!-- DOCUMENT NUMBER PREFIXES -->
+
+                <!-- OTHER DOCUMENT PREFIXES -->
                 <div class="card" style="padding: 20px;">
-                    <h4 style="margin: 0 0 4px 0;"><i class="fa-solid fa-hashtag" style="color:#2563eb;"></i> Document Number Prefixes</h4>
+                    <h4 style="margin: 0 0 4px 0;"><i class="fa-solid fa-hashtag" style="color:#2563eb;"></i> Other Document Prefixes</h4>
                     <p class="helper-text" style="margin: 0 0 16px 0;">
-                        Each document number is built as <code>PREFIX-YEAR-XXXXXX-XXXX</code>.
-                        Changing a prefix only affects documents created from now on -- existing
-                        invoices keep their original numbers.
+                        Purchase Orders, Donations and Write-offs each keep their own single
+                        prefix (they don't have Retail/Wholesale sub-types). Changing a prefix
+                        only affects documents created from now on.
                     </p>
-    
+
                     <div class="form-row">
-                        <div class="form-group">
-                            <label>Retail Invoice Prefix</label>
-                            <input type="text" id="invInvoicePrefix" class="form-control" placeholder="GRI" maxlength="10">
-                        </div>
-                        <div class="form-group">
-                            <label>Quotation Prefix</label>
-                            <input type="text" id="invQuotationPrefix" class="form-control" placeholder="QGR" maxlength="10">
-                        </div>
-                    </div>
-                    <div class="form-row">
-                        <div class="form-group">
-                            <label>Wholesale Prefix</label>
-                            <input type="text" id="invWholesalePrefix" class="form-control" placeholder="GWH" maxlength="10">
-                        </div>
                         <div class="form-group">
                             <label>Purchase Order Prefix</label>
                             <input type="text" id="invPurchasePrefix" class="form-control" placeholder="PO" maxlength="10">
                         </div>
-                    </div>
-                    <div class="form-row">
                         <div class="form-group">
                             <label>Donation Prefix</label>
                             <input type="text" id="invDonationPrefix" class="form-control" placeholder="DON" maxlength="10">
                         </div>
+                    </div>
+                    <div class="form-row">
                         <div class="form-group">
                             <label>Write-off Prefix</label>
                             <input type="text" id="invWriteoffPrefix" class="form-control" placeholder="WO" maxlength="10">
                         </div>
+                        <div class="form-group"></div>
                     </div>
                 </div>
-    
+
+                <!-- RETAIL INVOICING -->
+                <div class="card" style="padding: 20px;">
+                    <h4 style="margin: 0 0 4px 0;"><i class="fa-solid fa-cash-register" style="color:#2563eb;"></i> Retail Invoicing</h4>
+                    <p class="helper-text" style="margin: 0 0 16px 0;">
+                        Company details, document prefix and footer message printed on every Retail
+                        POS sale (NHIMA, Regular, Online, Staff). Each sale's number is built as
+                        <code>PREFIX-INV-...</code> for a real sale, or <code>PREFIX-QUE-...</code>
+                        for a quotation -- no bank details are printed on retail documents.
+                    </p>
+
+                    <div class="form-group">
+                        <label>Retail Company Name *</label>
+                        <input type="text" id="invRetailCompanyName" class="form-control" placeholder="Griffins Medicals Limited" required>
+                    </div>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label>ZAMRA Number</label>
+                            <input type="text" id="invRetailZamra" class="form-control" placeholder="e.g. ZAMRA-000000">
+                        </div>
+                        <div class="form-group">
+                            <label>TPIN Number</label>
+                            <input type="text" id="invRetailTpin" class="form-control" placeholder="e.g. 1000000000">
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label>Phone Number</label>
+                        <input type="text" id="invRetailPhone" class="form-control" placeholder="e.g. +260 97 000 0000">
+                    </div>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label>NHIMA Prefix</label>
+                            <input type="text" id="invRetailPrefixNhima" class="form-control" placeholder="GMLN" maxlength="10">
+                        </div>
+                        <div class="form-group">
+                            <label>Regular Prefix</label>
+                            <input type="text" id="invRetailPrefixRegular" class="form-control" placeholder="GMLR" maxlength="10">
+                        </div>
+                    </div>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label>Online Prefix</label>
+                            <input type="text" id="invRetailPrefixOnline" class="form-control" placeholder="GMLO" maxlength="10">
+                        </div>
+                        <div class="form-group">
+                            <label>Staff Prefix</label>
+                            <input type="text" id="invRetailPrefixStaff" class="form-control" placeholder="GMLS" maxlength="10">
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label>Footer Message</label>
+                        <textarea id="invRetailFooterMessage" class="form-control" rows="2" placeholder="Thank you for choosing Griffins Medicals Limited. Visit us again!"></textarea>
+                        <small style="color: #94a3b8; font-size: 0.72rem;">Printed at the bottom of every retail invoice, below the "Thank you for your business" line.</small>
+                    </div>
+                </div>
+
+                <!-- WHOLESALE INVOICING -->
+                <div class="card" style="padding: 20px;">
+                    <h4 style="margin: 0 0 4px 0;"><i class="fa-solid fa-boxes-stacked" style="color:#2563eb;"></i> Wholesale Invoicing</h4>
+                    <p class="helper-text" style="margin: 0 0 16px 0;">
+                        Company details and document prefix used on Wholesale sales (Regular,
+                        Internal). Same <code>PREFIX-INV-...</code> / <code>PREFIX-QUE-...</code>
+                        numbering as Retail -- but wholesale invoices AND quotations both print the
+                        bank details below, plus that customer's own Credit Limit (set on the
+                        customer record in Wholesale POS), in the footer.
+                    </p>
+
+                    <div class="form-group">
+                        <label>Wholesale Company Name *</label>
+                        <input type="text" id="invWholesaleCompanyName" class="form-control" placeholder="Griffins Pharmaceuticals" required>
+                    </div>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label>ZAMRA Number</label>
+                            <input type="text" id="invWholesaleZamra" class="form-control" placeholder="e.g. ZAMRA-000000">
+                        </div>
+                        <div class="form-group">
+                            <label>TPIN Number</label>
+                            <input type="text" id="invWholesaleTpin" class="form-control" placeholder="e.g. 1000000000">
+                        </div>
+                    </div>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label>Regular Prefix</label>
+                            <input type="text" id="invWholesalePrefixRegular" class="form-control" placeholder="GPR" maxlength="10">
+                        </div>
+                        <div class="form-group">
+                            <label>Internal Prefix</label>
+                            <input type="text" id="invWholesalePrefixInternal" class="form-control" placeholder="GPI" maxlength="10">
+                        </div>
+                    </div>
+                </div>
+
+                <!-- BANK DETAILS -->
+                <div class="card" style="padding: 20px;">
+                    <h4 style="margin: 0 0 4px 0;"><i class="fa-solid fa-building-columns" style="color:#2563eb;"></i> Bank Details</h4>
+                    <p class="helper-text" style="margin: 0 0 16px 0;">
+                        Printed in the footer of every Wholesale invoice and quotation, alongside
+                        the Default Payment Terms below. Not shown on Retail documents.
+                    </p>
+
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label>Bank Name</label>
+                            <input type="text" id="invBankName" class="form-control">
+                        </div>
+                        <div class="form-group">
+                            <label>Account Name</label>
+                            <input type="text" id="invBankAccountName" class="form-control">
+                        </div>
+                    </div>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label>Account Number</label>
+                            <input type="text" id="invBankAccountNumber" class="form-control">
+                        </div>
+                        <div class="form-group">
+                            <label>Branch</label>
+                            <input type="text" id="invBankBranch" class="form-control">
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label>SWIFT/BIC (optional)</label>
+                        <input type="text" id="invBankSwift" class="form-control">
+                    </div>
+                </div>
+
                 <!-- DEFAULTS -->
                 <div class="card" style="padding: 20px; grid-column: 1 / -1;">
                     <h4 style="margin: 0 0 4px 0;"><i class="fa-solid fa-sliders" style="color:#2563eb;"></i> Defaults</h4>
                     <p class="helper-text" style="margin: 0 0 16px 0;">Starting values a cashier/clerk can still override per transaction.</p>
-    
+
                     <div class="form-row">
                         <div class="form-group">
                             <label>Default Tax Rate (%)</label>

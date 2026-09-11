@@ -27,7 +27,6 @@
                     <th>Category</th>
                     <th>Sub-Category</th>
                     <th>Pack Size</th>
-                    <th style="text-align: right;">Min Order Qty</th>
                     <th style="text-align: right;">Total Stock</th>
                     <th style="padding-right: 20px; text-align: right;">Edit</th>
                 </tr>
@@ -386,8 +385,12 @@
                 </div>
             </div>
 
-            <!-- Tax, Pack Size & Min Order Qty -->
-            <div class="form-grid-3">
+            <!-- Tax & Pack Size -->
+            <!-- 🔥 REMOVED: Min Order Qty is gone entirely -- reorder
+                 decisions are now purely dynamic (stock vs. actual 3-month
+                 sales for the generic, see Purchase > Reorder Report), so
+                 there's no minimum left to set or store per product. -->
+            <div class="form-grid-2">
                 <div class="form-group">
                     <label>Tax (%)</label>
                     <input type="number" id="tax" value="0" step="0.01">
@@ -396,39 +399,24 @@
                     <label>Pack Size *</label>
                     <input type="number" id="packSize" required placeholder="e.g. 30" min="1">
                 </div>
-                <div class="form-group">
-                    <label>Min Order Qty *</label>
-                    <input type="number" id="minOrderQty" required placeholder="e.g. 10" min="1" value="1">
-                </div>
             </div>
 
             <!-- Sale Price Brackets -->
+            <!-- 🔥 CHANGED: Wholesale Internal/Regular and Retail Online/Regular/Staff
+                 are no longer entered per-product here -- they're now computed
+                 dynamically (Wholesale = flat global rate, Retail = exponential
+                 cost-based curve) from the rates configured once in Admin > Pricing
+                 Settings. Only NHIMA stays a manual fixed price per product, since
+                 NHIMA pricing is set by scheme rules rather than a markup formula. -->
             <div class="price-config">
                 <h4>Sale Price Configuration</h4>
-                
+                <p style="margin: 0 0 15px 0; font-size: 13px; color: #64748b;">
+                    Wholesale, Retail and Online sale prices are now calculated automatically from
+                    this product's cost using the rates set in <strong>Admin &gt; Pricing Settings</strong>.
+                    Only NHIMA needs a fixed price entered manually below.
+                </p>
+
                 <div class="form-grid-3">
-                    <div class="price-card">
-                        <label>Wholesale Internal (% of Cost)</label>
-                        <input type="number" id="wholesaleInternalPercent" value="0" step="0.01" style="width: 100%; padding: 8px; border: 1px solid #e2e8f0; border-radius: 4px; margin-top: 5px;">
-                    </div>
-                    <div class="price-card">
-                        <label>Wholesale Regular (% of Cost)</label>
-                        <input type="number" id="wholesaleRegularPercent" value="0" step="0.01" style="width: 100%; padding: 8px; border: 1px solid #e2e8f0; border-radius: 4px; margin-top: 5px;">
-                    </div>
-                    <div class="price-card">
-                        <label>Retail Online (% of Cost)</label>
-                        <input type="number" id="retailOnlinePercent" value="0" step="0.01" style="width: 100%; padding: 8px; border: 1px solid #e2e8f0; border-radius: 4px; margin-top: 5px;">
-                    </div>
-                </div>
-                <div class="form-grid-3" style="margin-top: 15px;">
-                    <div class="price-card">
-                        <label>Retail Regular (% of Cost)</label>
-                        <input type="number" id="retailRegularPercent" value="0" step="0.01" style="width: 100%; padding: 8px; border: 1px solid #e2e8f0; border-radius: 4px; margin-top: 5px;">
-                    </div>
-                    <div class="price-card">
-                        <label>Retail Staff (% of Cost)</label>
-                        <input type="number" id="retailStaffPercent" value="0" step="0.01" style="width: 100%; padding: 8px; border: 1px solid #e2e8f0; border-radius: 4px; margin-top: 5px;">
-                    </div>
                     <div class="price-card" style="background: #e0f2fe; border: 1px solid #bae6fd;">
                         <label style="color: #0369a1;">NHIMA (Fixed Price K)</label>
                         <input type="number" id="nhimaPrice" step="0.01" required style="width: 100%; padding: 8px; border: 1px solid #bae6fd; border-radius: 4px; margin-top: 5px; background: white;">

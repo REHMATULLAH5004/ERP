@@ -16,18 +16,50 @@
     // defined" and aborted this entire module's init before anything below
     // it ever ran. Self-contained now: reads the same single
     // `company_settings` row directly, with a hardcoded fallback.
+    // 🔥 CHANGED: now also reads the Wholesale-specific Invoice Settings
+    // just added in Admin -- a separate company name, a PER-CUSTOMER-TYPE
+    // invoice prefix (Regular vs Internal), and Wholesale's own ZAMRA/TPIN
+    // numbers, plus the pharmacy's real bank details -- instead of always
+    // falling back to the generic/retail company_settings fields (or, for
+    // the bank details, literal placeholder text that was never filled
+    // in). Every new field below falls back sensibly to the existing
+    // generic field (or the old single wholesale_prefix) if Admin hasn't
+    // set it yet, so this is safe even before Admin fills everything in.
     const companySettings = await (async function loadCompanySettingsInline() {
         const fallback = {
             company_name: 'GRIFFINS MEDICALS LIMITED',
             address: 'Plot 3534, Freedomway, Lusaka',
             phone: '+260 97 000 0000',
             zamra_number: 'ZAMRA-123456',
-            wholesale_prefix: 'GWH'
+            wholesale_prefix: 'GWH',
+            wholesale_company_name: '',
+            wholesale_prefix_regular: '',
+            wholesale_prefix_internal: '',
+            wholesale_zamra_number: '',
+            wholesale_tpin_number: '',
+            bank_name: '',
+            bank_account_name: '',
+            bank_account_number: '',
+            bank_branch: '',
+            bank_swift: '',
+            // 🔥 ADDED: dynamic pricing -- flat global markup rates,
+            // replacing the old per-product wholesale_internal_percent /
+            // wholesale_regular_percent columns that had to be typed in by
+            // hand for every single product. Unlike Retail these are NOT
+            // an exponential curve -- Wholesale is a flat % for every
+            // product regardless of cost, per spec (Internal 5%, Regular
+            // 10%).
+            wholesale_internal_markup_percent: 5,
+            wholesale_regular_markup_percent: 10
         };
         try {
             const { data, error } = await supabaseClient
                 .from('company_settings')
-                .select('company_name, address, phone, zamra_number, wholesale_prefix')
+                .select(`company_name, address, phone, zamra_number, wholesale_prefix,
+                    wholesale_company_name, wholesale_prefix_regular, wholesale_prefix_internal,
+                    wholesale_zamra_number, wholesale_tpin_number,
+                    bank_name, bank_account_name, bank_account_number, bank_branch, bank_swift,
+                    wholesale_internal_markup_percent, wholesale_regular_markup_percent`)
                 .eq('id', 1)
                 .maybeSingle();
             if (error || !data) return fallback;
@@ -36,13 +68,40 @@
                 address: data.address || fallback.address,
                 phone: data.phone || fallback.phone,
                 zamra_number: data.zamra_number || fallback.zamra_number,
-                wholesale_prefix: data.wholesale_prefix || fallback.wholesale_prefix
+                wholesale_prefix: data.wholesale_prefix || fallback.wholesale_prefix,
+                // Wholesale-specific overrides -- each falls back to the
+                // generic/legacy equivalent, never to a blank field on the
+                // printed invoice.
+                wholesale_company_name: data.wholesale_company_name || data.company_name || fallback.company_name,
+                wholesale_prefix_regular: data.wholesale_prefix_regular || data.wholesale_prefix || fallback.wholesale_prefix,
+                wholesale_prefix_internal: data.wholesale_prefix_internal || data.wholesale_prefix || fallback.wholesale_prefix,
+                wholesale_zamra_number: data.wholesale_zamra_number || data.zamra_number || fallback.zamra_number,
+                wholesale_tpin_number: data.wholesale_tpin_number || '',
+                bank_name: data.bank_name || '',
+                bank_account_name: data.bank_account_name || data.wholesale_company_name || data.company_name || fallback.company_name,
+                bank_account_number: data.bank_account_number || '',
+                bank_branch: data.bank_branch || '',
+                bank_swift: data.bank_swift || '',
+                wholesale_internal_markup_percent: data.wholesale_internal_markup_percent ?? fallback.wholesale_internal_markup_percent,
+                wholesale_regular_markup_percent: data.wholesale_regular_markup_percent ?? fallback.wholesale_regular_markup_percent
             };
         } catch (e) {
             console.warn('Could not load company_settings, using defaults:', e);
             return fallback;
         }
     })();
+
+    // 🔥 ADDED: picks the right invoice-number prefix for the customer
+    // type currently on the form -- Admin now configures Regular and
+    // Internal wholesale customers with DIFFERENT prefixes
+    // (wholesale_prefix_regular / wholesale_prefix_internal), where
+    // before every wholesale sale used the same single prefix regardless
+    // of customer type.
+    function getWholesalePrefix(subType) {
+        return subType === 'INTERNAL'
+            ? (companySettings.wholesale_prefix_internal || companySettings.wholesale_prefix)
+            : (companySettings.wholesale_prefix_regular || companySettings.wholesale_prefix);
+    }
 
     // ============================================
     // DOM REFERENCES
@@ -90,6 +149,19 @@
     // quotation-to-invoice conversion), read by saveTransaction() to
     // decide update vs insert.
     let editingWholesaleDbId = null;
+
+    // 🔥 ADDED: tracks the ORIGINAL quotation's id while
+    // convertQuotationToInvoice() has its data loaded into the form ready
+    // to be saved as a real invoice. Previously that conversion only ever
+    // loaded the quotation and gave it a fresh invoice number -- it never
+    // touched the original quotation row, so after Save the customer had
+    // a brand-new invoice AND the old quotation was still sitting there
+    // untouched, looking like a second, still-open document for the same
+    // sale. Set by convertQuotationToInvoice(), cleared by
+    // generateNextSaleId() (Reset / a fresh conversion) and consumed by
+    // saveTransaction() once the new invoice has actually saved
+    // successfully, to remove the original quotation.
+    let convertingFromQuotationId = null;
 
     // 🔥 ADDED: current user's role -- needed to gate the Delete button
     // in search results to Admin only. Fetched once and cached; runs in
@@ -301,8 +373,21 @@
                     address.value = customer.address || '';
                     zamra.value = customer.zamra_number || '';
                     tpin.value = customer.tpin_number || '';
-                    
+
                     updateRowRates();
+
+                    // 🔥 ADDED: the invoice number's prefix depends on
+                    // this customer's type (Regular vs Internal -- see
+                    // getWholesalePrefix()), so re-generate it now that
+                    // the type is known. Only for a brand-new sale --
+                    // loadWholesaleForEdit() also selects a customer
+                    // (to populate its fields) but sets
+                    // editingWholesaleDbId right after, before this runs,
+                    // so an in-progress edit's original invoice number is
+                    // left untouched here.
+                    if (!editingWholesaleDbId) {
+                        generateNextSaleId();
+                    }
                 }
             } catch (err) {
                 console.error("Error fetching customer details:", err);
@@ -551,9 +636,13 @@
             }
 
             try {
+                // 🔥 CHANGED: dropped wholesale_internal_percent / wholesale_regular_percent
+                // -- those manual per-product columns are gone. Internal/Regular markup
+                // is now the flat global rate from Admin (company_settings), applied in
+                // updateRowRate().
                 const { data: product, error: prodError } = await supabaseClient
                     .from('products')
-                    .select('conversion_rate, tax_percent, wholesale_internal_percent, wholesale_regular_percent')
+                    .select('conversion_rate, tax_percent')
                     .eq('id', productId)
                     .single();
 
@@ -601,11 +690,9 @@
                         }
                         
                         batchSelect.innerHTML += `
-                            <option value="${b.id}" 
-                                data-cost="${costPrice}" 
-                                data-pack="${product.conversion_rate || 1}" 
-                                data-internal="${product.wholesale_internal_percent || 0}"
-                                data-regular="${product.wholesale_regular_percent || 0}"
+                            <option value="${b.id}"
+                                data-cost="${costPrice}"
+                                data-pack="${product.conversion_rate || 1}"
                                 data-tax="${product.tax_percent || 0}"
                                 data-expiry="${expiry}"
                                 data-qty="${b.total_qty}"
@@ -818,6 +905,13 @@
         // editing it in place). Same pattern as retail.js.
         editingWholesaleDbId = null;
 
+        // 🔥 ADDED: also clears any pending quotation-conversion tracker --
+        // a plain Reset or starting a fresh sale means there is no
+        // conversion to finalize on the next Save. convertQuotationToInvoice()
+        // sets convertingFromQuotationId AFTER calling this function, so
+        // that assignment always wins for an actual conversion.
+        convertingFromQuotationId = null;
+
         const display = document.getElementById('saleIdDisplay');
         const invoiceDisplay = document.getElementById('invoiceNumber');
         if (!display) return;
@@ -826,8 +920,12 @@
         const year = date.getFullYear();
         const timestamp = Date.now().toString().slice(-6);
         const random = Math.floor(Math.random() * 10000).toString().padStart(4, '0');
-        const saleId = `${companySettings.wholesale_prefix}-${year}-${timestamp}-${random}`;
-        
+        // 🔥 CHANGED: uses the prefix for whichever customer type is
+        // currently on the form (falls back to Regular if none selected
+        // yet) instead of always the one generic wholesale_prefix.
+        const prefix = getWholesalePrefix(customerType ? customerType.value : '');
+        const saleId = `${prefix}-${year}-${timestamp}-${random}`;
+
         display.textContent = `Invoice #: ${saleId}`;
         if (invoiceDisplay) invoiceDisplay.value = saleId;
     }
@@ -875,16 +973,19 @@
         const singleUnitCost = parseFloat(selected.dataset.cost) || 0;
         const packSize = parseInt(selected.dataset.pack) || 1;
         const costPerPack = singleUnitCost * packSize;
-        const internalPercent = parseFloat(selected.dataset.internal) || 0;
-        const regularPercent = parseFloat(selected.dataset.regular) || 0;
-        
+
         const customerTypeValue = customerType.value || 'REGULAR';
-        
+
+        // 🔥 CHANGED: dynamic pricing -- flat global rates from Admin
+        // (company_settings) instead of per-product wholesale_internal_percent /
+        // wholesale_regular_percent. Same rate for every product, regardless
+        // of cost (Wholesale doesn't use the exponential curve -- only
+        // Retail Regular/Online do).
         let percent = 0;
         if (customerTypeValue === 'INTERNAL') {
-            percent = internalPercent;
+            percent = companySettings.wholesale_internal_markup_percent;
         } else {
-            percent = regularPercent;
+            percent = companySettings.wholesale_regular_markup_percent;
         }
 
         packInput.value = packSize + 's';
@@ -996,11 +1097,22 @@
                 ? `<span style="background:#fef3c7; color:#92400e; padding:2px 10px; border-radius:10px; font-size:0.7rem; font-weight:600;">QUOTATION</span>`
                 : `<span style="background:#dcfce7; color:#166534; padding:2px 10px; border-radius:10px; font-size:0.7rem; font-weight:600;">INVOICE</span>`;
 
+            // 🔥 ADDED: "Print" on every row -- previously there was no way
+            // to reprint an invoice or quotation once it had already been
+            // saved (the only print button lived on the "just saved this"
+            // confirmation dialog, which only ever knew about whatever was
+            // saved in the current page session). Wired to printSavedSale(),
+            // which re-fetches the record and prints it exactly like a
+            // fresh save would.
+            const printBtn = `<button class="search-print-btn" data-id="${r.id}" style="background:#0f766e; color:white; border:none; padding:5px 12px; border-radius:4px; cursor:pointer; font-size:0.75rem;"><i class="fa-solid fa-print"></i> Print</button>`;
+
             const actions = isQuotation ? `
                 <button class="search-view-btn" data-id="${r.id}" style="background:#2563eb; color:white; border:none; padding:5px 12px; border-radius:4px; cursor:pointer; font-size:0.75rem;"><i class="fa-solid fa-eye"></i> View</button>
+                ${printBtn}
                 <button class="search-convert-btn" data-id="${r.id}" style="background:#059669; color:white; border:none; padding:5px 12px; border-radius:4px; cursor:pointer; font-size:0.75rem;"><i class="fa-solid fa-arrow-right-arrow-left"></i> Convert to Invoice</button>
             ` : `
                 <button class="search-view-btn" data-id="${r.id}" style="background:#2563eb; color:white; border:none; padding:5px 12px; border-radius:4px; cursor:pointer; font-size:0.75rem;"><i class="fa-solid fa-eye"></i> View</button>
+                ${printBtn}
                 <button class="search-edit-btn" data-id="${r.id}" style="background:#f59e0b; color:white; border:none; padding:5px 12px; border-radius:4px; cursor:pointer; font-size:0.75rem;"><i class="fa-solid fa-pen"></i> Edit</button>
                 ${isAdmin ? `<button class="search-delete-btn" data-id="${r.id}" data-sale-number="${r.sale_id}" style="background:#dc2626; color:white; border:none; padding:5px 12px; border-radius:4px; cursor:pointer; font-size:0.75rem;"><i class="fa-solid fa-trash"></i> Delete</button>` : ''}
             `;
@@ -1020,6 +1132,9 @@
 
         resultsEl.querySelectorAll('.search-view-btn').forEach(btn => {
             btn.addEventListener('click', () => viewSaleDetail(btn.dataset.id));
+        });
+        resultsEl.querySelectorAll('.search-print-btn').forEach(btn => {
+            btn.addEventListener('click', () => printSavedSale(btn.dataset.id));
         });
         resultsEl.querySelectorAll('.search-edit-btn').forEach(btn => {
             btn.addEventListener('click', async () => {
@@ -1094,6 +1209,47 @@
         } catch (error) {
             console.error('Error viewing sale detail:', error);
             alert('Error loading sale details: ' + error.message);
+        }
+    }
+
+    // 🔥 ADDED: reprints an already-saved invoice or quotation found via
+    // Search. Previously printSale() only ever had access to
+    // currentSaleData -- whatever was saved in THIS page session -- so
+    // once you saved something else, or reloaded the page, there was no
+    // way to print a past invoice again at all. Builds the exact same
+    // saleData shape viewSaleDetail() does (buildWholesaleCopyHTML()
+    // needs the full totals/date/status, not just the item list) and
+    // hands it straight to printSale().
+    async function printSavedSale(id) {
+        try {
+            const { data: sale, error } = await supabaseClient
+                .from('sales')
+                .select('*')
+                .eq('id', id)
+                .maybeSingle();
+
+            if (error) throw error;
+            if (!sale) { alert('Could not find that sale.'); return; }
+
+            const saleData = {
+                sale_id: sale.sale_id,
+                customer: sale.customer_data || {},
+                items: sale.items || [],
+                payment: sale.payment || { type: 'Cash', note: '' },
+                totals: {
+                    subtotal: sale.subtotal || 0,
+                    tax: sale.tax || 0,
+                    grand_total: sale.grand_total || 0
+                },
+                date: new Date(sale.created_at).toLocaleString(),
+                status: sale.status,
+                is_quotation: sale.is_quotation
+            };
+
+            printSale(saleData);
+        } catch (error) {
+            console.error('Error reprinting sale:', error);
+            alert('Error reprinting: ' + error.message);
         }
     }
 
@@ -1188,7 +1344,15 @@
             await loadWholesaleForEdit(saleData);
             generateNextSaleId();
 
-            alert('✅ Quotation loaded. Review the details, then click Save to finalize it as a real invoice.');
+            // 🔥 ADDED: remember which quotation this is -- generateNextSaleId()
+            // just cleared any previous tracker, so this MUST be set after
+            // that call, not before. saveTransaction() reads this once the
+            // new invoice has actually saved and removes the original
+            // quotation, so it stops sitting there as a separate, still-open
+            // document once it's been turned into a real invoice.
+            convertingFromQuotationId = id;
+
+            alert('✅ Quotation loaded. Review the details, then click Save to finalize it as a real invoice.\n\nOnce saved, this quotation will be removed automatically.');
         } catch (error) {
             console.error('Error converting quotation:', error);
             alert('Error converting quotation: ' + error.message);
@@ -1638,9 +1802,31 @@
                     if (batchSelect && item.batch_id) {
                         const batchInfo = editBatchMap[item.batch_id];
                         const expiry = batchInfo ? new Date(batchInfo.expiry_date).toLocaleDateString() : '';
+                        // 🔥 FIX: the "available" quantity shown/validated
+                        // while editing used to be the batch's CURRENT live
+                        // stock -- which already has THIS SAME invoice's
+                        // original quantity deducted from it. So editing an
+                        // invoice DOWN (e.g. a batch of 50, 40 already sold
+                        // on this invoice, 10 left on the shelf -> trying
+                        // to change it to 30) was wrongly blocked as
+                        // "insufficient stock" (30 > 10), even though
+                        // reducing the quantity can only ever free up more
+                        // stock, never need more. Adds this line's own
+                        // original committed quantity (converted to the
+                        // same base-unit terms as total_qty, via its pack
+                        // size) back on top of the live figure, so the cap
+                        // used for validation reflects what's truly
+                        // available once this invoice's own hold is
+                        // accounted for -- exactly what saveTransaction()
+                        // itself already restores behind the scenes before
+                        // re-saving an edited invoice.
+                        const originalPackSize = parseInt(item.pack_size) || 1;
+                        const originalUnitsHeld = (parseInt(item.qty) || 0) * originalPackSize;
+                        const liveUnits = batchInfo?.total_qty ?? item.available_qty ?? item.qty ?? 0;
+                        const effectiveAvailable = liveUnits + originalUnitsHeld;
                         batchSelect.innerHTML = `<option value="${item.batch_id}"
                             data-cost="${item.cost_per_unit || 0}"
-                            data-qty="${batchInfo?.total_qty ?? item.available_qty ?? item.qty}"
+                            data-qty="${effectiveAvailable}"
                             data-batch-number="${item.batch_number || batchInfo?.batch_number || ''}"
                             data-expiry="${expiry}">
                             ${item.batch_number || batchInfo?.batch_number || 'Unknown batch'} ${expiry ? `(Exp: ${expiry})` : ''}
@@ -1701,9 +1887,9 @@
 
                 <div class="doc-header">
                     <div class="company-block">
-                        <h1>${companySettings.company_name}</h1>
+                        <h1>${companySettings.wholesale_company_name}</h1>
                         <p>${companySettings.address}</p>
-                        <p>Phone: ${companySettings.phone} | ZAMRA: ${companySettings.zamra_number}</p>
+                        <p>Phone: ${companySettings.phone} | ZAMRA: ${companySettings.wholesale_zamra_number}${companySettings.wholesale_tpin_number ? ` | TPIN: ${companySettings.wholesale_tpin_number}` : ''}</p>
                     </div>
                 </div>
 
@@ -1764,12 +1950,14 @@
                     <strong>NOTES / PAYMENT INFO</strong>
                     <p>Please reference ${docLabel} # ${saleData.sale_id} with payment.</p>
                     ${!isQuotation ? `
-                        <strong>PAYMENT OPTIONS</strong>
-                        <p>Bank Transfer Details:<br>
-                        Bank: [Your Bank Name]<br>
-                        Account Name: Griffins Pharmaceuticals<br>
-                        Sort: [Sort Code]<br>
-                        Account: [Account Number]</p>
+                        ${companySettings.bank_name || companySettings.bank_account_number ? `
+                            <strong>PAYMENT OPTIONS</strong>
+                            <p>Bank Transfer Details:<br>
+                            Bank: ${companySettings.bank_name || 'N/A'}<br>
+                            Account Name: ${companySettings.bank_account_name}<br>
+                            ${companySettings.bank_branch ? `Branch: ${companySettings.bank_branch}<br>` : ''}
+                            Account: ${companySettings.bank_account_number || 'N/A'}${companySettings.bank_swift ? `<br>SWIFT: ${companySettings.bank_swift}` : ''}</p>
+                        ` : ''}
                     ` : `<p>This is a quotation only and does not constitute a tax invoice. Prices valid for 30 days.</p>`}
                 </div>
             </div>
@@ -1779,8 +1967,15 @@
     // ============================================
     // PRINT FUNCTION
     // ============================================
-    function printSale() {
-        const saleData = currentSaleData;
+    // 🔥 CHANGED: accepts an optional saleData override, falling back to
+    // currentSaleData as before -- currentSaleData only ever holds
+    // whatever was JUST saved in this page session, so there was no way
+    // to reprint an already-saved invoice or quotation found later via
+    // Search (currentSaleData is empty again after a page reload, or
+    // once a different sale is saved). printSavedSale() below fetches an
+    // older sale by id and passes it straight through here.
+    function printSale(saleDataOverride) {
+        const saleData = saleDataOverride || currentSaleData;
         if (!saleData) {
             alert('No sale data to print.');
             return;
@@ -2142,6 +2337,26 @@
 
             currentSaleData = saleData;
 
+            // 🔥 ADDED: this save just went through as a genuinely NEW
+            // invoice -- if it's the finalization of a quotation
+            // conversion (convertQuotationToInvoice()), remove the
+            // ORIGINAL quotation now. A quotation never deducts stock or
+            // posts accounting entries, so there is nothing to reverse --
+            // just its sale_items and sales rows. Guarded to only ever
+            // run once per conversion (cleared immediately) and only for
+            // a real insert, never an edit of an existing invoice.
+            if (convertingFromQuotationId && !editingWholesaleDbId) {
+                const quotationIdToRemove = convertingFromQuotationId;
+                convertingFromQuotationId = null;
+                try {
+                    await supabaseClient.from('sale_items').delete().eq('sale_id', quotationIdToRemove);
+                    await supabaseClient.from('sales').delete().eq('id', quotationIdToRemove);
+                    console.log(`✅ Removed original quotation ${quotationIdToRemove} after conversion to invoice.`);
+                } catch (cleanupError) {
+                    console.warn('Could not remove the original quotation after conversion (the new invoice still saved fine):', cleanupError);
+                }
+            }
+
             if (status === 'COMPLETED') {
                 showPrintDialog(saleData);
             } else {
@@ -2221,7 +2436,13 @@
     // ============================================
     // BUTTON EVENTS
     // ============================================
-    if (saveBtn) saveBtn.addEventListener('click', () => saveTransaction('COMPLETED', companySettings.wholesale_prefix));
+    // 🔥 CHANGED: this `prefix` argument is only stored as metadata on the
+    // sale row (the actual invoice number was already set by
+    // generateNextSaleId() using getWholesalePrefix()) -- reading it the
+    // same way here keeps that stored metadata consistent with whichever
+    // prefix (Regular vs Internal) the invoice number itself actually
+    // used, instead of always recording the old single generic prefix.
+    if (saveBtn) saveBtn.addEventListener('click', () => saveTransaction('COMPLETED', getWholesalePrefix(customerType ? customerType.value : '')));
     if (quoteBtn) quoteBtn.addEventListener('click', () => saveTransaction('QUOTATION', 'QWH'));
 
     // ============================================

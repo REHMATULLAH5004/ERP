@@ -207,16 +207,25 @@
                 created_at: new Date().toISOString()
             };
 
-            const { data: journalData, error: jError } = await supabaseClient
+            // 🔥 CHANGED: both writes now go through withAuthRetry(). This
+            // function does ~10 background round trips first (ensureChartOfAccounts
+            // + getAccountCodesFromChartOfAccounts), so by the time it gets here
+            // a near-expiry session token can look stale and get a 403 -- that's
+            // exactly what silently dropped GRN-2026-00017's journal entry while
+            // everything else about that GRN (line items, stock, payable) saved
+            // fine. withAuthRetry refreshes the session and retries once instead
+            // of just failing.
+            const { data: journalData, error: jError } = await withAuthRetry(() => supabaseClient
                 .from('journal_entries')
                 .insert([journal])
-                .select();
+                .select());
             if (jError) throw jError;
 
-            await supabaseClient.from('journal_lines').insert([
+            const { error: jlError } = await withAuthRetry(() => supabaseClient.from('journal_lines').insert([
                 { journal_entry_id: journalData[0].id, account_code: accountCodes.inventory, description: `Inventory received - ${grnNumber}`, debit: zmwAmount, credit: 0 },
                 { journal_entry_id: journalData[0].id, account_code: creditAccount, description: creditDescription, debit: 0, credit: zmwAmount }
-            ]);
+            ]));
+            if (jlError) throw jlError;
 
             console.log(`✅ GRN accounting entries created for ${grnNumber} (${paymentType}, ZK${zmwAmount.toFixed(2)})`);
         } catch (error) {
@@ -513,7 +522,7 @@
             
             let query = supabaseClient
                 .from('products')
-                .select('id, product_name, conversion_rate, min_order_qty, generic_name_id, supplier_id, category_id');
+                .select('id, product_name, conversion_rate, generic_name_id, supplier_id, category_id');
 
             if (supplierId) {
                 query = query.eq('supplier_id', supplierId);
@@ -538,73 +547,77 @@
             const allIds = products.map(p => p.id);
             const lastPurchaseMap = await fetchLastPurchaseCosts(allIds);
 
-            // 🔥 FIX: reorder_qty used to just top current_stock back up
-            // to min_order_qty (e.g. min 300, stock 290 -> reorder 10).
-            // Since min_order_qty is ALSO the trigger threshold, an order
-            // that small lands right back below it after almost no sales,
-            // so the same product reappears on this report almost
-            // immediately. Order enough to cover actual trailing 3-month
-            // demand instead, so one order lasts a full reorder cycle.
-            // Falls back to the old top-up-to-min behavior only when
-            // there's no 3-month sales history to go on (e.g. a brand new
-            // product), since "0" would be a worse suggestion than that.
+            // 🔥 CHANGED (Minimum Order Qty removed entirely): reorder_qty
+            // tops current stock back up to the generic's own trailing
+            // 3-month demand, so one order lasts a full reorder cycle
+            // instead of landing right back below the trigger.
             const salesMap = await fetchLast3MonthSales(allIds);
 
-            // 🔥 CHANGED: reorder decisions now happen at the GENERIC
-            // NAME level, not per individual brand/product. Two brands of
-            // the same generic (e.g. Panadol and a generic Paracetamol)
-            // are the same medicine to a patient -- 40 units of Panadol
-            // plus 30 of the generic is 70 units of "Paracetamol" on the
+            // 🔥 CHANGED: reorder decisions happen at the GENERIC NAME
+            // level, not per individual brand/product. Two brands of the
+            // same generic (e.g. Panadol and a generic Paracetamol) are
+            // the same medicine to a patient -- 40 units of Panadol plus
+            // 30 of the generic is 70 units of "Paracetamol" on the
             // shelf, not two separate low-stock situations that happen to
-            // both be half-empty. So stock, min level, and 3-month sales
-            // are all SUMMED across every brand sharing a generic_name_id
-            // before comparing against the reorder threshold -- only
-            // products with no generic name set (surgicals/instruments,
-            // per the earlier "some categories can't have a generic name"
-            // conversation) keep the old per-product-only comparison,
-            // since there's nothing to group them by. The Product column
-            // still shows each specific BRAND, exactly as before -- this
-            // only changes what decides "is this due", not what's shown.
-            const genericGroups = {}; // generic_name_id -> { stock, min, sales, hasSales, brandCount }
+            // both be half-empty. Stock and 3-month sales are SUMMED
+            // across every brand sharing a generic_name_id. Only products
+            // with no generic name set (surgicals/instruments, per the
+            // earlier "some categories can't have a generic name"
+            // conversation) are judged on their own.
+            const genericGroups = {}; // generic_name_id -> { stock, sales, hasSales, brandCount }
             products.forEach(p => {
                 if (!p.generic_name_id) return;
-                const g = genericGroups[p.generic_name_id] || { stock: 0, min: 0, sales: 0, hasSales: false, brandCount: 0 };
+                const g = genericGroups[p.generic_name_id] || {
+                    stock: 0,
+                    sales: 0,
+                    hasSales: false,
+                    brandCount: 0
+                };
                 g.stock += stockMap[p.id] || 0;
-                g.min += p.min_order_qty || 1;
                 if (salesMap[p.id] !== undefined) { g.sales += salesMap[p.id]; g.hasSales = true; }
                 g.brandCount += 1;
                 genericGroups[p.generic_name_id] = g;
             });
 
+            // 🔥 CHANGED (Minimum Order Qty removed entirely, per explicit
+            // request): the reorder trigger is now PURELY "stock below what
+            // this generic actually sold in the last 3 months". There's no
+            // stored minimum left to fall back on -- and deliberately no
+            // fallback of any kind -- for a generic/product with zero sales
+            // in that window: if it hasn't moved in 3 months, there's no
+            // case for reordering it regardless of how little is on the
+            // shelf, so it's simply left off this report until it has some
+            // sales history to judge it by.
             const reorderItems = products.filter(p => {
                 const group = p.generic_name_id ? genericGroups[p.generic_name_id] : null;
-                if (group) return group.stock < group.min;
+                if (group) return group.hasSales && group.stock < group.sales;
+                const ownSales = salesMap[p.id];
+                if (ownSales === undefined) return false;
                 const stock = stockMap[p.id] || 0;
-                const minQty = p.min_order_qty || 1;
-                return stock < minQty;
+                return stock < ownSales;
             });
 
             const mapReorderItem = (p) => {
                 const ownStock = stockMap[p.id] || 0;
-                const ownMin = p.min_order_qty || 1;
+                const ownSales = salesMap[p.id];
                 const group = p.generic_name_id ? genericGroups[p.generic_name_id] : null;
-                // groupStock/groupMin/groupSales are the combined-across-brands
-                // figures actually used for the reorder math; ownStock/ownMin
-                // stay available for display ("brand just for viewing").
+                // groupStock/groupSales are the combined-across-brands
+                // figures actually used for the reorder math; ownStock
+                // stays available for display ("brand just for viewing").
+                // Every item reaching this point already has sales history
+                // (the filter above guarantees it), so groupSales is always
+                // defined here.
                 const groupStock = group ? group.stock : ownStock;
-                const groupMin = group ? group.min : ownMin;
-                const groupSales = group ? (group.hasSales ? group.sales : undefined) : salesMap[p.id];
+                const groupSales = group ? group.sales : ownSales;
 
                 return {
                     ...p,
-                    generic_name: genericMap[p.generic_name_id] || '',
+                    generic_name: genericMap[p.generic_name_id]?.name || '',
                     supplier_name: supplierMap[p.supplier_id] || '',
                     category_name: categoryMap[p.category_id] || '',
                     current_stock: ownStock,
-                    min_qty: ownMin,
                     is_grouped: !!group && group.brandCount > 1,
                     group_stock: groupStock,
-                    group_min: groupMin,
                     three_month_sales: groupSales,
                     // 🔥 Same total suggested-order figure is shown on
                     // EVERY brand row that shares the due generic --
@@ -613,9 +626,7 @@
                     // purchasing decision for staff to make (via the
                     // checkboxes + editable qty already on this table),
                     // not something to guess at automatically.
-                    reorder_qty: (groupSales !== undefined)
-                        ? Math.max(1, groupSales - groupStock)
-                        : Math.max(1, groupMin - groupStock),
+                    reorder_qty: Math.max(1, groupSales - groupStock),
                     last_purchase: lastPurchaseMap[p.id] || null
                 };
             };
@@ -641,17 +652,17 @@
     }
 
     async function fetchGenericNames(products) {
-        const genericIds = products.map(p => p.generic_name_id).filter(id => id);
+        const genericIds = [...new Set(products.map(p => p.generic_name_id).filter(id => id))];
         let genericMap = {};
         if (genericIds.length > 0) {
             const { data: generics, error: genError } = await supabaseClient
                 .from('generic_names')
                 .select('id, name')
                 .in('id', genericIds);
-                
+
             if (!genError && generics) {
                 generics.forEach(g => {
-                    genericMap[g.id] = g.name;
+                    genericMap[g.id] = { name: g.name };
                 });
             }
         }
@@ -694,21 +705,51 @@
         return categoryMap;
     }
 
+    // 🔥 ADDED: PostgREST silently caps any single query at 1000 rows
+    // unless you page through it yourself with .range() -- with ~2,000
+    // qualifying sale_items rows in just the last 3 months (and growing
+    // every day), the old unpaged query in fetchLast3MonthSales() below
+    // was quietly dropping close to half of them. WHICH products got
+    // dropped was arbitrary -- whatever didn't make it into that first
+    // 1000 -- and that's exactly why Oxa 100mg showed "No sales history"
+    // despite having real sales as recently as today: its rows just
+    // weren't in the returned page. Not a one-off glitch, a genuine bug
+    // that gets worse as sales history grows. Every "fetch everything
+    // for these product IDs" query in this report gets the same
+    // treatment now, not just the one that happened to get caught.
+    async function fetchAllPages(buildQuery, pageSize = 1000) {
+        let allRows = [];
+        let from = 0;
+        while (true) {
+            const { data, error } = await buildQuery(from, from + pageSize - 1);
+            if (error) throw error;
+            allRows = allRows.concat(data || []);
+            if (!data || data.length < pageSize) break;
+            from += pageSize;
+        }
+        return allRows;
+    }
+
     async function fetchStockLevels(products) {
         const productIds = products.map(p => p.id);
         let stockMap = {};
-        
-        if (productIds.length > 0) {
-            const { data: batches, error: batchError } = await supabaseClient
-                .from('batches')
-                .select('product_id, total_qty')
-                .in('product_id', productIds);
 
-            if (!batchError && batches) {
+        if (productIds.length > 0) {
+            try {
+                const batches = await fetchAllPages((from, to) =>
+                    supabaseClient
+                        .from('batches')
+                        .select('product_id, total_qty')
+                        .in('product_id', productIds)
+                        .range(from, to)
+                );
+
                 batches.forEach(b => {
                     if (!stockMap[b.product_id]) stockMap[b.product_id] = 0;
                     stockMap[b.product_id] += b.total_qty || 0;
                 });
+            } catch (batchError) {
+                console.warn('Could not load stock levels:', batchError);
             }
         }
         return stockMap;
@@ -732,17 +773,21 @@
             const threeMonthsAgo = new Date();
             threeMonthsAgo.setMonth(threeMonthsAgo.getMonth() - 3);
 
-            const { data, error } = await supabaseClient
-                .from('sale_items')
-                .select('product_id, quantity, sales!inner(client_type, is_quotation, created_at)')
-                .in('product_id', productIds)
-                .in('sales.client_type', ['RETAIL', 'WHOLESALE'])
-                .neq('sales.is_quotation', true)
-                .gte('sales.created_at', threeMonthsAgo.toISOString());
+            // 🔥 FIX: was a single unpaged query -- see fetchAllPages()
+            // above for why that silently lost real sales history (this
+            // is the exact query that was dropping Oxa 100mg and others).
+            const data = await fetchAllPages((from, to) =>
+                supabaseClient
+                    .from('sale_items')
+                    .select('product_id, quantity, sales!inner(client_type, is_quotation, created_at)')
+                    .in('product_id', productIds)
+                    .in('sales.client_type', ['RETAIL', 'WHOLESALE'])
+                    .neq('sales.is_quotation', true)
+                    .gte('sales.created_at', threeMonthsAgo.toISOString())
+                    .range(from, to)
+            );
 
-            if (error) throw error;
-
-            (data || []).forEach(row => {
+            data.forEach(row => {
                 salesMap[row.product_id] = (salesMap[row.product_id] || 0) + (row.quantity || 0);
             });
         } catch (error) {
@@ -776,15 +821,19 @@
         if (!productIds || productIds.length === 0) return lastPurchaseMap;
 
         try {
-            const { data, error } = await supabaseClient
-                .from('goods_receipt_lines')
-                .select('product_id, purchase_rate, created_at, goods_receipt_notes(currency, exchange_rate, received_date, entry_date)')
-                .in('product_id', productIds)
-                .order('created_at', { ascending: false });
+            // 🔥 FIX: paginated for the same reason as fetchLast3MonthSales()
+            // above -- small today (22 rows total), but the same silent-
+            // truncation trap as the store's purchase history grows.
+            const data = await fetchAllPages((from, to) =>
+                supabaseClient
+                    .from('goods_receipt_lines')
+                    .select('product_id, purchase_rate, created_at, goods_receipt_notes(currency, exchange_rate, received_date, entry_date)')
+                    .in('product_id', productIds)
+                    .order('created_at', { ascending: false })
+                    .range(from, to)
+            );
 
-            if (error) throw error;
-
-            (data || []).forEach(line => {
+            data.forEach(line => {
                 if (lastPurchaseMap[line.product_id]) return; // already have a more recent row
                 const grn = line.goods_receipt_notes || {};
                 lastPurchaseMap[line.product_id] = {
@@ -813,11 +862,34 @@
             return;
         }
 
-        let rowsHtml = state.reorderItems.length > 0
-            ? state.reorderItems.map((item) => renderReorderRow(item, false)).join('')
-            : `<tr><td colspan="7" style="text-align: center; padding: 20px; color: #22c55e;">
+        // 🔥 CHANGED: due items are now grouped by generic before
+        // rendering. A generic with more than one brand due (item.is_grouped)
+        // collapses into ONE clickable header row -- expand it to see
+        // exactly which brands make up the combined total and how much
+        // stock each one holds. A single-brand generic, or a product with
+        // no generic at all, still renders as one plain row exactly as
+        // before -- there's nothing to collapse.
+        const byGeneric = {};
+        const standaloneItems = [];
+        state.reorderItems.forEach(item => {
+            if (item.is_grouped && item.generic_name_id) {
+                if (!byGeneric[item.generic_name_id]) byGeneric[item.generic_name_id] = [];
+                byGeneric[item.generic_name_id].push(item);
+            } else {
+                standaloneItems.push(item);
+            }
+        });
+
+        let rowsHtml = Object.keys(byGeneric)
+            .map(genericId => renderGenericGroupRow(genericId, byGeneric[genericId]))
+            .join('');
+        rowsHtml += standaloneItems.map((item) => renderReorderRow(item, false)).join('');
+
+        if (rowsHtml === '') {
+            rowsHtml = `<tr><td colspan="7" style="text-align: center; padding: 20px; color: #22c55e;">
                    No items below reorder level right now
                </td></tr>`;
+        }
 
         // 🔥 ADDED: "same generic name" suggestions -- rendered as a
         // visually distinct group below the items actually due, so it
@@ -836,53 +908,121 @@
         if (selectAll) selectAll.checked = false;
     }
 
-    // 🔥 ADDED: shared row renderer for both the "due" list and the
+    // 🔥 CHANGED (dynamic-threshold pivot): one collapsed, clickable row
+    // per generic that has more than one brand due -- combined stock, a
+    // suggested total reorder figure, and every contributing brand
+    // available underneath (collapsed by default) via the chevron. The
+    // "Min Level" column is no longer a manual number to maintain: when
+    // there's 3-month sales history it shows that computed demand
+    // figure (read-only -- it's not something staff type in, it's
+    // whatever the generic actually sold), and only falls back to the
+    // old editable Minimum Order Qty input for the no-sales-history case,
+    // where there's nothing dynamic to show yet.
+    function renderGenericGroupRow(genericId, brands) {
+        const first = brands[0];
+        const groupId = `reorder-generic-${genericId}`;
+        const hasSales = first.three_month_sales !== undefined;
+        // Every generic reaching this row already has sales history --
+        // that's now the only way onto the report at all (see
+        // generateReorderReport()'s due-decision) -- so this is always the
+        // sales label, no fallback branch left to handle.
+        const salesLabel = `3-mo sales (all brands): ${first.three_month_sales}`;
+        const allSameSupplier = brands.every(b => b.supplier_id === first.supplier_id);
+        const supplierLabel = allSameSupplier ? (first.supplier_name || '-') : 'Multiple suppliers';
+
+        const headerRow = `
+            <tr class="reorder-generic-header" style="background:#eff6ff; cursor:pointer;" onclick="toggleReorderGenericGroup('${groupId}')">
+                <td></td>
+                <td colspan="2">
+                    <i class="fa-solid fa-chevron-right reorder-generic-chevron" id="chevron-${groupId}" style="margin-right:8px; transition: transform 0.15s; display:inline-block;"></i>
+                    <strong>${first.generic_name || 'Unnamed generic'}</strong>
+                    <span style="margin-left:6px; background:#dbeafe; color:#1d4ed8; padding:1px 7px; border-radius:8px; font-size:0.65rem; font-weight:600;">${brands.length} brands</span>
+                </td>
+                <td style="color:#dc2626; font-weight:600;">${first.group_stock}</td>
+                <td>
+                    <span style="font-weight:600;">${first.three_month_sales}</span>
+                    <br><span style="font-size:0.62rem; color:#64748b;">3-mo demand</span>
+                </td>
+                <td>${supplierLabel}</td>
+                <td>
+                    <span style="font-weight:600;">Suggested total: ${first.reorder_qty || 1}</span>
+                    <br><span style="font-size:0.68rem; color:#64748b;">${salesLabel}</span>
+                </td>
+            </tr>
+        `;
+
+        const childRows = brands.map(item => renderReorderRow(item, false, groupId)).join('');
+        return headerRow + childRows;
+    }
+
+    // 🔥 ADDED: expand/collapse the brands nested under a generic header
+    // row -- exposed on window since it's wired up via onclick in the
+    // generated HTML above, which runs in global scope, not this file's
+    // module closure.
+    function toggleReorderGenericGroup(groupId) {
+        const isHidden = document.querySelector(`tr.reorder-generic-child[data-group="${groupId}"]`)?.style.display === 'none';
+        document.querySelectorAll(`tr.reorder-generic-child[data-group="${groupId}"]`).forEach(row => {
+            row.style.display = isHidden ? 'table-row' : 'none';
+        });
+        const chevron = document.getElementById(`chevron-${groupId}`);
+        if (chevron) chevron.style.transform = isHidden ? 'rotate(90deg)' : 'rotate(0deg)';
+    }
+
+    // 🔥 ADDED: shared row renderer for the "due" list (grouped or
+    // standalone), its nested brand rows under a generic header, and the
     // "same generic name" suggestions below it -- isSuggested only
-    // changes the visual treatment (badge + muted stock color), not the
-    // underlying behavior; both kinds of row use the same checkbox/qty
-    // mechanism so they flow through updateReorderSelection() identically.
-    function renderReorderRow(item, isSuggested) {
+    // changes the visual treatment (badge + muted stock color); groupId,
+    // when passed, marks this row as a child of a collapsed generic
+    // header (hidden by default, indented, and the now-redundant
+    // "combined with other brands" badge/subline are skipped since the
+    // header row above already shows that). All variants use the same
+    // checkbox/qty mechanism so they flow through updateReorderSelection()
+    // identically.
+    function renderReorderRow(item, isSuggested, groupId) {
         const lastPurchaseHtml = item.last_purchase
             ? `<br><span style="font-size: 0.68rem; color: #059669;">Last: ${item.last_purchase.currency === 'ZMW' ? 'ZK' : '$'}${Number(item.last_purchase.rate).toFixed(2)} &middot; ${formatDate(item.last_purchase.date)}</span>`
             : '';
-        // 🔥 CHANGED: "Suggested" (not-yet-due sibling) badge is gone --
-        // superseded by generic-level grouping, see generateReorderReport().
-        // In its place: a flag on rows that ARE due as part of a group,
-        // so it's clear the numbers below are combined across brands, not
-        // this one brand's own stock.
-        const groupedBadge = item.is_grouped
+        // Badge/subline only make sense on a row rendered OUTSIDE a
+        // generic group header (there's currently no such case left where
+        // is_grouped is true but groupId is absent, but keeping this
+        // guard is what makes that safe if it ever comes up again).
+        const groupedBadge = (item.is_grouped && !groupId)
             ? `<span style="margin-left: 6px; background: #dbeafe; color: #1d4ed8; padding: 1px 7px; border-radius: 8px; font-size: 0.65rem; font-weight: 600;" title="Reorder decision uses the combined stock of every brand sharing this generic name">Combined w/ other brands</span>`
             : '';
         const stockStyle = 'color: #dc2626; font-weight: 600;';
-        // Own brand stock stays the headline number (this is "the brand,
-        // just for viewing"); the combined generic-level total that
-        // actually drove the reorder decision shows underneath it when
-        // this product is part of a group.
-        const groupStockHtml = item.is_grouped
-            ? `<br><span style="font-size: 0.65rem; color: #64748b;">Generic total: ${item.group_stock} / min ${item.group_min}</span>`
+        const groupStockHtml = (item.is_grouped && !groupId)
+            ? `<br><span style="font-size: 0.65rem; color: #64748b;">Generic total: ${item.group_stock} / 3-mo demand ${item.three_month_sales}</span>`
             : '';
 
+        // 🔥 CHANGED (Minimum Order Qty removed entirely): every item on
+        // this report now has 3-month sales history by definition -- that's
+        // the only way onto it (see generateReorderReport()'s due-decision)
+        // -- so this column is always the dynamic demand figure, never a
+        // stored minimum.
+        const minQtyDisplay = `${item.three_month_sales} <span style="font-size:0.62rem; color:#64748b;">(3-mo demand)</span>`;
+
+        const childRowAttrs = groupId
+            ? `class="reorder-generic-child" data-group="${groupId}" style="display:none; background:#f8fafc;"`
+            : '';
+        const productCellPadding = groupId ? 'padding-left: 34px;' : '';
+
         return `
-            <tr>
+            <tr ${childRowAttrs}>
                 <td><input type="checkbox" class="reorder-checkbox" data-id="${item.id}" onchange="updateReorderSelection()"></td>
-                <td>
+                <td style="${productCellPadding}">
                     <strong>${item.product_name}</strong>${groupedBadge}
                     ${lastPurchaseHtml}
                 </td>
                 <td>${item.generic_name || '-'}</td>
                 <td style="${stockStyle}">${item.current_stock}${groupStockHtml}</td>
-                <td>${item.min_qty}</td>
+                <td>${minQtyDisplay}</td>
                 <td>${item.supplier_name || '-'}</td>
                 <td>
                     <input type="number" class="form-control reorder-qty-input"
                         data-id="${item.id}" value="${item.reorder_qty || 1}"
                         style="width: 80px; padding: 4px 8px;" min="1"
                         onchange="updateReorderSelection()">
-                    <br><span style="font-size: 0.68rem; color: #64748b;">${
-                        item.three_month_sales !== undefined
-                            ? `3-mo sales${item.is_grouped ? ' (all brands)' : ''}: ${item.three_month_sales}`
-                            : 'No sales history -- topped up to min'
-                    }</span>
+                    <br><span style="font-size: 0.68rem; color: #64748b;">3-mo sales${item.is_grouped ? ' (all brands)' : ''}: ${item.three_month_sales}</span>
                 </td>
             </tr>
         `;
@@ -2057,6 +2197,13 @@
     }
 
     async function updateExistingPO(poId, poData, totalQty) {
+        // 🔥 ADDED: capture the PO's status before this update overwrites
+        // it, so we can tell whether this save is the moment it BECOMES
+        // Approved (e.g. Pending Approval -> Approved) vs. just re-saving
+        // an already-approved PO or any other transition -- see
+        // notifySupplierIfApproved() below.
+        const previousStatus = (state.orders || []).find(o => o.id === poId)?.status || null;
+
         // Calculate remaining = total - received - cancelled
         const { data: existingLines } = await supabaseClient
             .from('purchase_order_lines')
@@ -2098,13 +2245,29 @@
         if (poData.lines.length > 0) {
             await insertPOLines(poId, poData.lines, poData.currency);
         }
+
+        // 🔥 ADDED: this is the actual "PO approved" moment for the normal
+        // workflow (Draft -> Pending Approval -> Approved) -- notify the
+        // supplier only when this save is what pushed the status into
+        // Approved.
+        notifySupplierIfApproved(poData, previousStatus);
     }
 
     // ============================================
-    // 🔥 ADDED: WHATSAPP SUPPLIER NOTIFICATION (New PO)
+    // 🔥 CHANGED: WHATSAPP SUPPLIER NOTIFICATION -- now fires on APPROVAL,
+    // not on PO creation.
     // ============================================
-    // Calls the already-deployed send-whatsapp-message Edge Function using
-    // whichever phone number is saved on the supplier's record.
+    // Previously this fired the moment ANY new PO was saved, even a Draft
+    // or one only "Submitted for Approval" -- so a supplier could be
+    // notified about an order that wasn't actually confirmed yet, and an
+    // existing PO that later got approved (the normal Draft -> Pending
+    // Approval -> Approved flow) never notified the supplier at all.
+    // Fixed: notifySupplier() below is called only at the moment a PO's
+    // status becomes 'Approved' -- whether that's a brand-new PO saved
+    // directly as Approved, or an existing PO transitioning into Approved
+    // from some other status. Calls the already-deployed
+    // send-whatsapp-message Edge Function using whichever phone number is
+    // saved on the supplier's record.
     //
     // IMPORTANT -- this does not actually send anything yet. WhatsApp
     // Cloud API requires (1) the pharmacy's WhatsApp Business phone number
@@ -2112,7 +2275,7 @@
     // being physically at the pharmacy to confirm it) and (2) the message
     // template below to be submitted to and APPROVED by Meta before it
     // can be used -- a business can't just send free-form WhatsApp
-    // messages. WHATSAPP_TEMPLATES.PO_CREATED below is a PLACEHOLDER
+    // messages. WHATSAPP_TEMPLATES.PO_APPROVED below is a PLACEHOLDER
     // name -- once a real template is approved in Meta, update this name
     // (and the order/count of parameters in notifySupplierWhatsApp's call
     // below, if the approved template's variables differ) to match
@@ -2120,7 +2283,7 @@
     // the console only, never blocking the PO save itself (fire-and-forget,
     // not awaited).
     const WHATSAPP_TEMPLATES = {
-        PO_CREATED: 'po_created_supplier_notice'
+        PO_APPROVED: 'po_approved_supplier_notice'
     };
 
     async function notifySupplierWhatsApp(phone, templateName, bodyParams) {
@@ -2147,6 +2310,27 @@
         } catch (err) {
             console.warn(`WhatsApp notification (${templateName}) failed:`, err);
         }
+    }
+
+    // 🔥 ADDED: shared gate used by both createNewPO() and
+    // updateExistingPO() -- only notify the supplier the moment a PO's
+    // status BECOMES 'Approved' (previousStatus is null/undefined for a
+    // brand-new PO, so saving one directly as Approved also counts).
+    // Fire-and-forget, never blocks the PO save.
+    function notifySupplierIfApproved(poData, previousStatus) {
+        if (poData.status !== 'Approved' || previousStatus === 'Approved') return;
+        const supplierRecord = (state.suppliers || []).find(s => s.id === poData.supplier_id);
+        if (!supplierRecord) return;
+        notifySupplierWhatsApp(
+            supplierRecord.phone,
+            WHATSAPP_TEMPLATES.PO_APPROVED,
+            [
+                supplierRecord.name || '',
+                poData.po_number || '',
+                `${poData.currency} ${Number(poData.total_amount || 0).toFixed(2)}`,
+                poData.expected_delivery_date || 'TBC'
+            ]
+        );
     }
 
     async function createNewPO(poData, totalQty) {
@@ -2178,26 +2362,10 @@
             await insertPOLines(data[0].id, poData.lines, poData.currency);
         }
 
-        // 🔥 ADDED: notify the supplier on WhatsApp that a new PO was
-        // raised -- see notifySupplierWhatsApp()'s comment above for why
-        // this won't actually send anything until WhatsApp is fully set
-        // up. Fire-and-forget (not awaited) -- never delays or blocks the
-        // PO save itself. Only on a genuinely NEW PO, not on every edit of
-        // an existing one (see updateExistingPO()) -- a supplier shouldn't
-        // get repeat notifications for the same order being adjusted.
-        const supplierRecord = (state.suppliers || []).find(s => s.id === poData.supplier_id);
-        if (supplierRecord) {
-            notifySupplierWhatsApp(
-                supplierRecord.phone,
-                WHATSAPP_TEMPLATES.PO_CREATED,
-                [
-                    supplierRecord.name || '',
-                    poData.po_number || '',
-                    `${poData.currency} ${Number(poData.total_amount || 0).toFixed(2)}`,
-                    poData.expected_delivery_date || 'TBC'
-                ]
-            );
-        }
+        // 🔥 CHANGED: only notify if this brand-new PO was saved directly
+        // as Approved (skipping Draft/Pending Approval) -- see
+        // notifySupplierIfApproved()'s comment above.
+        notifySupplierIfApproved(poData, null);
     }
 
     async function insertPOLines(poId, lines, currency) {
@@ -4741,6 +4909,7 @@
     window.toggleAllReorderItems = toggleAllReorderItems;
     window.updateReorderSelection = updateReorderSelection;
     window.addSelectedToPO = addSelectedToPO;
+    window.toggleReorderGenericGroup = toggleReorderGenericGroup;
     window.openCancelPO = openCancelPO;
     window.openCancelPOFromModal = openCancelPOFromModal;
     window.confirmCancelPO = confirmCancelPO;

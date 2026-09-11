@@ -642,10 +642,19 @@
         // ============================================
     
         function calculateNhimaReceivables() {
-            const nhimaSales = state.sales.filter(sale => 
-                sale.client_sub_type === 'NHIMA' && 
+            // 🔥 FIX: a QUOTATION was never excluded here -- a quotation is
+            // not a sale at all (nothing has been billed or delivered yet),
+            // so it can never be a real receivable, but nothing filtered
+            // it out and a NHIMA quotation with a claim number would count
+            // as an outstanding claim like any real invoice. `is_quotation`
+            // is the authoritative flag (set at save time in Retail POS),
+            // so exclude it explicitly rather than relying on `status`
+            // alone.
+            const nhimaSales = state.sales.filter(sale =>
+                sale.client_sub_type === 'NHIMA' &&
                 sale.claim_number && sale.claim_number.trim() !== '' &&
-                sale.status !== 'Paid' && sale.status !== 'Rejected'
+                sale.status !== 'Paid' && sale.status !== 'Rejected' &&
+                !sale.is_quotation
             );
     
             // 🔥 FIX: this used to match payments to sales by comparing
@@ -726,10 +735,22 @@
             // instead of Cash/Bank at the time of sale (see retail's
             // saveTransaction() accounting block), so it's the only case
             // where a LATER "Receive Payment" here is correct at all.
+            // 🔥 FIX: THIRD bug found alongside the two above -- a
+            // QUOTATION was never excluded either. A quotation can be
+            // saved with the payment-type dropdown left on "Credit" and a
+            // status other than Paid/Rejected (it's simply "QUOTATION"),
+            // so it passed straight through this filter as if it were a
+            // real unpaid Credit sale -- a customer's name showing up here
+            // that hasn't actually bought anything yet is exactly this:
+            // a draft quotation, not a receivable. `is_quotation` is the
+            // authoritative flag (set at save time in Retail POS) so this
+            // excludes it explicitly rather than relying on `status` text
+            // matching alone.
             const retailSales = state.sales.filter(sale =>
                 retailSubTypes.includes(sale.client_sub_type) &&
                 sale.payment?.type === 'Credit' &&
-                sale.status !== 'Paid' && sale.status !== 'Rejected'
+                sale.status !== 'Paid' && sale.status !== 'Rejected' &&
+                !sale.is_quotation
             );
     
             const customerMap = {};
@@ -774,7 +795,29 @@
                 customerMap[key].sales.push(sale);
                 customerMap[key].totalSales += sale.grand_total || 0;
             });
-    
+
+            // 🔥 FIX: a customer who has an opening balance but has never
+            // actually made a sale was completely invisible here --
+            // customerMap above is only ever populated by walking
+            // retailSales, so onboarding someone with just an opening
+            // balance (no sales entry) never surfaced any receivable at
+            // all, no matter how large. Add any such customer explicitly
+            // now, as long as they're not already present via a sale.
+            state.customers
+                .filter(c => c._source === 'customers' && (c.opening_balance_zmw || 0) > 0)
+                .forEach(customer => {
+                    const alreadyPresent = Object.values(customerMap).some(entry => entry.customer._customerId === customer._customerId);
+                    if (alreadyPresent) return;
+                    customerMap[`ob_retail_${customer._customerId}`] = {
+                        customer,
+                        sales: [],
+                        totalSales: 0,
+                        totalReceived: 0,
+                        opening_balance_zmw: customer.opening_balance_zmw || 0,
+                        receipts: []
+                    };
+                });
+
             Object.values(customerMap).forEach(entry => {
                 const receipts = state.receipts.filter(r => r.customer_id === entry.customer._customerId);
                 receipts.forEach(r => entry.totalReceived += r.amount || 0);
@@ -782,10 +825,10 @@
                 entry.receivable = entry.opening_balance_zmw + entry.totalSales - entry.totalReceived;
                 entry.hasReceivable = entry.receivable > 0.01;
             });
-    
+
             return Object.values(customerMap).filter(c => c.hasReceivable);
         }
-    
+
         function calculateWholesaleReceivables() {
             // 🔥 FIX: same bug as calculateRetailReceivables() above --
             // wholesale uses the identical payment.type convention
@@ -793,10 +836,17 @@
             // wholesale sale was being counted as fully outstanding here
             // too, even though it was already paid and posted at time of
             // sale. Only 'Credit' sales are real receivables.
+            //
+            // 🔥 FIX: same QUOTATION bug as Retail/NHIMA above -- a
+            // wholesale QUOTATION left on payment-type "Credit" (nothing
+            // has actually been billed yet) was showing up in this list
+            // as if it were a real outstanding invoice. Excluded via
+            // `is_quotation`, the authoritative flag set at save time.
             const wholesaleSales = state.sales.filter(sale =>
                 sale.client_type === 'WHOLESALE' &&
                 sale.payment?.type === 'Credit' &&
-                sale.status !== 'Paid' && sale.status !== 'Rejected'
+                sale.status !== 'Paid' && sale.status !== 'Rejected' &&
+                !sale.is_quotation
             );
     
             const customerMap = {};
@@ -826,7 +876,27 @@
                 customerMap[key].sales.push(sale);
                 customerMap[key].totalSales += sale.grand_total || 0;
             });
-    
+
+            // 🔥 FIX: same gap as calculateRetailReceivables() above -- a
+            // wholesale customer onboarded with just an opening balance
+            // and no sales yet (e.g. NIPPON HEALTH & BEAUTY CLINIC) never
+            // appeared here at all, since customerMap is only ever built
+            // by walking wholesaleSales. Add any such customer explicitly.
+            state.customers
+                .filter(c => c._source === 'wholesale' && (c.opening_balance_zmw || 0) > 0)
+                .forEach(customer => {
+                    const alreadyPresent = Object.values(customerMap).some(entry => entry.customer._customerId === customer._customerId);
+                    if (alreadyPresent) return;
+                    customerMap[`ob_wholesale_${customer._customerId}`] = {
+                        customer,
+                        sales: [],
+                        totalSales: 0,
+                        totalReceived: 0,
+                        opening_balance_zmw: customer.opening_balance_zmw || 0,
+                        receipts: []
+                    };
+                });
+
             Object.values(customerMap).forEach(entry => {
                 const receipts = state.receipts.filter(r => r.wholesale_customer_id === entry.customer._customerId);
                 receipts.forEach(r => entry.totalReceived += r.amount || 0);
@@ -834,7 +904,7 @@
                 entry.receivable = entry.opening_balance_zmw + entry.totalSales - entry.totalReceived;
                 entry.hasReceivable = entry.receivable > 0.01;
             });
-    
+
             return Object.values(customerMap).filter(c => c.hasReceivable);
         }
     
@@ -1047,7 +1117,84 @@
             renderWholesaleTable();
             renderStats();
         }
-    
+
+        // ============================================
+        // 🔥 ADDED: COLLAPSIBLE RECEIVABLE SECTIONS
+        // ============================================
+        // NHIMA routinely carries hundreds of claims (689 in the observed
+        // data) while Retail and Wholesale usually only have a handful --
+        // with all three sections always fully expanded, NHIMA's long
+        // table pushed Retail and Wholesale far down the page, forcing a
+        // lot of scrolling just to reach them. All three now start
+        // COLLAPSED (just the header, with its own live count/total, is
+        // shown) and expand on a click of that header; each section is
+        // independent and stays short regardless of how large NHIMA's
+        // list grows.
+        //
+        // Implemented purely in JS (no HTML/CSS changes) by moving every
+        // element that currently follows a card's header -- the table,
+        // and for NHIMA the summary bar too -- into one wrapper div
+        // inserted right after the header, so a single display:none/''
+        // on that wrapper collapses/expands the whole section without
+        // fighting the render functions' OWN display toggling of
+        // individual pieces inside it (e.g. #nhimaSummary is separately
+        // shown/hidden by renderNhimaTable() depending on whether there's
+        // an outstanding balance -- that keeps working unchanged, just
+        // nested one level deeper now).
+        function makeReceivableSectionCollapsible(tableBodyId) {
+            const tbody = document.getElementById(tableBodyId);
+            if (!tbody) return;
+            const card = tbody.closest('.receivable-list-card');
+            const header = card ? card.querySelector('.card-header') : null;
+            if (!card || !header) return;
+
+            // Guards against wiring the same header twice if this ever
+            // runs more than once against the same DOM -- a fresh page
+            // visit re-fetches this module's HTML from scratch, so in
+            // practice this always starts fresh (collapsed) on every
+            // visit, same as the rest of this page's state.
+            if (header.dataset.collapsibleWired === 'true') return;
+            header.dataset.collapsibleWired = 'true';
+
+            const wrapper = document.createElement('div');
+            wrapper.className = 'receivable-collapsible-body';
+            let sibling = header.nextElementSibling;
+            while (sibling) {
+                const next = sibling.nextElementSibling;
+                wrapper.appendChild(sibling);
+                sibling = next;
+            }
+            card.appendChild(wrapper);
+
+            const chevron = document.createElement('i');
+            chevron.className = 'fa-solid fa-chevron-down';
+            chevron.style.cssText = 'margin-left:10px; font-size:0.75rem; color:#94a3b8; transition: transform 0.15s ease;';
+            header.appendChild(chevron);
+            header.style.cursor = 'pointer';
+
+            let collapsed = true;
+            function apply() {
+                wrapper.style.display = collapsed ? 'none' : '';
+                chevron.style.transform = collapsed ? 'rotate(-90deg)' : 'rotate(0deg)';
+            }
+            apply();
+
+            header.addEventListener('click', (e) => {
+                // The NHIMA header also holds a "Download CSV" button
+                // (injected by renderNhimaTable()) -- clicking that
+                // should download the file, not toggle the section.
+                if (e.target.closest('button')) return;
+                collapsed = !collapsed;
+                apply();
+            });
+        }
+
+        function setupCollapsibleReceivableSections() {
+            makeReceivableSectionCollapsible('nhimaReceivableTableBody');
+            makeReceivableSectionCollapsible('retailReceivableTableBody');
+            makeReceivableSectionCollapsible('wholesaleReceivableTableBody');
+        }
+
         // ============================================
         // NHIMA SELECTION FUNCTIONS
         // ============================================
@@ -1164,10 +1311,32 @@
             const settlementDate = document.getElementById('nhimaSettlementDate')?.value || new Date().toISOString().split('T')[0];
     
             if (!confirm(`Process ${checked.length} NHIMA claims for settlement? This will create receipts and GL entries.`)) return;
-    
+
+            // 🔥 ADDED: same double-submit guard as saveRetailReceipt() /
+            // saveWholesaleReceipt() -- a second click on "Process
+            // Selected" right after dismissing the confirm() dialog above
+            // (while the first run's loop is still awaiting its writes)
+            // could kick off a second, overlapping settlement run over
+            // the same selected claims, double-posting each one. Locking
+            // the button the moment processing genuinely starts closes
+            // that window, same fix already applied to the Expense
+            // module's saveExpense().
+            const processNhimaBulkBtn = document.getElementById('processNhimaBulkBtn');
+            if (processNhimaBulkBtn) {
+                if (processNhimaBulkBtn.disabled) {
+                    // Already processing -- ignore this extra click/press entirely.
+                    return;
+                }
+                processNhimaBulkBtn.disabled = true;
+                processNhimaBulkBtn.dataset.originalHtml = processNhimaBulkBtn.innerHTML;
+                processNhimaBulkBtn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Processing...';
+            }
+
+            try {
+
             let successCount = 0, failCount = 0;
             let errors = [];
-    
+
             for (const cb of checked) {
                 try {
                     const claimId = cb.dataset.claimId;
@@ -1335,10 +1504,23 @@
             
             const modal = document.getElementById('nhimaBulkModal');
             if (modal) modal.classList.remove('show');
-            
+
             await refreshReceivableList();
+
+            } finally {
+                // 🔥 ADDED: guaranteed to run whether processing succeeded,
+                // partially failed, or threw -- the button is never left
+                // stuck disabled or stuck showing "Processing...".
+                if (processNhimaBulkBtn) {
+                    processNhimaBulkBtn.disabled = false;
+                    if (processNhimaBulkBtn.dataset.originalHtml) {
+                        processNhimaBulkBtn.innerHTML = processNhimaBulkBtn.dataset.originalHtml;
+                        delete processNhimaBulkBtn.dataset.originalHtml;
+                    }
+                }
+            }
         };
-    
+
         // ============================================
         // OPEN NHIMA BULK MODAL
         // ============================================
@@ -1509,6 +1691,59 @@
         // SIMPLIFIED RECEIPT FUNCTIONS - RETAIL
         // ============================================
     
+        // ============================================
+        // 🔥 ADDED: WHATSAPP CUSTOMER NOTIFICATION (Receipt confirmation)
+        // ============================================
+        // Sends the customer a WhatsApp confirmation the moment their
+        // payment is recorded here (Retail or Wholesale receivables),
+        // mirroring the same pattern used for the supplier PO-approval
+        // notice in the Purchase module. Calls the already-deployed
+        // send-whatsapp-message Edge Function using whichever phone
+        // number is saved on the customer's record.
+        //
+        // IMPORTANT -- this does not actually send anything yet, for the
+        // same reason as the Purchase module's version: WhatsApp Cloud
+        // API requires (1) the pharmacy's WhatsApp Business phone number
+        // to be verified in Meta Business Manager and (2) the message
+        // template below to be submitted to and APPROVED by Meta before
+        // it can be used -- a business can't just send free-form
+        // WhatsApp messages. WHATSAPP_TEMPLATES.RECEIPT_CONFIRMED is a
+        // PLACEHOLDER name -- once a real template is approved in Meta,
+        // update this name (and the order/count of parameters below, if
+        // the approved template's variables differ) to match exactly.
+        // Until then, every call here fails harmlessly -- logged to the
+        // console only, never blocking the receipt save itself
+        // (fire-and-forget, not awaited).
+        const WHATSAPP_TEMPLATES = {
+            RECEIPT_CONFIRMED: 'receipt_confirmed_customer_notice'
+        };
+
+        async function notifyCustomerWhatsApp(phone, templateName, bodyParams) {
+            if (!phone) {
+                console.log('WhatsApp: this customer has no phone number on file -- skipping notification.');
+                return;
+            }
+            try {
+                const { data, error } = await supabaseClient.functions.invoke('send-whatsapp-message', {
+                    body: {
+                        to: phone,
+                        template_name: templateName,
+                        components: [{
+                            type: 'body',
+                            parameters: bodyParams.map(p => ({ type: 'text', text: String(p) }))
+                        }]
+                    }
+                });
+                if (error) {
+                    console.warn(`WhatsApp notification (${templateName}) did not send -- expected until the WhatsApp number is verified and this template is approved in Meta:`, error);
+                    return;
+                }
+                console.log(`✅ WhatsApp notification sent (${templateName}):`, data);
+            } catch (err) {
+                console.warn(`WhatsApp notification (${templateName}) failed:`, err);
+            }
+        }
+
         window.openRetailReceipt = function(customerId) {
             const modal = document.getElementById('retailReceiptModal');
             if (!modal) return;
@@ -1607,13 +1842,38 @@
                 safeToast(`Amount exceeds receivable (ZK${formatNumber(customerData.receivable)})`, 'error');
                 return;
             }
-    
+
+            // 🔥 ADDED: this had no double-submit guard at all -- a double
+            // click/press on "Record Receipt" fired saveRetailReceipt()
+            // twice before the first call's customer_receipts insert even
+            // came back, each generating its OWN random receipt number and
+            // posting its OWN full GL entry, so one click could silently
+            // record (and post) the same payment twice -- exactly what
+            // happened for NIPPON HEALTH & BEAUTY CLINIC's payment on the
+            // Wholesale side today (RCT-2026-4821 / RCT-2026-9086, same
+            // ZK30,233.54, four seconds apart -- the duplicate has been
+            // reversed). Locking the button the moment a save genuinely
+            // starts closes that window, same fix already applied to the
+            // Expense module's saveExpense(). Also swaps the button's
+            // label to a spinner + "Saving..." so there's an obvious,
+            // impossible-to-miss signal the save is in progress.
+            const saveRetailReceiptBtn = document.getElementById('saveRetailReceiptBtn');
+            if (saveRetailReceiptBtn) {
+                if (saveRetailReceiptBtn.disabled) {
+                    // Already saving -- ignore this extra click/press entirely.
+                    return;
+                }
+                saveRetailReceiptBtn.disabled = true;
+                saveRetailReceiptBtn.dataset.originalHtml = saveRetailReceiptBtn.innerHTML;
+                saveRetailReceiptBtn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Saving...';
+            }
+
             try {
                 const receiptNumber = `RCT-${new Date().getFullYear()}-${String(Math.floor(Math.random() * 10000)).padStart(4, '0')}`;
                 const cust = customerData.customer;
-                
+
                 let validCustomerId = cust._customerId;
-                
+
                 if (!validCustomerId && cust._phone) {
                     const { data: foundCustomer, error: findError } = await supabaseClient
                         .from('customers')
@@ -1622,7 +1882,7 @@
                         .maybeSingle();
                     if (!findError && foundCustomer) validCustomerId = foundCustomer.id;
                 }
-                
+
                 if (!validCustomerId && cust._displayName) {
                     const { data: foundCustomer, error: findError } = await supabaseClient
                         .from('customers')
@@ -1748,7 +2008,23 @@
                 });
     
                 state.currentReceiptData = { customer: cust, amount, receiptNumber, paymentMethod: method, reference, notes };
-    
+
+                // 🔥 ADDED: notify the customer on WhatsApp that their
+                // payment was received -- see notifyCustomerWhatsApp()'s
+                // comment above for why this won't actually send anything
+                // until WhatsApp is fully set up. Fire-and-forget, never
+                // blocks the receipt save itself.
+                notifyCustomerWhatsApp(
+                    cust._phone,
+                    WHATSAPP_TEMPLATES.RECEIPT_CONFIRMED,
+                    [
+                        cust._displayName || 'Customer',
+                        receiptNumber,
+                        `ZK${formatNumber(amount)}`,
+                        `ZK${formatNumber(Math.max(0, customerData.receivable - amount))}`
+                    ]
+                );
+
                 safeToast(`Receipt recorded! ZK${formatNumber(amount)} received`, 'success');
                 document.getElementById('retailReceiptModal').classList.remove('show');
     
@@ -1757,17 +2033,28 @@
                 }, 500);
     
                 await refreshReceivableList();
-    
+
             } catch (error) {
                 console.error('Error saving receipt:', error);
                 safeToast('Error saving receipt: ' + error.message, 'error');
+            } finally {
+                // 🔥 ADDED: guaranteed to run whether the save succeeded or
+                // failed -- the button is never left stuck disabled or
+                // stuck showing "Saving...".
+                if (saveRetailReceiptBtn) {
+                    saveRetailReceiptBtn.disabled = false;
+                    if (saveRetailReceiptBtn.dataset.originalHtml) {
+                        saveRetailReceiptBtn.innerHTML = saveRetailReceiptBtn.dataset.originalHtml;
+                        delete saveRetailReceiptBtn.dataset.originalHtml;
+                    }
+                }
             }
         };
-    
+
         // ============================================
         // SAVE WHOLESALE RECEIPT
         // ============================================
-    
+
         window.saveWholesaleReceipt = async function() {
             const customerId = document.getElementById('wholesaleReceiptCustomerId').value || state.currentWholesaleCustomerId;
             const receiptDate = document.getElementById('wholesaleReceiptDate').value;
@@ -1794,13 +2081,29 @@
                 safeToast(`Amount exceeds receivable (ZK${formatNumber(customerData.receivable)})`, 'error');
                 return;
             }
-    
+
+            // 🔥 ADDED: same double-submit guard as saveRetailReceipt()
+            // above -- see its comment for the exact duplicate this
+            // closes (this is literally the function that produced it,
+            // for NIPPON HEALTH & BEAUTY CLINIC's ZK30,233.54 payment
+            // today, since reversed).
+            const saveWholesaleReceiptBtn = document.getElementById('saveWholesaleReceiptBtn');
+            if (saveWholesaleReceiptBtn) {
+                if (saveWholesaleReceiptBtn.disabled) {
+                    // Already saving -- ignore this extra click/press entirely.
+                    return;
+                }
+                saveWholesaleReceiptBtn.disabled = true;
+                saveWholesaleReceiptBtn.dataset.originalHtml = saveWholesaleReceiptBtn.innerHTML;
+                saveWholesaleReceiptBtn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Saving...';
+            }
+
             try {
                 const receiptNumber = `RCT-${new Date().getFullYear()}-${String(Math.floor(Math.random() * 10000)).padStart(4, '0')}`;
                 const cust = customerData.customer;
-                
+
                 let validCustomerId = cust._customerId;
-                
+
                 if (!validCustomerId && cust._phone) {
                     const { data: foundCustomer, error: findError } = await supabaseClient
                         .from('wholesale_customers')
@@ -1809,7 +2112,7 @@
                         .maybeSingle();
                     if (!findError && foundCustomer) validCustomerId = foundCustomer.id;
                 }
-                
+
                 if (!validCustomerId && cust._displayName) {
                     const { data: foundCustomer, error: findError } = await supabaseClient
                         .from('wholesale_customers')
@@ -1935,7 +2238,23 @@
                 });
     
                 state.currentReceiptData = { customer: cust, amount, receiptNumber, paymentMethod: method, reference, notes };
-    
+
+                // 🔥 ADDED: notify the customer on WhatsApp that their
+                // payment was received -- see notifyCustomerWhatsApp()'s
+                // comment above for why this won't actually send anything
+                // until WhatsApp is fully set up. Fire-and-forget, never
+                // blocks the receipt save itself.
+                notifyCustomerWhatsApp(
+                    cust._phone,
+                    WHATSAPP_TEMPLATES.RECEIPT_CONFIRMED,
+                    [
+                        cust._displayName || 'Customer',
+                        receiptNumber,
+                        `ZK${formatNumber(amount)}`,
+                        `ZK${formatNumber(Math.max(0, customerData.receivable - amount))}`
+                    ]
+                );
+
                 safeToast(`Receipt recorded! ZK${formatNumber(amount)} received`, 'success');
                 document.getElementById('wholesaleReceiptModal').classList.remove('show');
     
@@ -1944,13 +2263,24 @@
                 }, 500);
     
                 await refreshReceivableList();
-    
+
             } catch (error) {
                 console.error('Error saving receipt:', error);
                 safeToast('Error saving receipt: ' + error.message, 'error');
+            } finally {
+                // 🔥 ADDED: guaranteed to run whether the save succeeded or
+                // failed -- the button is never left stuck disabled or
+                // stuck showing "Saving...".
+                if (saveWholesaleReceiptBtn) {
+                    saveWholesaleReceiptBtn.disabled = false;
+                    if (saveWholesaleReceiptBtn.dataset.originalHtml) {
+                        saveWholesaleReceiptBtn.innerHTML = saveWholesaleReceiptBtn.dataset.originalHtml;
+                        delete saveWholesaleReceiptBtn.dataset.originalHtml;
+                    }
+                }
             }
         };
-    
+
         // ============================================
         // GL ACCOUNTING ENTRY FOR RECEIPT
         // ============================================
@@ -2379,7 +2709,8 @@
         await loadSales();
         await loadCustomerReceiptInvoices();
         renderAllTables();
-    
+        setupCollapsibleReceivableSections();
+
         window._receivablesInitLock = false;
         console.log("✅ Receivables module initialized!");
     };

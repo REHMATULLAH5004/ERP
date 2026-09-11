@@ -144,7 +144,17 @@
                 <kbd>Ctrl+S</kbd> Save
                 <kbd style="margin-left: 8px;">Ctrl+Q</kbd> Quote
                 <kbd style="margin-left: 8px;">Ctrl+R</kbd> Reset
+                <kbd style="margin-left: 8px;">F3</kbd> New Row
             </span>
+            <!-- 🔥 ADDED: lets the cashier/pharmacist adjust stock without
+                 leaving POS. Same id as the button on the real Stock
+                 Management page (pages/inventory/stock-management) on
+                 purpose -- that page's own script (reused verbatim, see
+                 index.js) wires itself up to this exact id. -->
+            <button id="newStockTakeBtn" type="button" class="pos-history-btn" title="Adjust stock without leaving POS">
+                <i class="fa-solid fa-clipboard-check"></i>
+                <span>Stock Take</span>
+            </button>
             <button id="toggleHistoryBtn" type="button" class="pos-history-btn">
                 <i class="fa-solid fa-clock-rotate-left"></i>
                 <span>History</span>
@@ -492,5 +502,46 @@
                 </div>
             </div>
         </div>
+    </div>
+</div>
+
+<!-- ============================================ -->
+<!-- 🔥 ADDED: STOCK TAKE MODAL (reused from Inventory > Stock Management)
+     ============================================
+     This is the SAME modal markup (same ids) as
+     pages/inventory/stock-management/index.html's "New Stock Take" modal.
+     index.js fetches that page's own script and injects it here unchanged,
+     so all of the actual logic -- product/batch selection, variance calc,
+     the stock_counts / stock_count_batches / batches writes, and the
+     accounting journal entries -- is the exact same code path as the real
+     Stock Management page, not a reimplementation. Only the surrounding
+     "Stock Takes" list and CSV-upload modal are left out here since POS
+     just needs the ability to record one adjustment on the spot. -->
+<div id="stockTakeModal" style="display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(15, 23, 42, 0.6); backdrop-filter: blur(4px); z-index: 1000; justify-content: center; align-items: center;">
+    <div style="background: white; padding: 30px; border-radius: 12px; width: 90%; max-width: 1000px; max-height: 90vh; overflow-y: auto; box-shadow: 0 20px 50px rgba(0,0,0,0.5);">
+
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; border-bottom: 1px solid #e2e8f0; padding-bottom: 15px;">
+            <h3 id="stockTakeTitle" style="margin: 0;"><i class="fa-solid fa-clipboard-check" style="color: #2563eb;"></i> Stock Take</h3>
+            <button id="closeStockTakeBtn" type="button" style="background: none; border: none; font-size: 1.5rem; cursor: pointer; color: #64748b;">&times;</button>
+        </div>
+
+        <form id="stockTakeForm">
+            <div id="productsContainer">
+                <!-- Products injected dynamically by stock-management/index.js's addProductToTake() -->
+            </div>
+
+            <div style="margin-top: 20px; display: flex; gap: 10px;">
+                <button type="button" id="addProductToTake" style="background: #f1f5f9; border: 1px solid #e2e8f0; padding: 8px 20px; border-radius: 6px; cursor: pointer;">
+                    <i class="fa-solid fa-plus"></i> Add Product
+                </button>
+            </div>
+
+            <div style="margin-top: 20px; display: flex; gap: 10px; justify-content: flex-end; border-top: 1px solid #e2e8f0; padding-top: 20px;">
+                <button type="button" id="cancelStockTakeBtn" style="background: white; border: 1px solid #e2e8f0; padding: 10px 25px; border-radius: 6px; cursor: pointer;">Cancel</button>
+                <button type="submit" id="saveStockTakeBtn" style="background: #2563eb; color: white; border: none; padding: 10px 25px; border-radius: 6px; cursor: pointer;">
+                    <i class="fa-solid fa-floppy-disk"></i> Save Stock Take
+                </button>
+            </div>
+        </form>
     </div>
 </div>

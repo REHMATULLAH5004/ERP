@@ -46,12 +46,29 @@
             phone: '+260 97 000 0000',
             zamra_number: 'ZAMRA-123456',
             invoice_prefix: 'GRI',
-            quotation_prefix: 'QGR'
+            quotation_prefix: 'QGR',
+            // 🔥 ADDED: the dynamic pricing settings, replacing the old
+            // per-product retail_regular_percent / retail_online_percent /
+            // retail_staff_percent fields that had to be typed in by hand
+            // for every single product. Staff is a flat global rate;
+            // Regular and Online are the two ends of an exponential
+            // markup curve keyed to cost (see computeExponentialMarkupPercent()
+            // below) -- these numbers ARE the curve. NHIMA is unaffected --
+            // it keeps using each product's manually-entered nhima_price_fixed.
+            retail_staff_markup_percent: 10,
+            retail_regular_markup_max_percent: 60,
+            retail_regular_markup_min_percent: 30,
+            retail_online_markup_max_percent: 100,
+            retail_online_markup_min_percent: 40,
+            markup_cost_min: 1,
+            markup_cost_max: 600
         };
         try {
             const { data, error } = await supabaseClient
                 .from('company_settings')
-                .select('company_name, address, phone, zamra_number, invoice_prefix, quotation_prefix')
+                .select(`company_name, address, phone, zamra_number, invoice_prefix, quotation_prefix,
+                    retail_staff_markup_percent, retail_regular_markup_max_percent, retail_regular_markup_min_percent,
+                    retail_online_markup_max_percent, retail_online_markup_min_percent, markup_cost_min, markup_cost_max`)
                 .eq('id', 1)
                 .maybeSingle();
             if (error || !data) return fallback;
@@ -61,13 +78,36 @@
                 phone: data.phone || fallback.phone,
                 zamra_number: data.zamra_number || fallback.zamra_number,
                 invoice_prefix: data.invoice_prefix || fallback.invoice_prefix,
-                quotation_prefix: data.quotation_prefix || fallback.quotation_prefix
+                quotation_prefix: data.quotation_prefix || fallback.quotation_prefix,
+                retail_staff_markup_percent: data.retail_staff_markup_percent ?? fallback.retail_staff_markup_percent,
+                retail_regular_markup_max_percent: data.retail_regular_markup_max_percent ?? fallback.retail_regular_markup_max_percent,
+                retail_regular_markup_min_percent: data.retail_regular_markup_min_percent ?? fallback.retail_regular_markup_min_percent,
+                retail_online_markup_max_percent: data.retail_online_markup_max_percent ?? fallback.retail_online_markup_max_percent,
+                retail_online_markup_min_percent: data.retail_online_markup_min_percent ?? fallback.retail_online_markup_min_percent,
+                markup_cost_min: data.markup_cost_min ?? fallback.markup_cost_min,
+                markup_cost_max: data.markup_cost_max ?? fallback.markup_cost_max
             };
         } catch (e) {
             console.warn('Could not load company_settings, using defaults:', e);
             return fallback;
         }
     })();
+
+    // 🔥 ADDED: the exponential markup curve itself. Interpolates
+    // GEOMETRICALLY (constant multiplicative step per unit of cost, not a
+    // constant additive step) between maxPct at costMin and minPct at
+    // costMax -- this is what makes the reduction "exponential" rather
+    // than a straight line, and keeps it smooth/gradual rather than a
+    // drastic drop, exactly as asked. Cost below costMin is clamped to
+    // maxPct; cost at or above costMax is clamped to minPct. `cost` here
+    // is the PACK cost (cost per unit * pack size), matching the order
+    // described: cost per unit * pack size, THEN apply the %.
+    function computeExponentialMarkupPercent(cost, maxPct, minPct, costMin, costMax) {
+        if (!(costMax > costMin) || maxPct <= 0 || minPct <= 0) return maxPct;
+        const clampedCost = Math.min(Math.max(cost, costMin), costMax);
+        const t = (clampedCost - costMin) / (costMax - costMin);
+        return maxPct * Math.pow(minPct / maxPct, t);
+    }
 
     // 🔥 FIX: tracks the `sales.id` (database UUID) of the invoice currently
     // loaded for in-place editing via the search modal's "Edit" button. Save
@@ -152,8 +192,7 @@
     }
 
     // 🔥 ADDED: "+ Add Item" button in the redesigned Items card header --
-    // manually appends a blank row the same way the table already
-    // auto-appends one once you fill in the last row's quantity.
+    // manually appends a blank row, same as F3 or the "Add Row" button.
     const retailAddItemBtn = document.getElementById('retailAddItemBtn');
     if (retailAddItemBtn) {
         retailAddItemBtn.addEventListener('click', function () {
@@ -292,9 +331,21 @@
     }
 
     // 2. View Items Modal
+    // 🔥 FIX: this is ALWAYS opened via the "View" button inside the Search
+    // Invoices modal (viewSaleDetail() -> showViewItemsModal()), and
+    // clicking View never closes that Search modal underneath it -- both
+    // stay open at once, one on top of the other. With BOTH modals at the
+    // same z-index:1000, CSS stacking ties break by DOM order, and the
+    // Search modal (injected further down, around line ~392) sits later
+    // in the DOM than this one -- so the Search modal's own full-screen
+    // backdrop and click-outside-to-close handler ended up stacking ON
+    // TOP of this modal, "stealing" clicks meant for its Close/X buttons.
+    // That's exactly the "View window doesn't close properly" bug --
+    // bumping this above Search's 1000 (matching the Print modal's tier)
+    // makes it reliably win the stack whenever it's opened from Search.
     if (!document.getElementById('retailViewItemsModal')) {
         const viewItemsHTML = `
-        <div id="retailViewItemsModal" style="display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(15, 23, 42, 0.6); backdrop-filter: blur(4px); z-index: 1000; justify-content: center; align-items: center;">
+        <div id="retailViewItemsModal" style="display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(15, 23, 42, 0.6); backdrop-filter: blur(4px); z-index: 1001; justify-content: center; align-items: center;">
             <div class="modal-content-box" style="background: white; padding: 30px; border-radius: 12px; width: 90%; max-width: 900px; max-height: 90vh; overflow-y: auto; box-shadow: 0 20px 50px rgba(0,0,0,0.5);">
                 <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; border-bottom: 1px solid #e2e8f0; padding-bottom: 15px;">
                     <h3 id="retailViewModalTitle" style="margin: 0;"><i class="fa-solid fa-list" style="color: #2563eb;"></i> Invoice Items</h3>
@@ -1755,6 +1806,12 @@
                         paymentSelect.value = 'Credit';
                         paymentSelect.disabled = true;
                     }
+                    // 🔥 ADDED: NHIMA sales never go through a quotation --
+                    // stock is checked and reserved against the claim right
+                    // away, so a "Quotation" step doesn't make sense here
+                    // and was just confusing to have on-screen. Hidden only
+                    // for NHIMA; every other client type keeps it.
+                    if (quoteBtn) quoteBtn.style.display = 'none';
                 } else {
                     if (nhimaFields) nhimaFields.style.display = 'none';
                     if (regularFields) regularFields.style.display = 'block';
@@ -1762,6 +1819,7 @@
                         paymentSelect.value = 'Cash';
                         paymentSelect.disabled = false;
                     }
+                    if (quoteBtn) quoteBtn.style.display = '';
                 }
 
                 updateRowRates();
@@ -2523,12 +2581,22 @@
     posTableBody.addEventListener('input', function (e) {
         if (e.target.classList.contains('retail-pos-qty')) {
             const row = e.target.closest('tr');
-            const rows = posTableBody.querySelectorAll('tr');
             const qty = parseInt(e.target.value) || 0;
 
             const batchSelect = row.querySelector('.retail-pos-batch');
             const selectedBatch = batchSelect?.options[batchSelect.selectedIndex];
-            if (selectedBatch && selectedBatch.value) {
+            // 🔥 CHANGED: this used to clamp the typed qty back down to
+            // whatever's in stock for EVERY client type, the instant it was
+            // typed -- before the cashier even says whether this is going
+            // to be a completed sale or just a quotation. NHIMA never does
+            // quotations (see the "hide Quotation for NHIMA" change below),
+            // so blocking right at entry is still correct and unchanged
+            // there. Everyone else needs to be able to type a quantity
+            // bigger than what's in stock while drafting a quotation --
+            // getSaleData() is where that now actually gets enforced,
+            // conditionally, based on whether this save is a quotation or
+            // a real sale.
+            if (currentClientType === 'NHIMA' && selectedBatch && selectedBatch.value) {
                 const availableQty = parseInt(selectedBatch.dataset.qty) || 0;
                 if (qty > availableQty) {
                     showToast(`Only ${availableQty} units available in this batch`, 'warning');
@@ -2536,9 +2604,13 @@
                 }
             }
 
-            if (row === rows[rows.length - 1] && qty > 0) {
-                addPOSRow();
-            }
+            // 🔥 REMOVED: this used to auto-append a brand new empty row
+            // the moment a quantity was typed into the last row. That's
+            // gone now -- a new row is only added when the cashier
+            // presses F3 (see the KEYBOARD SHORTCUTS block near the
+            // bottom of this file). All the other qty-entry behavior
+            // (batch-qty clamping for NHIMA, row/grand totals) above and
+            // below is unchanged.
             updateRowTotal(row);
             updateTotals();
         }
@@ -2619,9 +2691,14 @@
                 // Non-critical, fired in parallel -- see stashDoseFormGuess().
                 stashDoseFormGuess(row, productId);
 
+                // 🔥 CHANGED: dropped retail_regular_percent / retail_online_percent /
+                // retail_staff_percent -- those manual per-product columns are gone.
+                // Regular/Online are now computed live from cost via the exponential
+                // curve, and Staff from the flat global rate, both in updateRowRate().
+                // NHIMA still uses the product's own manually-entered nhima_price_fixed.
                 const { data: product, error: prodError } = await supabaseClient
                     .from('products')
-                    .select('conversion_rate, tax_percent, nhima_price_fixed, retail_regular_percent, retail_online_percent, retail_staff_percent')
+                    .select('conversion_rate, tax_percent, nhima_price_fixed')
                     .eq('id', productId)
                     .maybeSingle();
 
@@ -2674,9 +2751,6 @@
                                 data-cost="${costPrice}"
                                 data-nhima="${product.nhima_price_fixed || 0}"
                                 data-pack="${product.conversion_rate || 1}"
-                                data-regular="${product.retail_regular_percent || 0}"
-                                data-online="${product.retail_online_percent || 0}"
-                                data-staff="${product.retail_staff_percent || 0}"
                                 data-tax="${product.tax_percent || 0}"
                                 data-expiry="${expiry}"
                                 data-qty="${b.total_qty}"
@@ -2732,20 +2806,18 @@
             updateRowTotal(row);
             updateTotals();
 
-            // 🔥 FIX: a new empty row used to only get auto-added when you
-            // TYPED into the Qty field of the last row (see the 'input'
-            // handler below) -- but every new row starts with Qty already
-            // defaulted to 1, so if the real quantity genuinely was 1 (very
-            // common), that field was never touched, no 'input' event ever
-            // fired, and no second row appeared. Selecting a batch is really
-            // the moment the item is "committed" regardless of quantity, so
-            // that's the right trigger for auto-adding the next row.
-            if (selectedBatch && selectedBatch.value) {
-                const rows = posTableBody.querySelectorAll('tr');
-                if (row === rows[rows.length - 1]) {
-                    addPOSRow();
-                }
-            }
+            // 🔥 REMOVED: this used to auto-add a new empty row the moment
+            // a batch was selected -- and since most products only have
+            // ONE batch, it's auto-picked (see the setTimeout above, which
+            // dispatches this same 'change' event purely so rate/tax/total
+            // still get filled in for that auto-pick), so in the common
+            // case a second row appeared the instant a product was chosen,
+            // before the cashier ever touched qty. That's exactly the bug
+            // that was reported: a row kept appearing on its own even with
+            // the qty-input trigger already removed elsewhere. Rows are
+            // only ever added by F3 (or the manual "Add Row" button) now --
+            // this handler still updates rate/total for the row as before,
+            // it just no longer adds a new one.
         }
     });
 
@@ -2774,6 +2846,20 @@
 
         const newRow = template.cloneNode(true);
         newRow.classList.remove('retail-pos-row');
+        // 🔥 FIX: THE actual cause of "the Dose/Frequency field fills in
+        // randomly" -- cloneNode(true) copies the template row's DATA
+        // ATTRIBUTES too, including data-dose-state (see the Dosage
+        // Instructions modal's openDoseModal()/doseApplyBtn handler
+        // above), which holds whatever structured dose was last built on
+        // the template row (qty/times/food/route/note). The visible text
+        // box was already being blanked below, so this looked empty --
+        // but reopening the Dose modal on this "new" row silently
+        // restored that leftover state from a completely different
+        // medicine, and applying it wrote its sentence into how_to_take.
+        // resetPOSTable() already deletes this same dataset key for
+        // exactly this reason; addPOSRow() -- the function that actually
+        // creates every row after the first -- never did.
+        delete newRow.dataset.doseState;
 
         const itemSelect = newRow.querySelector('.retail-pos-item');
         const searchInput = newRow.querySelector('.retail-pos-item-search');
@@ -2808,6 +2894,10 @@
 
         posTableBody.appendChild(newRow);
         updateItemCountBadge();
+        // 🔥 ADDED: return the new row so callers (e.g. the F3 shortcut)
+        // can focus it / scroll it into view without having to re-query
+        // the table for "whichever row is now last".
+        return newRow;
     }
 
     // ============================================
@@ -3361,17 +3451,33 @@
         const costPrice = parseFloat(selected.dataset.cost) || 0;
         const nhimaPrice = parseFloat(selected.dataset.nhima) || 0;
         const packSize = parseFloat(selected.dataset.pack) || 1;
-        const regularPercent = parseFloat(selected.dataset.regular) || 0;
-        const onlinePercent = parseFloat(selected.dataset.online) || 0;
-        const staffPercent = parseFloat(selected.dataset.staff) || 0;
 
+        // 🔥 CHANGED: dynamic pricing engine. Regular/Online markup % is no
+        // longer typed in per-product -- it's computed live from the PACK
+        // cost (unit cost * pack size) via the exponential curve set in
+        // Admin (company_settings), so higher-cost products automatically
+        // get a slimmer margin and lower-cost products a fatter one. Staff
+        // is a flat global rate. NHIMA is untouched -- fixed manual price.
+        const costPerPack = costPrice * packSize;
         let percent = 0;
         if (currentClientType === 'REGULAR') {
-            percent = regularPercent;
+            percent = computeExponentialMarkupPercent(
+                costPerPack,
+                companySettings.retail_regular_markup_max_percent,
+                companySettings.retail_regular_markup_min_percent,
+                companySettings.markup_cost_min,
+                companySettings.markup_cost_max
+            );
         } else if (currentClientType === 'ONLINE') {
-            percent = onlinePercent;
+            percent = computeExponentialMarkupPercent(
+                costPerPack,
+                companySettings.retail_online_markup_max_percent,
+                companySettings.retail_online_markup_min_percent,
+                companySettings.markup_cost_min,
+                companySettings.markup_cost_max
+            );
         } else if (currentClientType === 'STAFF') {
-            percent = staffPercent;
+            percent = companySettings.retail_staff_markup_percent;
         }
 
         if (currentClientType === 'NHIMA') {
@@ -3777,8 +3883,26 @@
 
         resultsEl.querySelectorAll('.search-edit-btn').forEach(btn => {
             btn.addEventListener('click', async () => {
-                await loadSaleByIdForEdit(btn.dataset.id);
-                document.getElementById('retailSearchModal').style.display = 'none';
+                // 🔥 ADDED: loading this invoice for edit does a handful of
+                // Supabase round trips (the sale row, then every product +
+                // batch it needs) before the form is ready, which can take
+                // a moment -- with nothing on screen changing in the
+                // meantime it looked frozen. Same disable+spinner pattern
+                // used on the Save buttons elsewhere: swap the button
+                // itself into a "Loading..." state for that stretch,
+                // instead of a popup the user has to dismiss once it's
+                // done (see the showToast() change in loadSaleForEdit()).
+                if (btn.disabled) return;
+                btn.disabled = true;
+                const originalHtml = btn.innerHTML;
+                btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Loading...';
+                try {
+                    await loadSaleByIdForEdit(btn.dataset.id);
+                    document.getElementById('retailSearchModal').style.display = 'none';
+                } finally {
+                    btn.disabled = false;
+                    btn.innerHTML = originalHtml;
+                }
             });
         });
 
@@ -3979,7 +4103,16 @@
             }
         });
 
-        if (stockErrors.length > 0) {
+        // 🔥 CHANGED: a Quotation for anyone other than NHIMA is allowed to
+        // quote for more than what's currently in stock (prices/availability
+        // can change by the time the customer comes back to actually buy) --
+        // NHIMA never quotes at all (see the client-type switch above), so
+        // this still blocks NHIMA unconditionally. The moment this same
+        // data is saved as an actual completed sale (status !== 'QUOTATION'),
+        // stock is enforced again here regardless of client type -- a real
+        // sale can never go through over-stock.
+        const stockCheckRequired = status !== 'QUOTATION' || currentClientType === 'NHIMA';
+        if (stockCheckRequired && stockErrors.length > 0) {
             let errorMsg = '❌ Stock validation failed:\n\n';
             stockErrors.forEach(err => {
                 errorMsg += `• ${err.product} (${err.batch}): Requested ${err.requested}, Available ${err.available}\n`;
@@ -5067,7 +5200,17 @@
             // instead of inserting a duplicate.
             editingSaleDbId = saleData.db_id || null;
 
-            alert('✅ Sale loaded for editing. Make changes and save.');
+            // 🔥 CHANGED: was a blocking alert() the user had to click OK
+            // on before anything else could happen -- since this fires
+            // AFTER the async fetch/populate work above but BEFORE the
+            // Search modal actually gets hidden (see the caller in
+            // renderSearchResults(): `await loadSaleByIdForEdit(...)` then
+            // `retailSearchModal.style.display = 'none'`), that alert was
+            // exactly what made Edit feel like "click, wait, a popup
+            // appears, click OK, THEN the invoice finally shows" instead
+            // of one smooth action. A toast says the same thing without
+            // blocking anything or needing a click to dismiss.
+            showToast('Sale loaded for editing -- make changes and save.', 'success');
 
         } catch (error) {
             console.error('Error loading sale for edit:', error);
@@ -5300,11 +5443,29 @@
             }
             if (e.ctrlKey && e.key === 'q') {
                 e.preventDefault();
-                document.getElementById('makeQuotationBtn')?.click();
+                // 🔥 FIX: the Quotation button is hidden for NHIMA (see the
+                // client-type switch below), but a hidden button still
+                // fires its click handler when clicked programmatically --
+                // without this guard, Ctrl+Q was a silent back door around
+                // "NHIMA never quotes."
+                const qBtn = document.getElementById('makeQuotationBtn');
+                if (qBtn && qBtn.style.display !== 'none') qBtn.click();
             }
             if (e.ctrlKey && e.key === 'r') {
                 e.preventDefault();
                 document.getElementById('clearSaleBtn')?.click();
+            }
+            // 🔥 ADDED: F3 adds a new empty item row and focuses its product
+            // search box -- this replaces the old "typing a qty auto-appends
+            // a row" behavior (see the POS TABLE LOGIC input listener
+            // above). Works from anywhere on the page (matches the other
+            // shortcuts here), not just from inside the grid.
+            if (e.key === 'F3') {
+                e.preventDefault();
+                const newRow = addPOSRow();
+                const focusTarget = newRow?.querySelector('.retail-pos-item-search');
+                if (focusTarget) focusTarget.focus();
+                if (newRow) newRow.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
             }
         });
 
@@ -5313,6 +5474,341 @@
         // that checks this flag still runs during this very first init call.
         window.__retailPosDocListenersAttached = true;
     }
+
+    // ============================================
+    // 🔥 ADDED: STOCK TAKE, reused from Inventory > Stock Management,
+    // wired directly into this page's own script (adapted from that
+    // page's index.js, supplied as a reference). The modal markup
+    // (#stockTakeModal, #productsContainer, #stockTakeForm, etc.) already
+    // lives in retail/index.html with the exact same element ids Stock
+    // Management uses -- the button was already showing, it just had
+    // nothing listening for its clicks, which is why it looked "empty".
+    // Only the "New Stock Take" creation flow is ported here -- the
+    // history list, CSV upload, and details modal aren't part of this
+    // page's HTML, so those pieces of the reference script are left out;
+    // POS only needs the ability to record one adjustment on the spot.
+    // Same tables (stock_counts / stock_count_batches / batches) and the
+    // same accounting entries (Inventory / Inventory Adjustments /
+    // Inventory Adjustment Gain) as the real Stock Management page.
+    // ============================================
+    (function initStockTakeFromPOS() {
+        const takeModal = document.getElementById('stockTakeModal');
+        const openBtn = document.getElementById('newStockTakeBtn');
+        const closeBtn = document.getElementById('closeStockTakeBtn');
+        const cancelBtn = document.getElementById('cancelStockTakeBtn');
+        const addProductBtn = document.getElementById('addProductToTake');
+        const stockForm = document.getElementById('stockTakeForm');
+        // This page's HTML doesn't have the modal (older deploy) -- nothing to wire up.
+        if (!takeModal || !openBtn) return;
+
+        let stockTakeAccountCache = {};
+
+        async function loadStockTakeAccountCodes() {
+            try {
+                const { data: accounts, error } = await supabaseClient
+                    .from('chart_of_accounts')
+                    .select('code, name')
+                    .in('name', ['Inventory', 'Inventory Adjustments', 'Inventory Adjustment Gain', 'Opening Balance Equity']);
+                if (error) throw error;
+
+                stockTakeAccountCache = {};
+                (accounts || []).forEach(acc => {
+                    const key = acc.name.toLowerCase().replace(/[^a-z0-9]/g, '_');
+                    stockTakeAccountCache[key] = acc.code;
+                });
+
+                if (!stockTakeAccountCache.inventory) stockTakeAccountCache.inventory = '1400';
+                if (!stockTakeAccountCache.inventory_adjustments) stockTakeAccountCache.inventory_adjustments = '5100';
+                if (!stockTakeAccountCache.inventory_adjustment_gain) stockTakeAccountCache.inventory_adjustment_gain = '4900';
+                if (!stockTakeAccountCache.opening_balance_equity) stockTakeAccountCache.opening_balance_equity = '3000';
+            } catch (e) {
+                console.error('Error loading stock take account codes:', e);
+                stockTakeAccountCache = {
+                    inventory: '1400',
+                    inventory_adjustments: '5100',
+                    inventory_adjustment_gain: '4900',
+                    opening_balance_equity: '3000'
+                };
+            }
+        }
+
+        async function ensureStockTakeAccountsExist() {
+            const checks = [
+                { code: stockTakeAccountCache.inventory || '1400', name: 'Inventory', type: 'Asset', normal_balance: 'Debit' },
+                { code: stockTakeAccountCache.inventory_adjustments || '5100', name: 'Inventory Adjustments', type: 'Expense', normal_balance: 'Debit' },
+                { code: stockTakeAccountCache.inventory_adjustment_gain || '4900', name: 'Inventory Adjustment Gain', type: 'Income', normal_balance: 'Credit' },
+                { code: stockTakeAccountCache.opening_balance_equity || '3000', name: 'Opening Balance Equity', type: 'Equity', normal_balance: 'Credit' }
+            ];
+            for (const acc of checks) {
+                const { count } = await supabaseClient
+                    .from('chart_of_accounts')
+                    .select('*', { count: 'exact', head: true })
+                    .eq('code', acc.code);
+                if (!count) {
+                    await supabaseClient.from('chart_of_accounts').insert([{
+                        code: acc.code, name: acc.name, type: acc.type, normal_balance: acc.normal_balance
+                    }]);
+                }
+            }
+            await loadStockTakeAccountCodes();
+        }
+
+        async function loadStockTakeProductDropdown(select) {
+            if (!select) return;
+            select.innerHTML = `<option value="">Select Product</option>`;
+            try {
+                const { data: products, error } = await supabaseClient
+                    .from('products')
+                    .select('id, product_name, sku')
+                    .order('product_name', { ascending: true });
+                if (error) throw error;
+                (products || []).forEach(p => {
+                    select.innerHTML += `<option value="${p.id}">${p.product_name} (${p.sku || 'N/A'})</option>`;
+                });
+            } catch (e) {
+                console.error('Error loading products for stock take:', e);
+            }
+        }
+
+        function addStockTakeBatchRow(container, batchId, batchNumber, expiryDate, systemTotal, costPrice) {
+            if (!container) return;
+            const row = document.createElement('div');
+            row.className = 'batch-count-row';
+            row.style.cssText = `display: grid; grid-template-columns: 1.5fr 1fr 1fr 1fr; gap: 10px; margin-bottom: 10px; align-items: center; padding: 10px; background: white; border-radius: 6px; border: 1px solid #e2e8f0;`;
+            row.innerHTML = `
+                <input type="hidden" class="batch-id" value="${batchId}">
+                <input type="hidden" class="cost-price" value="${costPrice || 0}">
+                <div>
+                    <label style="font-size: 0.75rem; color: #475569; font-weight: 600;">Batch #</label>
+                    <input type="text" class="batch-number" value="${batchNumber}" readonly style="width: 100%; padding: 8px; border: 1px solid #e2e8f0; border-radius: 4px; background: #f1f5f9; color: #64748b;">
+                </div>
+                <div>
+                    <label style="font-size: 0.75rem; color: #475569; font-weight: 600;">Expiry</label>
+                    <input type="text" class="batch-expiry" value="${expiryDate ? new Date(expiryDate).toLocaleDateString() : 'N/A'}" readonly style="width: 100%; padding: 8px; border: 1px solid #e2e8f0; border-radius: 4px; background: #f1f5f9; color: #64748b;">
+                </div>
+                <div>
+                    <label style="font-size: 0.75rem; color: #475569; font-weight: 600;">System Total</label>
+                    <input type="number" class="sys-total" value="${systemTotal}" readonly style="width: 100%; padding: 8px; border: 1px solid #e2e8f0; border-radius: 4px; background: #f1f5f9; color: #64748b;">
+                </div>
+                <div>
+                    <label style="font-size: 0.75rem; color: #475569; font-weight: 600;">Counted Total *</label>
+                    <input type="number" class="count-total" value="${systemTotal}" required min="0" style="width: 100%; padding: 8px; border: 1px solid #e2e8f0; border-radius: 4px; background: white;">
+                </div>
+            `;
+            container.appendChild(row);
+        }
+
+        async function loadStockTakeBatchRows(productId, container) {
+            if (!container) return;
+            container.innerHTML = '<p style="color: #94a3b8; text-align: center;">Loading batches...</p>';
+            try {
+                const { data: batches, error } = await supabaseClient
+                    .from('batches')
+                    .select('id, batch_number, expiry_date, total_qty, cost_price')
+                    .eq('product_id', productId);
+                if (error) throw error;
+
+                const activeBatches = (batches || []).filter(b => (b.total_qty || 0) > 0);
+                if (activeBatches.length === 0) {
+                    container.innerHTML = '<p style="color: #94a3b8; text-align: center;">No active batches found for this product.</p>';
+                    return;
+                }
+                container.innerHTML = '';
+                activeBatches.forEach(b => addStockTakeBatchRow(container, b.id, b.batch_number, b.expiry_date, b.total_qty, b.cost_price));
+            } catch (e) {
+                console.error('Error loading batches for stock take:', e);
+                container.innerHTML = `<p style="color: #dc2626; text-align: center;">Error: ${e.message}</p>`;
+            }
+        }
+
+        async function stockTakeAddProduct() {
+            const container = document.getElementById('productsContainer');
+            if (!container) return;
+            const productIndex = container.children.length;
+
+            const block = document.createElement('div');
+            block.className = 'product-take-block';
+            block.style.cssText = `border: 1px solid #e2e8f0; border-radius: 8px; padding: 15px; margin-bottom: 15px; background: #f8fafc;`;
+            block.innerHTML = `
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+                    <h4 style="margin: 0; color: #0f172a;">Product #${productIndex + 1}</h4>
+                    ${productIndex > 0 ? `<button type="button" class="remove-product-block" style="background: none; border: none; color: #ef4444; cursor: pointer;"><i class="fa-regular fa-trash-can"></i></button>` : ''}
+                </div>
+                <div style="margin-bottom: 10px;">
+                    <label style="display: block; font-weight: 500; color: #475569; margin-bottom: 5px;">Select Product *</label>
+                    <select class="take-product" required style="width: 100%; padding: 10px; border: 1px solid #e2e8f0; border-radius: 6px; background: white;">
+                        <option value="">Select Product</option>
+                    </select>
+                </div>
+                <div id="stockTakeBatchRows-${productIndex}" class="batch-rows-container">
+                    <p style="color: #94a3b8; text-align: center; padding: 10px;">Select a product to load batches</p>
+                </div>
+            `;
+            container.appendChild(block);
+
+            const select = block.querySelector('.take-product');
+            await loadStockTakeProductDropdown(select);
+
+            const removeBtn = block.querySelector('.remove-product-block');
+            if (removeBtn) removeBtn.addEventListener('click', () => block.remove());
+
+            select.addEventListener('change', async (e) => {
+                const productId = e.target.value;
+                const batchContainer = block.querySelector('.batch-rows-container');
+                if (productId) {
+                    await loadStockTakeBatchRows(productId, batchContainer);
+                } else {
+                    batchContainer.innerHTML = `<p style="color: #94a3b8; text-align: center; padding: 10px;">Select a product to load batches</p>`;
+                }
+            });
+        }
+
+        async function createStockTakeAdjustmentJournalEntry(takeId, totalAmountVariance) {
+            const inventoryAccount = stockTakeAccountCache.inventory || '1400';
+            const adjustmentAccount = stockTakeAccountCache.inventory_adjustments || '5100';
+            const gainAccount = stockTakeAccountCache.inventory_adjustment_gain || '4900';
+
+            const journal = {
+                entry_date: new Date().toISOString().split('T')[0],
+                reference: `STOCK-${takeId.slice(0, 8).toUpperCase()}`,
+                description: `Stock take adjustment (from Retail POS)`,
+                journal_number: `STK-${new Date().getFullYear()}-${String(Math.floor(Math.random() * 10000)).padStart(4, '0')}`,
+                status: 'Posted',
+                created_at: new Date().toISOString()
+            };
+
+            const { data: journalData, error: jError } = await supabaseClient
+                .from('journal_entries')
+                .insert([journal])
+                .select();
+            if (jError) throw jError;
+            const journalId = journalData[0].id;
+
+            const lines = [];
+            if (totalAmountVariance > 0) {
+                lines.push({ journal_entry_id: journalId, account_code: inventoryAccount, description: `Inventory increase from stock take`, debit: Math.abs(totalAmountVariance), credit: 0 });
+                lines.push({ journal_entry_id: journalId, account_code: gainAccount, description: `Stock take adjustment gain`, debit: 0, credit: Math.abs(totalAmountVariance) });
+            } else {
+                lines.push({ journal_entry_id: journalId, account_code: inventoryAccount, description: `Inventory decrease from stock take`, debit: 0, credit: Math.abs(totalAmountVariance) });
+                lines.push({ journal_entry_id: journalId, account_code: adjustmentAccount, description: `Stock take adjustment (decrease)`, debit: Math.abs(totalAmountVariance), credit: 0 });
+            }
+
+            const { error: lineError } = await supabaseClient.from('journal_lines').insert(lines);
+            if (lineError) throw lineError;
+            return journalId;
+        }
+
+        function closeStockTakeModal() {
+            takeModal.style.display = 'none';
+            if (stockForm) stockForm.reset();
+            const container = document.getElementById('productsContainer');
+            if (container) container.innerHTML = '';
+        }
+
+        async function submitStockTakeForm() {
+            const submitBtn = document.getElementById('saveStockTakeBtn');
+            if (submitBtn) {
+                submitBtn.disabled = true;
+                submitBtn.innerHTML = `<i class="fa-solid fa-spinner fa-spin"></i> Saving...`;
+            }
+
+            const productBlocks = document.querySelectorAll('#productsContainer .product-take-block');
+            if (productBlocks.length === 0) {
+                alert('Please add at least one product.');
+                if (submitBtn) { submitBtn.disabled = false; submitBtn.innerHTML = `<i class="fa-solid fa-floppy-disk"></i> Save Stock Take`; }
+                return;
+            }
+
+            const allCounts = [];
+            let totalQtyVariance = 0;
+            let totalAmountVariance = 0;
+
+            productBlocks.forEach(block => {
+                const productSelect = block.querySelector('.take-product');
+                const productId = productSelect?.value;
+                if (!productId) return;
+                const batchRows = block.querySelectorAll('.batch-count-row');
+                batchRows.forEach(row => {
+                    const batchId = row.querySelector('.batch-id')?.value;
+                    const batchNumber = row.querySelector('.batch-number')?.value;
+                    const costPrice = parseFloat(row.querySelector('.cost-price')?.value) || 0;
+                    const sysTotal = parseInt(row.querySelector('.sys-total')?.value) || 0;
+                    const countTotal = parseInt(row.querySelector('.count-total')?.value) || 0;
+                    const variance = countTotal - sysTotal;
+
+                    totalQtyVariance += variance;
+                    totalAmountVariance += variance * costPrice;
+
+                    allCounts.push({ productId, batchId: batchId || null, batchNumber, costPrice, sysTotal, countTotal, variance });
+                });
+            });
+
+            if (allCounts.length === 0) {
+                alert('No batches found to count.');
+                if (submitBtn) { submitBtn.disabled = false; submitBtn.innerHTML = `<i class="fa-solid fa-floppy-disk"></i> Save Stock Take`; }
+                return;
+            }
+
+            try {
+                await ensureStockTakeAccountsExist();
+
+                const { data: takeRecord, error: takeError } = await supabaseClient
+                    .from('stock_counts')
+                    .insert([{ date: new Date().toISOString().split('T')[0], total_qty_variance: totalQtyVariance, total_amount_variance: totalAmountVariance }])
+                    .select();
+                if (takeError) throw takeError;
+                const takeId = takeRecord[0].id;
+
+                const batchCounts = allCounts.map(c => ({
+                    stock_count_id: takeId, product_id: c.productId, batch_id: c.batchId || null,
+                    batch_number: c.batchNumber, system_qty: c.sysTotal, physical_qty: c.countTotal, variance: c.variance
+                }));
+                const { error: batchError } = await supabaseClient.from('stock_count_batches').insert(batchCounts);
+                if (batchError) throw batchError;
+
+                for (const c of allCounts) {
+                    if (c.batchId) {
+                        const { error: updateError } = await supabaseClient.from('batches').update({ total_qty: c.countTotal }).eq('id', c.batchId);
+                        if (updateError) throw updateError;
+                    } else {
+                        const { error: insertError } = await supabaseClient.from('batches').insert([{
+                            product_id: c.productId, batch_number: c.batchNumber,
+                            expiry_date: new Date().toISOString().split('T')[0], cost_price: c.costPrice, total_qty: c.countTotal
+                        }]);
+                        if (insertError) throw insertError;
+                    }
+                }
+
+                if (totalAmountVariance !== 0) {
+                    await createStockTakeAdjustmentJournalEntry(takeId, totalAmountVariance);
+                }
+
+                showToast('Stock take saved successfully! Stock levels and accounts updated.', 'success');
+                closeStockTakeModal();
+            } catch (e) {
+                console.error('Error saving stock take:', e);
+                showToast('Error saving stock take: ' + e.message, 'error');
+            } finally {
+                if (submitBtn) { submitBtn.disabled = false; submitBtn.innerHTML = `<i class="fa-solid fa-floppy-disk"></i> Save Stock Take`; }
+            }
+        }
+
+        function openStockTakeModal() {
+            takeModal.style.display = 'flex';
+            const container = document.getElementById('productsContainer');
+            if (container) container.innerHTML = '';
+            stockTakeAddProduct();
+        }
+
+        openBtn.addEventListener('click', openStockTakeModal);
+        if (closeBtn) closeBtn.addEventListener('click', closeStockTakeModal);
+        if (cancelBtn) cancelBtn.addEventListener('click', closeStockTakeModal);
+        takeModal.addEventListener('click', (e) => { if (e.target === takeModal) closeStockTakeModal(); });
+        if (addProductBtn) addProductBtn.addEventListener('click', stockTakeAddProduct);
+        if (stockForm) stockForm.addEventListener('submit', async (e) => { e.preventDefault(); await submitStockTakeForm(); });
+
+        loadStockTakeAccountCodes();
+    })();
 
     // ============================================
     // EXPOSE GLOBALLY
@@ -5350,12 +5846,13 @@
         if (nhimaBtn) nhimaBtn.click();
     }
 
-    // 🔥 FIX: same issue as the dropdown loads above — don't let these two
-    // network calls block addPOSRow() (which is what makes the item table
-    // usable) from ever running if either one stalls. Run addPOSRow() first,
-    // then sync accounts/NHIMA members in the background.
-    addPOSRow();
-
+    // 🔥 REMOVED: this used to unconditionally call addPOSRow() here on
+    // top of the single row defaultBtn.click() -> resetPOSTable() already
+    // leaves in place -- so the item table actually started with TWO
+    // blank rows, not one. Only the static first row (already in the
+    // HTML, and already re-populated with product options by
+    // loadProductDropdowns() above) should be there at page open now;
+    // press F3 to add another.
     ensureChartOfAccounts().catch(e => console.warn("ensureChartOfAccounts failed:", e));
     syncNhimaMemberToCustomers().catch(e => console.warn("syncNhimaMemberToCustomers failed:", e));
 
@@ -5635,8 +6132,21 @@
             }
 
             try {
-                const { data: nextTicket, error } = await supabaseClient.rpc('call_next_ticket', { p_stage: 'billing', p_counter: counter });
+                const { data: rawNextTicket, error } = await supabaseClient.rpc('call_next_ticket', { p_stage: 'billing', p_counter: counter });
                 if (error) throw error;
+
+                // 🔥 FIX: call_next_ticket() is declared to RETURN a single
+                // queue_tickets row (not SETOF) -- when the billing queue is
+                // genuinely empty, Postgres still hands back ONE row where
+                // every column is null instead of "no rows" (confirmed
+                // directly against the database), and that object is
+                // truthy in JS. Every `if (nextTicket)` below used to treat
+                // that empty row as a real ticket -- exactly the reported
+                // bug: attending the last patient in the queue showed
+                // "null" instead of the normal "no more patients" toast.
+                // .id is only null on that empty row, never on a real
+                // ticket, so it's what tells the two cases apart.
+                const nextTicket = (rawNextTicket && rawNextTicket.id) ? rawNextTicket : null;
 
                 if (nextTicket) {
                     sessionStorage.setItem('queueServingTicket_billing', JSON.stringify(nextTicket));

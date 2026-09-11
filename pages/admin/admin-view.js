@@ -329,14 +329,53 @@ window.showAdminSection = showAdminSection;
         invPhone: 'phone',
         invEmail: 'email',
         invZamra: 'zamra_number',
-        invInvoicePrefix: 'invoice_prefix',
-        invQuotationPrefix: 'quotation_prefix',
-        invWholesalePrefix: 'wholesale_prefix',
+        // 🔥 CHANGED: invInvoicePrefix/invQuotationPrefix/invWholesalePrefix
+        // (the old flat prefixes) are no longer used to build sale_id --
+        // retail/index.js and wholesale/index.js now build their own
+        // prefix from the retail_/wholesale_ fields below via
+        // getRetailPrefix()/getWholesalePrefix(). Dropped from this form;
+        // the underlying columns are left alone in the DB (harmless,
+        // unused fallbacks) in case anything old still reads them.
         invPurchasePrefix: 'purchase_order_prefix',
         invDonationPrefix: 'donation_prefix',
         invWriteoffPrefix: 'writeoff_prefix',
         invDefaultTax: 'default_tax_percent',
-        invDefaultTerms: 'default_payment_terms'
+        invDefaultTerms: 'default_payment_terms',
+
+        // Retail invoicing profile -- its own ZAMRA/TPIN/Phone (separate
+        // from the legacy company_name/address/phone/zamra_number above,
+        // which stay in use for Purchase Orders/Donation/Write-off
+        // documents only) plus a footer message printed on every retail
+        // invoice and quotation.
+        invRetailCompanyName: 'retail_company_name',
+        invRetailZamra: 'retail_zamra_number',
+        invRetailTpin: 'retail_tpin_number',
+        invRetailPhone: 'retail_phone',
+        invRetailPrefixNhima: 'retail_prefix_nhima',
+        invRetailPrefixRegular: 'retail_prefix_regular',
+        invRetailPrefixOnline: 'retail_prefix_online',
+        invRetailPrefixStaff: 'retail_prefix_staff',
+        invRetailFooterMessage: 'retail_footer_message',
+
+        // Wholesale invoicing profile -- Griffins Pharmaceuticals is a
+        // separate registered entity from Griffins Medicals Limited, so
+        // it gets its own ZAMRA/TPIN too (no phone on the wholesale
+        // header). Its footer is the Bank Details card below plus each
+        // customer's own Credit Limit (set per-customer, not here).
+        invWholesaleCompanyName: 'wholesale_company_name',
+        invWholesaleZamra: 'wholesale_zamra_number',
+        invWholesaleTpin: 'wholesale_tpin_number',
+        invWholesalePrefixRegular: 'wholesale_prefix_regular',
+        invWholesalePrefixInternal: 'wholesale_prefix_internal',
+
+        // Bank details -- printed on wholesale invoices AND quotations
+        // (retail never shows bank details, see retail/index.js's plain
+        // footer).
+        invBankName: 'bank_name',
+        invBankAccountName: 'bank_account_name',
+        invBankAccountNumber: 'bank_account_number',
+        invBankBranch: 'bank_branch',
+        invBankSwift: 'bank_swift'
     };
 
     await loadSettingsIntoForm();
@@ -381,11 +420,29 @@ window.showAdminSection = showAdminSection;
             return;
         }
 
+        // Retail/Wholesale company names feed straight onto the printed
+        // invoice/quotation header (retail-view.js's <h1>, wholesale's
+        // buildWholesaleCopyHTML() <h1>) -- required, same as the legacy
+        // Company Name above.
+        const requiredNameIds = ['invRetailCompanyName', 'invWholesaleCompanyName'];
+        for (const id of requiredNameIds) {
+            const el = document.getElementById(id);
+            if (el && !el.value.trim()) {
+                showToast('Both Retail and Wholesale company names are required.', 'error');
+                el.focus();
+                return;
+            }
+        }
+
         // Prefixes feed straight into a document number string
-        // (PREFIX-YEAR-...) -- keep them short, uppercase, and free of
-        // spaces/dashes so a saved prefix can never itself contain the
-        // separator the number format relies on.
-        const prefixIds = ['invInvoicePrefix', 'invQuotationPrefix', 'invWholesalePrefix', 'invPurchasePrefix', 'invDonationPrefix', 'invWriteoffPrefix'];
+        // (PREFIX-INV-... / PREFIX-QUE-...) -- keep them short, uppercase,
+        // and free of spaces/dashes so a saved prefix can never itself
+        // contain the separator the number format relies on.
+        const prefixIds = [
+            'invPurchasePrefix', 'invDonationPrefix', 'invWriteoffPrefix',
+            'invRetailPrefixNhima', 'invRetailPrefixRegular', 'invRetailPrefixOnline', 'invRetailPrefixStaff',
+            'invWholesalePrefixRegular', 'invWholesalePrefixInternal'
+        ];
         for (const id of prefixIds) {
             const el = document.getElementById(id);
             const cleaned = (el.value || '').trim().toUpperCase().replace(/[^A-Z0-9]/g, '');

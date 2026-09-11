@@ -14,21 +14,71 @@
 })();
 
 // ============================================
+// 🔥 ADDED: dynamic pricing settings -- this report used to read
+// retail_regular_percent / wholesale_regular_percent straight off each
+// product row. Those per-product columns are gone (Retail Regular is now
+// an exponential cost-based curve, Wholesale Regular a flat global rate,
+// both configured once in Admin > Pricing Settings), so this page has to
+// load the same company_settings values and compute the same way the
+// Retail/Wholesale POS screens do, or it would show stale/zero prices for
+// every product added or edited after the cutover.
+// ============================================
+async function loadPricingSettings() {
+    const fallback = {
+        retail_regular_markup_max_percent: 60,
+        retail_regular_markup_min_percent: 30,
+        wholesale_regular_markup_percent: 10,
+        markup_cost_min: 1,
+        markup_cost_max: 600
+    };
+    try {
+        const { data, error } = await supabaseClient
+            .from('company_settings')
+            .select(`retail_regular_markup_max_percent, retail_regular_markup_min_percent,
+                wholesale_regular_markup_percent, markup_cost_min, markup_cost_max`)
+            .eq('id', 1)
+            .maybeSingle();
+        if (error || !data) return fallback;
+        return {
+            retail_regular_markup_max_percent: data.retail_regular_markup_max_percent ?? fallback.retail_regular_markup_max_percent,
+            retail_regular_markup_min_percent: data.retail_regular_markup_min_percent ?? fallback.retail_regular_markup_min_percent,
+            wholesale_regular_markup_percent: data.wholesale_regular_markup_percent ?? fallback.wholesale_regular_markup_percent,
+            markup_cost_min: data.markup_cost_min ?? fallback.markup_cost_min,
+            markup_cost_max: data.markup_cost_max ?? fallback.markup_cost_max
+        };
+    } catch (e) {
+        console.warn('Could not load pricing settings, using defaults:', e);
+        return fallback;
+    }
+}
+
+// Same geometric/exponential decay used by Retail POS -- constant
+// multiplicative step per unit of cost between maxPct (at costMin) and
+// minPct (at costMax), clamped flat outside that range.
+function computeExponentialMarkupPercent(cost, maxPct, minPct, costMin, costMax) {
+    if (!(costMax > costMin) || maxPct <= 0 || minPct <= 0) return maxPct;
+    const clampedCost = Math.min(Math.max(cost, costMin), costMax);
+    const t = (clampedCost - costMin) / (costMax - costMin);
+    return maxPct * Math.pow(minPct / maxPct, t);
+}
+
+// ============================================
 // LOAD PRICING DATA
 // ============================================
 async function loadPricing() {
     const tbody = document.getElementById('pricingTableBody');
 
     try {
-        // 1. Fetch all products
+        const pricingSettings = await loadPricingSettings();
+
+        // 🔥 CHANGED: dropped retail_regular_percent / wholesale_regular_percent
+        // from the select -- those columns are no longer maintained per-product.
         const { data: products, error: prodError } = await supabaseClient
             .from('products')
             .select(`
                 id,
                 product_name,
-                conversion_rate,
-                retail_regular_percent,
-                wholesale_regular_percent
+                conversion_rate
             `)
             .order('product_name', { ascending: true });
 
@@ -58,7 +108,7 @@ async function loadPricing() {
         });
 
         // 4. Render the table
-        renderPricing(products, costMap);
+        renderPricing(products, costMap, pricingSettings);
 
     } catch (error) {
         console.error("Error loading pricing data:", error);
@@ -69,20 +119,30 @@ async function loadPricing() {
 // ============================================
 // RENDER PRICING (With Commercial Rounding)
 // ============================================
-function renderPricing(products, costMap) {
+function renderPricing(products, costMap, pricingSettings) {
     const tbody = document.getElementById('pricingTableBody');
-    
+
     tbody.innerHTML = products.map(p => {
         const packSize = p.conversion_rate || 1;
         const costPrice = costMap[p.id] || 0;
+        const costPerPack = costPrice * packSize;
 
-        // Calculate Retail Price: (Cost × Pack Size) × (1 + Retail Markup%)
-        const retailMarkup = p.retail_regular_percent || 0;
-        const retailPrice = (costPrice * packSize) * (1 + (retailMarkup / 100));
+        // 🔥 CHANGED: Retail Regular markup is now the exponential curve
+        // (same formula/settings as Retail POS), not a stored per-product
+        // percent.
+        const retailMarkup = computeExponentialMarkupPercent(
+            costPerPack,
+            pricingSettings.retail_regular_markup_max_percent,
+            pricingSettings.retail_regular_markup_min_percent,
+            pricingSettings.markup_cost_min,
+            pricingSettings.markup_cost_max
+        );
+        const retailPrice = costPerPack * (1 + (retailMarkup / 100));
 
-        // Calculate Wholesale Price: (Cost × Pack Size) × (1 + Wholesale Markup%)
-        const wholesaleMarkup = p.wholesale_regular_percent || 0;
-        const wholesalePrice = (costPrice * packSize) * (1 + (wholesaleMarkup / 100));
+        // 🔥 CHANGED: Wholesale Regular markup is now the flat global rate
+        // (same as Wholesale POS), not a stored per-product percent.
+        const wholesaleMarkup = pricingSettings.wholesale_regular_markup_percent;
+        const wholesalePrice = costPerPack * (1 + (wholesaleMarkup / 100));
 
         return `
             <tr>

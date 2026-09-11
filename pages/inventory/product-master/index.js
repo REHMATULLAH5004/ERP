@@ -90,9 +90,7 @@
                     id,
                     product_name,
                     conversion_rate,
-                    min_order_qty,
                     nhima_price_fixed,
-                    retail_regular_percent,
                     generic_name_id,
                     category_id,
                     sub_category_id,
@@ -110,7 +108,7 @@
             if (prodError) throw prodError;
 
             if (!products || products.length === 0) {
-                tbody.innerHTML = `<tr><td colspan="8" style="text-align: center; padding: 30px; color: #94a3b8;">No products found. Click "Add Product" to get started!</td></tr>`;
+                tbody.innerHTML = `<tr><td colspan="7" style="text-align: center; padding: 30px; color: #94a3b8;">No products found. Click "Add Product" to get started!</td></tr>`;
                 return;
             }
 
@@ -153,15 +151,18 @@
         if (!tbody) return;
         
         if (products.length === 0) {
-            tbody.innerHTML = `<tr><td colspan="8" style="text-align: center; padding: 30px; color: #94a3b8;">No products found. Click "Add Product" to get started!</td></tr>`;
+            tbody.innerHTML = `<tr><td colspan="7" style="text-align: center; padding: 30px; color: #94a3b8;">No products found. Click "Add Product" to get started!</td></tr>`;
             return;
         }
-        
+
+        // 🔥 CHANGED: the stock-color warning used to compare against this
+        // product's own Min Order Qty, which no longer exists -- stock is
+        // now just shown plainly here. Whether a product is actually due
+        // for reorder (against its generic's real 3-month sales) lives in
+        // Purchase > Reorder Report, not this list.
         tbody.innerHTML = products.map(p => {
             const stock = p.total_stock || 0;
-            const minQty = p.min_order_qty || 1;
-            const stockClass = stock < minQty ? 'color: #dc2626; font-weight: bold;' : 'color: #15803d;';
-            
+
             return `
             <tr>
                 <td style="padding-left: 20px; font-weight: 500;">${p.product_name}</td>
@@ -169,8 +170,7 @@
                 <td>${p.categories?.name || '-'}</td>
                 <td>${p.sub_categories?.name || '-'}</td>
                 <td>${p.conversion_rate || 1}</td>
-                <td style="text-align: right; font-weight: bold;">${minQty}</td>
-                <td style="text-align: right; ${stockClass}">${stock}</td>
+                <td style="text-align: right;">${stock}</td>
                 <td style="padding-right: 20px; text-align: right;">
                     <button onclick="editProduct('${p.id}')" style="background: none; border: none; color: #3b82f6; cursor: pointer;">
                         <i class="fa-regular fa-pen-to-square"></i>
@@ -278,7 +278,7 @@
     const modalTitle = document.getElementById('modalTitle');
     const submitBtn = document.getElementById('saveProductBtn');
     const hiddenId = document.getElementById('editProductId');
-    
+
     const batchSectionContainer = document.querySelector('.batch-section');
     const batchDetailsSection = document.getElementById('batchDetailsSection');
 
@@ -368,21 +368,28 @@
     // onclick="downloadCSVTemplate()" had nothing to call and silently failed.
     // ============================================
     window.downloadCSVTemplate = function () {
+        // 🔥 CHANGED: dropped wholesale_internal_percent / wholesale_regular_percent /
+        // retail_online_percent / retail_regular_percent / retail_staff_percent --
+        // those are no longer per-product fields. Wholesale/Retail/Online sale
+        // prices are now computed automatically from cost using the global rates
+        // in Admin > Pricing Settings. Only nhima_price_fixed stays manual.
+        // 🔥 CHANGED: dropped min_order_qty too -- there's no per-product
+        // (or per-generic) minimum to store anymore; reorder decisions are
+        // purely dynamic now (stock vs. the generic's actual 3-month sales,
+        // see Purchase > Reorder Report).
         const headers = [
             'product_name', 'sku', 'generic_name', 'category', 'sub_category',
             'dosage_form', 'brand', 'supplier', 'tax_percent', 'conversion_rate',
-            'min_order_qty', 'nhima_price_fixed', 'wholesale_internal_percent',
-            'wholesale_regular_percent', 'retail_online_percent', 'retail_regular_percent',
-            'retail_staff_percent', 'opening_qty', 'batch_number', 'expiry_date',
+            'nhima_price_fixed',
+            'opening_qty', 'batch_number', 'expiry_date',
             'cost_price', 'currency'
         ];
 
         const sampleRow = [
             'Paracetamol 500mg', 'PRD-0001', 'Paracetamol', 'Pharmaceuticals', 'Pain Relief',
             'Tablet', 'BrandX', 'SupplierCo', '16', '30',
-            '10', '75.00', '25',
-            '30', '35', '40',
-            '20', '100', 'B-2026-001', '2027-12-31',
+            '75.00',
+            '100', 'B-2026-001', '2027-12-31',
             '50.00', 'ZMW'
         ];
 
@@ -565,14 +572,8 @@
 
                 // Set defaults for optional fields
                 product.conversion_rate = parseInt(product.conversion_rate) || 1;
-                product.min_order_qty = parseInt(product.min_order_qty) || 1;
                 product.tax_percent = parseFloat(product.tax_percent) || 0;
                 product.nhima_price_fixed = parseFloat(product.nhima_price_fixed) || 0;
-                product.wholesale_internal_percent = parseFloat(product.wholesale_internal_percent) || 0;
-                product.wholesale_regular_percent = parseFloat(product.wholesale_regular_percent) || 0;
-                product.retail_online_percent = parseFloat(product.retail_online_percent) || 0;
-                product.retail_regular_percent = parseFloat(product.retail_regular_percent) || 0;
-                product.retail_staff_percent = parseFloat(product.retail_staff_percent) || 0;
                 product.opening_qty = parseInt(product.opening_qty) || 0;
                 product.cost_price = parseFloat(product.cost_price) || 0;
                 product.currency = product.currency || 'ZMW';
@@ -672,13 +673,7 @@
                                 supplier_id: supplierId,
                                 tax_percent: p.tax_percent,
                                 conversion_rate: p.conversion_rate,
-                                min_order_qty: p.min_order_qty,
                                 nhima_price_fixed: p.nhima_price_fixed,
-                                wholesale_internal_percent: p.wholesale_internal_percent,
-                                wholesale_regular_percent: p.wholesale_regular_percent,
-                                retail_online_percent: p.retail_online_percent,
-                                retail_regular_percent: p.retail_regular_percent,
-                                retail_staff_percent: p.retail_staff_percent,
                             }])
                             .select();
 
@@ -919,13 +914,7 @@ ${errorMessages.length > 5 ? `\n... and ${errorMessages.length - 5} more errors`
         document.getElementById('supplier').value = '';
         document.getElementById('tax').value = 0;
         document.getElementById('packSize').value = 1;
-        document.getElementById('minOrderQty').value = 1;
         document.getElementById('nhimaPrice').value = 0;
-        document.getElementById('wholesaleInternalPercent').value = 0;
-        document.getElementById('wholesaleRegularPercent').value = 0;
-        document.getElementById('retailOnlinePercent').value = 0;
-        document.getElementById('retailRegularPercent').value = 0;
-        document.getElementById('retailStaffPercent').value = 0;
         document.getElementById('openingQty').value = 0;
         document.getElementById('openingBatchNo').value = '';
         document.getElementById('openingExpiry').value = '';
@@ -1134,12 +1123,6 @@ ${errorMessages.length > 5 ? `\n... and ${errorMessages.length - 5} more errors`
             document.getElementById('productName').value = product.product_name || '';
             document.getElementById('tax').value = product.tax_percent || 0;
             document.getElementById('packSize').value = product.conversion_rate || 1;
-            document.getElementById('minOrderQty').value = product.min_order_qty || 1;
-            document.getElementById('wholesaleInternalPercent').value = product.wholesale_internal_percent || 0;
-            document.getElementById('wholesaleRegularPercent').value = product.wholesale_regular_percent || 0;
-            document.getElementById('retailOnlinePercent').value = product.retail_online_percent || 0;
-            document.getElementById('retailRegularPercent').value = product.retail_regular_percent || 0;
-            document.getElementById('retailStaffPercent').value = product.retail_staff_percent || 0;
             document.getElementById('nhimaPrice').value = product.nhima_price_fixed || 0;
             
             await loadDropdowns();
@@ -1207,13 +1190,7 @@ ${errorMessages.length > 5 ? `\n... and ${errorMessages.length - 5} more errors`
             supplier_id: document.getElementById('supplier').value || null,
             tax: parseFloat(document.getElementById('tax').value) || 0,
             conversion_rate: parseInt(document.getElementById('packSize').value) || 1,
-            min_order_qty: parseInt(document.getElementById('minOrderQty').value) || 1,
             nhima_price: parseFloat(document.getElementById('nhimaPrice').value) || 0,
-            wholesale_internal_percent: parseFloat(document.getElementById('wholesaleInternalPercent').value) || 0,
-            wholesale_regular_percent: parseFloat(document.getElementById('wholesaleRegularPercent').value) || 0,
-            retail_online_percent: parseFloat(document.getElementById('retailOnlinePercent').value) || 0,
-            retail_regular_percent: parseFloat(document.getElementById('retailRegularPercent').value) || 0,
-            retail_staff_percent: parseFloat(document.getElementById('retailStaffPercent').value) || 0,
             opening_qty: parseInt(document.getElementById('openingQty').value) || 0,
             batch_no: document.getElementById('openingBatchNo').value || null,
             expiry: document.getElementById('openingExpiry').value || null,
@@ -1236,13 +1213,7 @@ ${errorMessages.length > 5 ? `\n... and ${errorMessages.length - 5} more errors`
                         supplier_id: formData.supplier_id,
                         tax_percent: formData.tax,
                         conversion_rate: formData.conversion_rate,
-                        min_order_qty: formData.min_order_qty,
                         nhima_price_fixed: formData.nhima_price,
-                        wholesale_internal_percent: formData.wholesale_internal_percent,
-                        wholesale_regular_percent: formData.wholesale_regular_percent,
-                        retail_online_percent: formData.retail_online_percent,
-                        retail_regular_percent: formData.retail_regular_percent,
-                        retail_staff_percent: formData.retail_staff_percent,
                     })
                     .eq('id', hiddenId.value)
                     .select();
@@ -1264,13 +1235,7 @@ ${errorMessages.length > 5 ? `\n... and ${errorMessages.length - 5} more errors`
                         supplier_id: formData.supplier_id,
                         tax_percent: formData.tax,
                         conversion_rate: formData.conversion_rate,
-                        min_order_qty: formData.min_order_qty,
                         nhima_price_fixed: formData.nhima_price,
-                        wholesale_internal_percent: formData.wholesale_internal_percent,
-                        wholesale_regular_percent: formData.wholesale_regular_percent,
-                        retail_online_percent: formData.retail_online_percent,
-                        retail_regular_percent: formData.retail_regular_percent,
-                        retail_staff_percent: formData.retail_staff_percent,
                     }])
                     .select();
 
@@ -1794,6 +1759,9 @@ ${errorMessages.length > 5 ? `\n... and ${errorMessages.length - 5} more errors`
                 
                 if (selectEl) {
                     selectEl.value = data[0].id;
+                    // Setting .value directly never fires a native 'change'
+                    // event, so anything listening for it (e.g. the
+                    // subcategory cascade) needs it dispatched by hand.
                     if (type === 'subcategory' || type === 'category') {
                         const changeEvent = new Event('change', { bubbles: true });
                         selectEl.dispatchEvent(changeEvent);
@@ -1879,19 +1847,25 @@ ${errorMessages.length > 5 ? `\n... and ${errorMessages.length - 5} more errors`
     // DOWNLOAD CSV TEMPLATE (Global)
     // ============================================
     window.downloadCSVTemplate = function() {
+        // 🔥 CHANGED: dropped wholesale_internal_percent / wholesale_regular_percent /
+        // retail_online_percent / retail_regular_percent / retail_staff_percent --
+        // those are no longer per-product fields (see Add/Edit Product form note).
+        // Only nhima_price_fixed stays manual; everything else is computed from
+        // cost using the global rates in Admin > Pricing Settings. Also dropped
+        // min_order_qty -- there's no per-product/per-generic minimum to store
+        // anymore; reorder decisions are purely dynamic (stock vs. the generic's
+        // actual 3-month sales, see Purchase > Reorder Report).
         const headers = [
             'product_name', 'sku', 'generic_name', 'category', 'sub_category',
             'dosage_form', 'brand', 'supplier', 'tax_percent', 'conversion_rate',
-            'min_order_qty', 'nhima_price_fixed', 'wholesale_internal_percent',
-            'wholesale_regular_percent', 'retail_online_percent',
-            'retail_regular_percent', 'retail_staff_percent',
+            'nhima_price_fixed',
             'opening_qty', 'batch_number', 'expiry_date', 'cost_price', 'currency'
         ];
 
         const sampleRow = [
             'Paracetamol 500mg', 'PRD-0001', 'Paracetamol', 'Pharmaceuticals',
-            'Pain Relief', 'Tablet', 'BrandX', 'SupplierCo', '16', '30', '10',
-            '75.00', '25', '30', '35', '40', '20', '100', 'B-2026-001',
+            'Pain Relief', 'Tablet', 'BrandX', 'SupplierCo', '16', '30',
+            '75.00', '100', 'B-2026-001',
             '2027-12-31', '50.00', 'ZMW'
         ];
 

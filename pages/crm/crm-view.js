@@ -408,6 +408,24 @@
 
         const phone = buildZmPhone(phoneDigits) || null;
 
+        // 🔥 ADDED: open the print window SYNCHRONOUSLY, right here on the
+        // actual click, before any `await` below runs. This used to be a
+        // 2-click flow -- Register, then a separate Print click on the
+        // token card -- because printTicket() called window.open() only
+        // after the registration round-trip finished, by which point some
+        // browsers no longer treat it as "triggered by a real click" and
+        // silently block the popup. Opening a blank window now (while
+        // we're still inside the click handler) reserves it, then
+        // printTicket() below just writes the slip into this same window
+        // and prints it -- so one click on "Register & Issue Token" is
+        // all it takes; no second Print click, no popup-blocker risk.
+        let pendingPrintWindow = null;
+        try {
+            pendingPrintWindow = window.open('', '_blank', 'width=380,height=600');
+        } catch (e) {
+            pendingPrintWindow = null;
+        }
+
         submitBtn.disabled = true;
         submitBtn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Registering...';
 
@@ -432,12 +450,23 @@
 
             lastIssuedTicket = ticket;
             showTokenCard(ticket);
+            // 🔥 ADDED: auto-print immediately -- registration and
+            // printing now happen on the same click. printTicket() still
+            // works standalone too (Print button on the token card, and
+            // the reprint buttons in Today's Queue below both still call
+            // it with no pre-opened window, same as before).
+            printTicket(ticket, pendingPrintWindow);
             resetForm();
             await loadRecent();
             await loadPending();
         } catch (err) {
             console.error('Error registering patient:', err);
             showError('Error: ' + (err.message || 'could not register patient.'));
+            // 🔥 ADDED: registration failed -- don't leave a blank popup
+            // hanging around on screen.
+            if (pendingPrintWindow && !pendingPrintWindow.closed) {
+                try { pendingPrintWindow.close(); } catch (e2) { /* ignore */ }
+            }
         } finally {
             submitBtn.disabled = false;
             submitBtn.innerHTML = '<i class="fa-solid fa-ticket"></i> Register &amp; Issue Token';
@@ -505,9 +534,20 @@
         </html>`;
     }
 
-    function printTicket(ticket) {
+    // 🔥 CHANGED: accepts an optional already-open window (the one the
+    // submit handler above pre-opens synchronously on click, to dodge
+    // popup blockers). Manual callers -- the Print button and the
+    // reprint buttons in Today's Queue -- don't pass one, so this falls
+    // back to opening a fresh window exactly as before.
+    function printTicket(ticket, existingWindow) {
         if (!ticket) return;
-        const printWindow = window.open('', '_blank', 'width=380,height=600');
+        const printWindow = (existingWindow && !existingWindow.closed)
+            ? existingWindow
+            : window.open('', '_blank', 'width=380,height=600');
+        if (!printWindow) {
+            console.warn('Could not open print window (popup blocked?)');
+            return;
+        }
         printWindow.document.write(buildTokenSlipHTML(ticket));
         printWindow.document.close();
         printWindow.focus();
