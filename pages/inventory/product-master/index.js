@@ -181,75 +181,172 @@
     }
 
     // ============================================
+    // SEARCHABLE COMBOBOX CACHE (per explicit request, 2026-09-11)
+    // ============================================
+    // Generic Name / Dosage Form / Category / Sub-Category / Brand /
+    // Supplier used to be plain <select> dropdowns, each with a separate
+    // "+" button that opened a popup just to add a new entry. Now each is
+    // one searchable text field: type to filter this cached list and
+    // click a match to pick it exactly, or leave a brand-new name typed
+    // in -- it gets created automatically the moment the product is
+    // saved (see findOrCreate()/findOrCreateSubCategory() in the submit
+    // handler below, the same helpers CSV import has always used for
+    // this). No separate "add" step needed.
+    let comboCache = {
+        category: [],
+        genericName: [],
+        dosageForm: [],
+        brand: [],
+        supplier: [],
+        subCategory: [] // { id, name, category_id, category_name }
+    };
+
+    function comboNameById(list, id) {
+        if (!id) return '';
+        const match = (list || []).find(o => o.id === id);
+        return match ? match.name : '';
+    }
+
+    // ============================================
     // LOAD DROPDOWNS (Moved inside the function)
     // ============================================
+    // 🔥 CHANGED: this used to write <option> HTML straight into each
+    // <select> (and stomp on whatever the field currently showed every
+    // time it ran). Now it only refreshes the cached option lists the
+    // comboboxes below search against -- it never touches the DOM, so
+    // it's safe to call again later (e.g. every time Edit Product opens)
+    // without disturbing what the user is mid-typing.
     async function loadDropdowns() {
         try {
-            const currentCategory = document.getElementById('category').value;
-            const currentGeneric = document.getElementById('genericName').value;
-            const currentDosage = document.getElementById('dosageForm').value;
-            const currentSub = document.getElementById('subCategory').value;
-            const currentBrand = document.getElementById('brand').value;
-            const currentSupplier = document.getElementById('supplier').value;
+            const [catRes, genRes, dosRes, brandRes, supRes, subRes] = await Promise.all([
+                supabaseClient.from('categories').select('id, name').order('name'),
+                supabaseClient.from('generic_names').select('id, name').order('name'),
+                supabaseClient.from('dosage_forms').select('id, name').order('name'),
+                supabaseClient.from('brands').select('id, name').order('name'),
+                supabaseClient.from('suppliers').select('id, name').order('name'),
+                supabaseClient.from('sub_categories').select('id, name, category_id, categories(name)').order('name')
+            ]);
 
-            const { data: cats } = await supabaseClient.from('categories').select('id, name').order('name');
-            const catSelect = document.getElementById('category');
-            catSelect.innerHTML = `<option value="">Select Category</option>` + 
-                (cats || []).map(c => `<option value="${c.id}" ${c.id === currentCategory ? 'selected' : ''}>${c.name}</option>`).join('');
-
-            const { data: generics } = await supabaseClient.from('generic_names').select('id, name').order('name');
-            const genSelect = document.getElementById('genericName');
-            genSelect.innerHTML = `<option value="">Select Generic Name</option>` + 
-                (generics || []).map(g => `<option value="${g.id}" ${g.id === currentGeneric ? 'selected' : ''}>${g.name}</option>`).join('');
-
-            const { data: dosages } = await supabaseClient.from('dosage_forms').select('id, name').order('name');
-            const dosSelect = document.getElementById('dosageForm');
-            dosSelect.innerHTML = `<option value="">Select Dosage Form</option>` + 
-                (dosages || []).map(d => `<option value="${d.id}" ${d.id === currentDosage ? 'selected' : ''}>${d.name}</option>`).join('');
-
-            const { data: brands } = await supabaseClient.from('brands').select('id, name').order('name');
-            const brandSelect = document.getElementById('brand');
-            brandSelect.innerHTML = `<option value="">Select Brand</option>` + 
-                (brands || []).map(b => `<option value="${b.id}" ${b.id === currentBrand ? 'selected' : ''}>${b.name}</option>`).join('');
-
-            const { data: suppliers } = await supabaseClient.from('suppliers').select('id, name').order('name');
-            const supSelect = document.getElementById('supplier');
-            supSelect.innerHTML = `<option value="">Select Supplier</option>` + 
-                (suppliers || []).map(s => `<option value="${s.id}" ${s.id === currentSupplier ? 'selected' : ''}>${s.name}</option>`).join('');
-
-            if (currentCategory) {
-                const { data: subs } = await supabaseClient
-                    .from('sub_categories')
-                    .select('id, name')
-                    .eq('category_id', currentCategory)
-                    .order('name');
-                const subSelect = document.getElementById('subCategory');
-                subSelect.innerHTML = `<option value="">Select Sub-Category</option>` + 
-                    (subs || []).map(s => `<option value="${s.id}" ${s.id === currentSub ? 'selected' : ''}>${s.name}</option>`).join('');
-            } else {
-                const subSelect = document.getElementById('subCategory');
-                subSelect.innerHTML = `<option value="">Select Sub-Category</option>`;
-            }
-
-            document.getElementById('category').addEventListener('change', async (e) => {
-                const catId = e.target.value;
-                const subSelect = document.getElementById('subCategory');
-                if (!catId) {
-                    subSelect.innerHTML = `<option value="">Select Sub-Category</option>`;
-                    return;
-                }
-                const { data: subs } = await supabaseClient
-                    .from('sub_categories')
-                    .select('id, name')
-                    .eq('category_id', catId)
-                    .order('name');
-                subSelect.innerHTML = `<option value="">Select Sub-Category</option>` + 
-                    (subs || []).map(s => `<option value="${s.id}">${s.name}</option>`).join('');
-            });
+            comboCache.category = catRes.data || [];
+            comboCache.genericName = genRes.data || [];
+            comboCache.dosageForm = dosRes.data || [];
+            comboCache.brand = brandRes.data || [];
+            comboCache.supplier = supRes.data || [];
+            comboCache.subCategory = (subRes.data || []).map(s => ({
+                id: s.id,
+                name: s.name,
+                category_id: s.category_id,
+                category_name: s.categories?.name || ''
+            }));
 
         } catch (error) {
             console.error("Error loading dropdowns:", error);
         }
+    }
+
+    // ============================================
+    // COMBOBOX WIRING (search existing, or type to create new)
+    // ============================================
+    function escapeComboHtml(str) {
+        return String(str ?? '').replace(/[&<>"']/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
+    }
+
+    const COMBO_FIELDS = ['genericName', 'dosageForm', 'category', 'subCategory', 'brand', 'supplier'];
+
+    function comboOptionsFor(field) {
+        let options = comboCache[field] || [];
+        if (field === 'subCategory') {
+            // Sub-Category suggestions are scoped to whatever text is
+            // currently in the Category field -- matched by NAME (not id),
+            // since the category might itself be freshly typed and not
+            // saved/resolved to a real id yet.
+            const catText = (document.getElementById('category')?.value || '').trim().toLowerCase();
+            options = catText ? options.filter(o => (o.category_name || '').toLowerCase() === catText) : [];
+        }
+        return options;
+    }
+
+    function renderComboList(field) {
+        const input = document.getElementById(field);
+        const list = document.getElementById(field + 'ComboList');
+        if (!input || !list) return;
+
+        const query = input.value.trim().toLowerCase();
+        const options = comboOptionsFor(field);
+        const matches = query ? options.filter(o => o.name.toLowerCase().includes(query)) : options;
+
+        if (matches.length === 0) {
+            let emptyMsg = 'No existing entries -- start typing to add one';
+            if (field === 'subCategory' && !(document.getElementById('category')?.value || '').trim()) {
+                emptyMsg = 'Enter a Category first';
+            } else if (query) {
+                emptyMsg = `No match -- "${escapeComboHtml(input.value.trim())}" will be added as new`;
+            }
+            list.innerHTML = `<div class="combo-empty">${emptyMsg}</div>`;
+        } else {
+            list.innerHTML = matches.map(o =>
+                `<div class="combo-option" data-name="${escapeComboHtml(o.name)}">${escapeComboHtml(o.name)}</div>`
+            ).join('');
+        }
+    }
+
+    function closeComboList(field) {
+        document.getElementById(field + 'ComboList')?.classList.remove('open');
+    }
+    function closeAllComboLists() {
+        COMBO_FIELDS.forEach(closeComboList);
+    }
+    function openComboList(field) {
+        closeAllComboLists();
+        renderComboList(field);
+        document.getElementById(field + 'ComboList')?.classList.add('open');
+    }
+
+    function initComboboxes() {
+        COMBO_FIELDS.forEach(field => {
+            const input = document.getElementById(field);
+            const list = document.getElementById(field + 'ComboList');
+            const arrow = document.querySelector(`.combo-arrow[data-for="${field}"]`);
+            if (!input || !list) return;
+
+            input.addEventListener('input', () => {
+                openComboList(field);
+                // Category text changed -- Sub-Category's own suggestion
+                // list depends on it, so refresh that one too (harmless
+                // no-op if it isn't open/visible right now).
+                if (field === 'category') renderComboList('subCategory');
+            });
+            input.addEventListener('focus', () => openComboList(field));
+
+            arrow?.addEventListener('click', () => {
+                const isOpen = list.classList.contains('open');
+                closeAllComboLists();
+                if (!isOpen) { openComboList(field); input.focus(); }
+            });
+
+            // mousedown (not click) so this fires before the input's own
+            // blur handler closes the list out from under the click.
+            list.addEventListener('mousedown', (e) => {
+                const opt = e.target.closest('.combo-option');
+                if (!opt) return;
+                e.preventDefault();
+                input.value = opt.dataset.name;
+                closeComboList(field);
+                if (field === 'category') {
+                    // A different Category was picked -- clear a stale
+                    // Sub-Category that may have belonged to the old one.
+                    document.getElementById('subCategory').value = '';
+                }
+            });
+
+            input.addEventListener('blur', () => {
+                setTimeout(() => closeComboList(field), 150);
+            });
+        });
+
+        document.addEventListener('click', (e) => {
+            if (!e.target.closest('.combo-box')) closeAllComboLists();
+        });
     }
 
     // ============================================
@@ -271,6 +368,35 @@
     // ============================================
     await loadProducts();
     await loadDropdowns();
+    initComboboxes();
+
+    // ============================================
+    // 🔥 ADDED: "Dosage Required" checkbox next to Dosage Form.
+    // Some products (Surgical Instruments, Consumables, Medical Devices)
+    // don't have a real dosage -- forcing a Dosage Form entry for them
+    // was pure friction. Unticking this just greys out / marks the
+    // Dosage Form field optional; the actual true/false is stored on
+    // products.dosage_required and saved with everything else below.
+    // ============================================
+    function updateDosageRequiredUI() {
+        const cb = document.getElementById('dosageRequired');
+        const dosageInput = document.getElementById('dosageForm');
+        const hint = document.getElementById('dosageFormHint');
+        if (!cb || !dosageInput) return;
+        const required = cb.checked;
+        if (!required) {
+            dosageInput.placeholder = 'Not required for this product';
+            dosageInput.style.background = '#f8fafc';
+            if (hint) hint.style.display = 'block';
+        } else {
+            dosageInput.placeholder = 'Search or type new...';
+            dosageInput.style.background = '';
+            if (hint) hint.style.display = 'none';
+        }
+    }
+    window.updateDosageRequiredUI = updateDosageRequiredUI;
+    document.getElementById('dosageRequired')?.addEventListener('change', updateDosageRequiredUI);
+    updateDosageRequiredUI();
 
     const modal = document.getElementById('addProductModal');
     const closeBtn = document.getElementById('closeModalBtn');
@@ -437,6 +563,181 @@
     if (csvModal) {
         csvModal.addEventListener('click', (e) => {
             if (e.target === csvModal) csvModal.style.display = 'none';
+        });
+    }
+
+    // ============================================
+    // 🔥 NEW: EXPORT MASTER (per explicit request) -- pairs with the
+    // "Bulk Update" modal below. Downloads every product's editable
+    // fields (matched back on re-upload by SKU) as a CSV, so it can be
+    // opened in Excel, edited in bulk, and uploaded back via Bulk Update
+    // to apply those edits.
+    // ============================================
+    window.exportProductMaster = async function () {
+        try {
+            const { data: products, error } = await supabaseClient
+                .from('products')
+                .select(`
+                    sku, product_name, tax_percent, conversion_rate, nhima_price_fixed, dosage_required,
+                    generic_names ( name ),
+                    categories ( name ),
+                    sub_categories ( name ),
+                    dosage_forms ( name ),
+                    brands ( name ),
+                    suppliers ( name )
+                `)
+                .order('product_name', { ascending: true });
+
+            if (error) throw error;
+
+            if (!products || products.length === 0) {
+                showToast('No products to export.', 'error');
+                return;
+            }
+
+            const headers = [
+                'sku', 'product_name', 'generic_name', 'category', 'sub_category',
+                'dosage_form', 'dosage_required', 'brand', 'supplier', 'tax_percent', 'conversion_rate',
+                'nhima_price_fixed'
+            ];
+
+            // Real CSV field escaping -- a category/brand/etc. name
+            // containing a comma or quote needs to survive the round trip
+            // back through Bulk Update's parseCSVLine() unchanged.
+            const csvEscape = (val) => {
+                const str = String(val ?? '');
+                return /[",\n]/.test(str) ? `"${str.replace(/"/g, '""')}"` : str;
+            };
+
+            let csv = headers.join(',') + '\n';
+            products.forEach(p => {
+                const row = [
+                    p.sku || '',
+                    p.product_name || '',
+                    p.generic_names?.name || '',
+                    p.categories?.name || '',
+                    p.sub_categories?.name || '',
+                    p.dosage_forms?.name || '',
+                    (p.dosage_required === false ? 'FALSE' : 'TRUE'),
+                    p.brands?.name || '',
+                    p.suppliers?.name || '',
+                    p.tax_percent ?? 0,
+                    p.conversion_rate ?? 1,
+                    p.nhima_price_fixed ?? 0
+                ];
+                csv += row.map(csvEscape).join(',') + '\n';
+            });
+
+            const blob = new Blob(['﻿' + csv], { type: 'text/csv;charset=utf-8;' });
+            const link = document.createElement('a');
+            link.href = URL.createObjectURL(blob);
+            link.download = `product_master_export_${new Date().toISOString().split('T')[0]}.csv`;
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+            URL.revokeObjectURL(link.href);
+
+            showToast(`Exported ${products.length} products. Edit in Excel, then use "Bulk Update" to apply changes.`, 'success');
+        } catch (error) {
+            console.error('Error exporting product master:', error);
+            showToast('Error exporting: ' + error.message, 'error');
+        }
+    };
+
+    const exportMasterBtn = document.getElementById('exportMasterBtn');
+    if (exportMasterBtn) {
+        exportMasterBtn.addEventListener('click', () => window.exportProductMaster());
+    }
+
+    // ============================================
+    // 🔥 NEW: BULK UPDATE MODAL (per explicit request)
+    // ============================================
+    // Deliberately a SEPARATE modal/handler from Import CSV above, not a
+    // shared one -- Import CSV's job is adding new products (and it
+    // reuses an existing product by NAME if one already matches, but
+    // never edits its fields). Bulk Update's job is the opposite: apply
+    // edits to EXISTING products only, matched by SKU, and it never
+    // creates a new product for a blank/unrecognized SKU. Keeping these
+    // as two distinct, clearly-labeled buttons/flows avoids a single
+    // "Import" button silently doing two very different things
+    // depending on what's in the file.
+    const bulkUpdateModal = document.getElementById('bulkUpdateModal');
+    const bulkUpdateBtn = document.getElementById('bulkUpdateBtn');
+    const bulkUpdateCloseBtn = document.getElementById('bulkUpdateCloseModalBtn');
+    const bulkUpdateCancelBtn = document.getElementById('bulkUpdateCancelModalBtn');
+    const bulkUpdateFileInput = document.getElementById('bulkUpdateFileInput');
+    const bulkUpdateSubmitBtn = document.getElementById('bulkUpdateSubmitBtn');
+    const bulkUpdateDropZone = document.getElementById('bulkUpdateDropZone');
+    const bulkUpdateFileNameDisplay = document.getElementById('bulkUpdateFileName');
+    const bulkUpdateProgressContainer = document.getElementById('bulkUpdateProgressContainer');
+    const bulkUpdateProgressBar = document.getElementById('bulkUpdateProgressBar');
+    const bulkUpdateProgressText = document.getElementById('bulkUpdateProgressText');
+    const bulkUpdateStatusContainer = document.getElementById('bulkUpdateStatusContainer');
+    const bulkUpdateStatusText = document.getElementById('bulkUpdateStatusText');
+
+    if (bulkUpdateDropZone && bulkUpdateFileInput) {
+        bulkUpdateDropZone.addEventListener('click', () => bulkUpdateFileInput.click());
+
+        bulkUpdateDropZone.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            bulkUpdateDropZone.style.borderColor = '#2563eb';
+            bulkUpdateDropZone.style.background = '#f8fafc';
+        });
+
+        bulkUpdateDropZone.addEventListener('dragleave', (e) => {
+            e.preventDefault();
+            bulkUpdateDropZone.style.borderColor = '#e2e8f0';
+            bulkUpdateDropZone.style.background = 'transparent';
+        });
+
+        bulkUpdateDropZone.addEventListener('drop', (e) => {
+            e.preventDefault();
+            bulkUpdateDropZone.style.borderColor = '#e2e8f0';
+            bulkUpdateDropZone.style.background = 'transparent';
+
+            if (e.dataTransfer.files.length > 0) {
+                bulkUpdateFileInput.files = e.dataTransfer.files;
+                const file = e.dataTransfer.files[0];
+                bulkUpdateFileNameDisplay.textContent = '📄 ' + file.name;
+                bulkUpdateFileNameDisplay.style.display = 'block';
+                showToast('File selected: ' + file.name, 'success');
+            }
+        });
+
+        bulkUpdateFileInput.addEventListener('change', function () {
+            if (this.files.length > 0) {
+                const file = this.files[0];
+                bulkUpdateFileNameDisplay.textContent = '📄 ' + file.name;
+                bulkUpdateFileNameDisplay.style.display = 'block';
+                showToast('File selected: ' + file.name, 'success');
+            } else {
+                bulkUpdateFileNameDisplay.style.display = 'none';
+            }
+        });
+    }
+
+    if (bulkUpdateBtn) {
+        bulkUpdateBtn.addEventListener('click', () => {
+            if (bulkUpdateModal) {
+                bulkUpdateModal.style.display = 'flex';
+                bulkUpdateFileInput.value = '';
+                bulkUpdateProgressContainer.style.display = 'none';
+                bulkUpdateStatusContainer.style.display = 'none';
+                bulkUpdateProgressBar.style.width = '0%';
+                bulkUpdateProgressText.textContent = '0%';
+                bulkUpdateFileNameDisplay.style.display = 'none';
+            }
+        });
+    }
+    if (bulkUpdateCloseBtn) {
+        bulkUpdateCloseBtn.addEventListener('click', () => { bulkUpdateModal.style.display = 'none'; });
+    }
+    if (bulkUpdateCancelBtn) {
+        bulkUpdateCancelBtn.addEventListener('click', () => { bulkUpdateModal.style.display = 'none'; });
+    }
+    if (bulkUpdateModal) {
+        bulkUpdateModal.addEventListener('click', (e) => {
+            if (e.target === bulkUpdateModal) bulkUpdateModal.style.display = 'none';
         });
     }
 
@@ -753,6 +1054,178 @@ ${errorMessages.length > 5 ? `\n... and ${errorMessages.length - 5} more errors`
     });
 
     // ============================================
+    // 🔥 NEW: PROCESS BULK UPDATE (per explicit request)
+    // ============================================
+    // Reuses parseCSVLine() above and findOrCreate()/findOrCreateSubCategory()
+    // below (same helpers Import CSV and the Add/Edit form's searchable
+    // fields already rely on), but the save step here is always an
+    // UPDATE keyed on an existing product's SKU -- never an insert. A
+    // row whose SKU is blank or doesn't match any product is skipped and
+    // reported as an error rather than silently creating a new product.
+    document.getElementById('bulkUpdateForm')?.addEventListener('submit', async (e) => {
+        e.preventDefault();
+
+        const file = bulkUpdateFileInput.files[0];
+        if (!file) {
+            showToast('Please select a CSV file', 'error');
+            return;
+        }
+
+        try {
+            if (bulkUpdateSubmitBtn) {
+                bulkUpdateSubmitBtn.disabled = true;
+                bulkUpdateSubmitBtn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Updating...';
+            }
+
+            bulkUpdateProgressContainer.style.display = 'block';
+            bulkUpdateProgressBar.style.width = '10%';
+            bulkUpdateProgressText.textContent = '10%';
+            bulkUpdateStatusContainer.style.display = 'none';
+
+            const text = await file.text();
+            const lines = text.split('\n').filter(line => line.trim());
+
+            if (lines.length < 2) {
+                showToast('CSV file is empty or has no data rows', 'error');
+                bulkUpdateProgressContainer.style.display = 'none';
+                return;
+            }
+
+            const headers = parseCSVLine(lines[0]).map(h => h.trim().toLowerCase());
+
+            if (!headers.includes('sku')) {
+                showToast('Missing required column: sku', 'error');
+                bulkUpdateProgressContainer.style.display = 'none';
+                return;
+            }
+
+            const rows = [];
+            for (let i = 1; i < lines.length; i++) {
+                const values = parseCSVLine(lines[i]).map(v => v.trim());
+                const row = {};
+                headers.forEach((header, index) => { row[header] = values[index] ?? ''; });
+                rows.push(row);
+            }
+
+            bulkUpdateProgressBar.style.width = '25%';
+            bulkUpdateProgressText.textContent = '25%';
+
+            let successCount = 0;
+            let errorCount = 0;
+            const errorMessages = [];
+
+            for (let i = 0; i < rows.length; i++) {
+                const r = rows[i];
+                const rowLabel = `Row ${i + 2}`;
+
+                try {
+                    const sku = (r.sku || '').trim();
+                    if (!sku) {
+                        errorCount++;
+                        errorMessages.push(`${rowLabel}: Blank SKU -- skipped (Bulk Update never creates new products)`);
+                        continue;
+                    }
+
+                    const { data: existing, error: findError } = await supabaseClient
+                        .from('products')
+                        .select('id')
+                        .eq('sku', sku)
+                        .maybeSingle();
+
+                    if (findError) throw findError;
+
+                    if (!existing) {
+                        errorCount++;
+                        errorMessages.push(`${rowLabel}: SKU "${sku}" not found -- skipped (Bulk Update never creates new products)`);
+                        continue;
+                    }
+
+                    if (!r.product_name || !r.product_name.trim()) {
+                        errorCount++;
+                        errorMessages.push(`${rowLabel}: Blank product_name -- skipped`);
+                        continue;
+                    }
+
+                    // Resolve each name to an id, auto-creating it if it's
+                    // new/typo'd -- identical to how a freshly-typed name
+                    // in the Add/Edit form's searchable fields resolves.
+                    // A blank cell here clears that field on the product.
+                    const genericNameId = await findOrCreate('generic_names', toProperCaseIfAllCaps(r.generic_name));
+                    const dosageFormId = await findOrCreate('dosage_forms', toProperCaseIfAllCaps(r.dosage_form));
+                    const categoryId = await findOrCreate('categories', toProperCaseIfAllCaps(r.category));
+                    const subCategoryId = await findOrCreateSubCategory(toProperCaseIfAllCaps(r.sub_category), categoryId);
+                    const brandId = await findOrCreate('brands', toProperCaseIfAllCaps(r.brand));
+                    const supplierId = await findOrCreate('suppliers', toProperCaseIfAllCaps(r.supplier));
+
+                    // dosage_required column is a plain TRUE/FALSE cell.
+                    // Blank/missing (e.g. a CSV exported before this
+                    // column existed) is treated as TRUE so nothing
+                    // already requiring dosage silently loses that.
+                    const dosageRequiredRaw = (r.dosage_required || '').trim().toLowerCase();
+                    const dosageRequired = ['false', '0', 'no'].includes(dosageRequiredRaw) ? false : true;
+
+                    const { error: updateError } = await supabaseClient
+                        .from('products')
+                        .update({
+                            product_name: toProperCaseIfAllCaps(r.product_name.trim()),
+                            generic_name_id: genericNameId,
+                            category_id: categoryId,
+                            sub_category_id: subCategoryId,
+                            dosage_form_id: dosageFormId,
+                            dosage_required: dosageRequired,
+                            brand_id: brandId,
+                            supplier_id: supplierId,
+                            tax_percent: parseFloat(r.tax_percent) || 0,
+                            conversion_rate: parseInt(r.conversion_rate) || 1,
+                            nhima_price_fixed: parseFloat(r.nhima_price_fixed) || 0,
+                        })
+                        .eq('id', existing.id);
+
+                    if (updateError) throw updateError;
+
+                    successCount++;
+
+                    const progress = 25 + ((i + 1) / rows.length) * 70;
+                    bulkUpdateProgressBar.style.width = `${progress}%`;
+                    bulkUpdateProgressText.textContent = `${Math.round(progress)}%`;
+
+                } catch (error) {
+                    errorCount++;
+                    errorMessages.push(`${rowLabel}: ${error.message}`);
+                    console.error('Error updating product from Bulk Update row:', error);
+                }
+            }
+
+            bulkUpdateProgressBar.style.width = '100%';
+            bulkUpdateProgressText.textContent = '100%';
+            bulkUpdateStatusContainer.style.display = 'block';
+
+            const statusMessage = `
+✅ Bulk Update Complete!
+Updated: ${successCount} products
+Skipped/Errors: ${errorCount} products
+${errorMessages.length > 0 ? '\n\nDetails:\n' + errorMessages.slice(0, 8).join('\n') : ''}
+${errorMessages.length > 8 ? `\n... and ${errorMessages.length - 8} more` : ''}
+            `;
+            bulkUpdateStatusText.textContent = statusMessage;
+
+            showToast(`Updated ${successCount} products.`, 'success');
+            await loadProducts();
+            await loadDropdowns();
+
+        } catch (error) {
+            console.error('Error processing Bulk Update:', error);
+            showToast('Error processing Bulk Update: ' + error.message, 'error');
+            bulkUpdateProgressContainer.style.display = 'none';
+        } finally {
+            if (bulkUpdateSubmitBtn) {
+                bulkUpdateSubmitBtn.disabled = false;
+                bulkUpdateSubmitBtn.innerHTML = '<i class="fa-solid fa-pen-to-square"></i> Apply Updates';
+            }
+        }
+    });
+
+    // ============================================
     // HELPER FUNCTIONS FOR CSV IMPORT
     // ============================================
 
@@ -908,8 +1381,11 @@ ${errorMessages.length > 5 ? `\n... and ${errorMessages.length - 5} more errors`
         document.getElementById('productName').value = '';
         document.getElementById('genericName').value = '';
         document.getElementById('category').value = '';
-        document.getElementById('subCategory').innerHTML = `<option value="">Select Sub-Category</option>`;
+        document.getElementById('subCategory').value = '';
         document.getElementById('dosageForm').value = '';
+        const dosageRequiredCb = document.getElementById('dosageRequired');
+        if (dosageRequiredCb) { dosageRequiredCb.checked = true; }
+        updateDosageRequiredUI();
         document.getElementById('brand').value = '';
         document.getElementById('supplier').value = '';
         document.getElementById('tax').value = 0;
@@ -1126,40 +1602,22 @@ ${errorMessages.length > 5 ? `\n... and ${errorMessages.length - 5} more errors`
             document.getElementById('nhimaPrice').value = product.nhima_price_fixed || 0;
             
             await loadDropdowns();
-            
+
+            // 🔥 CHANGED: these are now searchable text fields, not
+            // <select> elements -- they need to show the actual NAME, not
+            // the id. loadDropdowns() just refreshed comboCache above, so
+            // look each name up from there (no extra network round-trip,
+            // and no risk of the old cascading query racing this).
             setTimeout(() => {
-                if (product.generic_name_id) {
-                    document.getElementById('genericName').value = product.generic_name_id;
-                }
-                if (product.dosage_form_id) {
-                    document.getElementById('dosageForm').value = product.dosage_form_id;
-                }
-                if (product.brand_id) {
-                    document.getElementById('brand').value = product.brand_id;
-                }
-                if (product.supplier_id) {
-                    document.getElementById('supplier').value = product.supplier_id;
-                }
-                
-                if (product.category_id) {
-                    document.getElementById('category').value = product.category_id;
-                    
-                    const catId = product.category_id;
-                    (async function loadSubs() {
-                        const { data: subs } = await supabaseClient
-                            .from('sub_categories')
-                            .select('id, name')
-                            .eq('category_id', catId);
-                        
-                        const subSelect = document.getElementById('subCategory');
-                        subSelect.innerHTML = `<option value="">Select Sub-Category</option>` + 
-                            (subs || []).map(s => `<option value="${s.id}">${s.name}</option>`).join('');
-                        
-                        if (product.sub_category_id) {
-                            subSelect.value = product.sub_category_id;
-                        }
-                    })();
-                }
+                document.getElementById('genericName').value = comboNameById(comboCache.genericName, product.generic_name_id);
+                document.getElementById('dosageForm').value = comboNameById(comboCache.dosageForm, product.dosage_form_id);
+                document.getElementById('brand').value = comboNameById(comboCache.brand, product.brand_id);
+                document.getElementById('supplier').value = comboNameById(comboCache.supplier, product.supplier_id);
+                document.getElementById('category').value = comboNameById(comboCache.category, product.category_id);
+                document.getElementById('subCategory').value = comboNameById(comboCache.subCategory, product.sub_category_id);
+                const dosageRequiredCb = document.getElementById('dosageRequired');
+                if (dosageRequiredCb) dosageRequiredCb.checked = (product.dosage_required !== false);
+                if (typeof updateDosageRequiredUI === 'function') updateDosageRequiredUI();
             }, 300);
             
         } catch (error) {
@@ -1177,27 +1635,48 @@ ${errorMessages.length > 5 ? `\n... and ${errorMessages.length - 5} more errors`
         submitBtn.innerHTML = `<i class="fa-solid fa-spinner fa-spin"></i> Saving...`;
 
         const isEditing = hiddenId.value !== '';
-        const formData = {
-            sku: document.getElementById('sku').value,
-            // 🔥 ADDED: auto-corrects a pure ALL-CAPS entry to Proper Case
-            // on save -- see toProperCaseIfAllCaps() above.
-            product_name: toProperCaseIfAllCaps(document.getElementById('productName').value),
-            generic_name_id: document.getElementById('genericName').value || null,
-            category_id: document.getElementById('category').value || null,
-            sub_category_id: document.getElementById('subCategory').value || null,
-            dosage_form_id: document.getElementById('dosageForm').value || null,
-            brand_id: document.getElementById('brand').value || null,
-            supplier_id: document.getElementById('supplier').value || null,
-            tax: parseFloat(document.getElementById('tax').value) || 0,
-            conversion_rate: parseInt(document.getElementById('packSize').value) || 1,
-            nhima_price: parseFloat(document.getElementById('nhimaPrice').value) || 0,
-            opening_qty: parseInt(document.getElementById('openingQty').value) || 0,
-            batch_no: document.getElementById('openingBatchNo').value || null,
-            expiry: document.getElementById('openingExpiry').value || null,
-            batch_cost: parseFloat(document.getElementById('openingCostPriceFinal').value) || 0,
-        };
 
         try {
+            // 🔥 CHANGED (per explicit request): Generic Name / Dosage Form
+            // / Category / Sub-Category / Brand / Supplier are searchable
+            // text fields now, not <select> dropdowns with a separate "+"
+            // popup to add a new one. Whatever text is sitting in each
+            // field when Save is clicked gets resolved right here: an
+            // existing match (case-insensitive) is reused, anything new is
+            // created on the spot -- the exact same findOrCreate() /
+            // findOrCreateSubCategory() helpers CSV import has always used
+            // for this same purpose, so typing a brand-new name here
+            // behaves identically to a new name appearing in an import
+            // spreadsheet. An empty field still resolves to null, same as
+            // before.
+            const genericNameId = await findOrCreate('generic_names', toProperCaseIfAllCaps(document.getElementById('genericName').value));
+            const dosageFormId = await findOrCreate('dosage_forms', toProperCaseIfAllCaps(document.getElementById('dosageForm').value));
+            const categoryId = await findOrCreate('categories', toProperCaseIfAllCaps(document.getElementById('category').value));
+            const subCategoryId = await findOrCreateSubCategory(toProperCaseIfAllCaps(document.getElementById('subCategory').value), categoryId);
+            const brandId = await findOrCreate('brands', toProperCaseIfAllCaps(document.getElementById('brand').value));
+            const supplierId = await findOrCreate('suppliers', toProperCaseIfAllCaps(document.getElementById('supplier').value));
+
+            const formData = {
+                sku: document.getElementById('sku').value,
+                // 🔥 ADDED: auto-corrects a pure ALL-CAPS entry to Proper Case
+                // on save -- see toProperCaseIfAllCaps() above.
+                product_name: toProperCaseIfAllCaps(document.getElementById('productName').value),
+                generic_name_id: genericNameId,
+                category_id: categoryId,
+                sub_category_id: subCategoryId,
+                dosage_form_id: dosageFormId,
+                dosage_required: document.getElementById('dosageRequired') ? document.getElementById('dosageRequired').checked : true,
+                brand_id: brandId,
+                supplier_id: supplierId,
+                tax: parseFloat(document.getElementById('tax').value) || 0,
+                conversion_rate: parseInt(document.getElementById('packSize').value) || 1,
+                nhima_price: parseFloat(document.getElementById('nhimaPrice').value) || 0,
+                opening_qty: parseInt(document.getElementById('openingQty').value) || 0,
+                batch_no: document.getElementById('openingBatchNo').value || null,
+                expiry: document.getElementById('openingExpiry').value || null,
+                batch_cost: parseFloat(document.getElementById('openingCostPriceFinal').value) || 0,
+            };
+
             let result;
             if (isEditing) {
                 const { data, error } = await supabaseClient
@@ -1209,6 +1688,7 @@ ${errorMessages.length > 5 ? `\n... and ${errorMessages.length - 5} more errors`
                         category_id: formData.category_id,
                         sub_category_id: formData.sub_category_id,
                         dosage_form_id: formData.dosage_form_id,
+                        dosage_required: formData.dosage_required,
                         brand_id: formData.brand_id,
                         supplier_id: formData.supplier_id,
                         tax_percent: formData.tax,
@@ -1231,6 +1711,7 @@ ${errorMessages.length > 5 ? `\n... and ${errorMessages.length - 5} more errors`
                         category_id: formData.category_id,
                         sub_category_id: formData.sub_category_id,
                         dosage_form_id: formData.dosage_form_id,
+                        dosage_required: formData.dosage_required,
                         brand_id: formData.brand_id,
                         supplier_id: formData.supplier_id,
                         tax_percent: formData.tax,

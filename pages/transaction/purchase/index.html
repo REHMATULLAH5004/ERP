@@ -352,7 +352,7 @@
                                     <th style="width: 60px;">Ordered</th>
                                     <th style="width: 70px;">Received</th>
                                     <th style="width: 70px;">Remaining</th>
-                                    <th style="width: 90px;">Purchase Rate</th>
+                                    <th style="width: 110px;">Purchase Rate<br><span style="font-size: 0.6rem; font-weight: 400; color: #94a3b8;">(per pack)</span></th>
                                     <th style="width: 130px;">Batch Number *</th>
                                     <th style="width: 110px;">Expiry Date *</th>
                                     <th style="width: 60px; text-align: center;">Receive</th>
@@ -416,7 +416,7 @@
                 </div>
             </div>
             <div class="modal-footer">
-                <button class="btn btn-primary" onclick="postGRN()">
+                <button class="btn btn-primary" id="postGrnBtn" onclick="postGRN()">
                     <i class="fa-solid fa-check-circle"></i> Post GRN
                 </button>
                 <button class="btn btn-outline" onclick="printGRN()">

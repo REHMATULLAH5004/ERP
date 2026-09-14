@@ -506,8 +506,13 @@
             if (!error && categories) {
                 const catSelect = document.getElementById('reorderCategory');
                 if (catSelect) {
-                    catSelect.innerHTML = `<option value="">All Categories</option>` + 
+                    catSelect.innerHTML = `<option value="">All Categories</option>` +
                         categories.map(c => `<option value="${c.id}">${c.name}</option>`).join('');
+                    // 🔥 ADDED: .innerHTML above doesn't fire 'change', so the
+                    // injected searchable dropdown's visible text needs an
+                    // explicit nudge to stay in sync (same fix as
+                    // populateSupplierSelects()).
+                    if (typeof catSelect.__syncSearchLabel === 'function') catSelect.__syncSearchLabel();
                 }
             }
         } catch (e) {
@@ -1524,6 +1529,63 @@
         select.__syncSearchLabel = () => { searchInput.value = currentLabel(); };
     }
 
+    // ============================================
+    // 🔥 ADDED: AUTO-INJECTING SEARCHABLE DROPDOWN
+    // ============================================
+    // initSearchableSelect() above needs a matching search <input> and
+    // panel <div> already sitting in the HTML (that's how poSupplier /
+    // supplierFilter / reorderSupplier are wired, just above). Most
+    // other dropdowns in this module don't have that companion markup
+    // yet, and this file has no matching index.html to add it to.
+    // makeSelectSearchable() builds that companion input itself at
+    // runtime -- inserted right next to the real <select>, copying its
+    // classes/size so it drops in without needing any HTML change --
+    // then wires it up with the exact same initSearchableSelect()
+    // logic (arrow keys navigate, Enter picks, Tab picks and moves on,
+    // Escape closes, mousedown-not-click on results) used everywhere
+    // else, including in Retail POS.
+    //
+    // Only worth doing for a dropdown backed by a real, growing list
+    // (Category, Generic, etc.) -- a 2-3 option toggle like Currency or
+    // Payment Type already gets working arrow-key/Tab navigation for
+    // free from the native <select>, so turning those into a type-to-
+    // search box would just make a two-click choice slower. Call this
+    // for any additional long-list dropdown that needs it.
+    function makeSelectSearchable(selectId, { matchMode, getLabel, normalize } = {}) {
+        const select = document.getElementById(selectId);
+        if (!select || select.dataset.searchableInjected === '1') return;
+
+        const searchInputId = `${selectId}__searchInput`;
+        const panelId = `${selectId}__searchPanel`;
+
+        const input = document.createElement('input');
+        input.type = 'text';
+        input.id = searchInputId;
+        input.className = select.className;
+        input.autocomplete = 'off';
+        input.placeholder = select.options.length ? select.options[0].textContent : 'Search...';
+
+        const computed = window.getComputedStyle(select);
+        input.style.cssText = select.getAttribute('style') || '';
+        input.style.width = computed.width;
+
+        select.insertAdjacentElement('afterend', input);
+
+        // Keep the real <select> in the DOM (everything that reads its
+        // .value or listens for its 'change' event keeps working
+        // unchanged) but hand its visible spot in the layout to the new
+        // search input.
+        select.style.position = 'absolute';
+        select.style.opacity = '0';
+        select.style.width = '1px';
+        select.style.height = '1px';
+        select.style.pointerEvents = 'none';
+        select.tabIndex = -1;
+        select.dataset.searchableInjected = '1';
+
+        initSearchableSelect({ searchInputId, selectId, panelId, matchMode, getLabel, normalize });
+    }
+
     function populateSupplierSelects() {
         const selects = ['poSupplier', 'supplierFilter', 'reorderSupplier'];
         const suppliers = state.suppliers || [];
@@ -1801,6 +1863,18 @@
                         style="width: 100px; padding: 4px 8px;"
                         onchange="updatePOLine(${index}, 'purchase_rate', this.value)" step="0.01" min="0">
                     <span style="font-size: 0.65rem; color: #94a3b8;">(per pack)</span>
+                    ${(() => {
+                        // 🔥 ADDED: same live per-unit cost preview as the GRN screen,
+                        // shown as early as the PO stage so a mistyped rate can be
+                        // caught before it's ever received into stock.
+                        const packSize = line.pack_size || 1;
+                        const ratePerPack = line.purchase_rate || 0;
+                        if (!ratePerPack) return '';
+                        const exchangeRate = parseFloat(document.getElementById('poExchangeRate')?.value) || 1;
+                        const ratePerUnit = packSize > 0 ? ratePerPack / packSize : ratePerPack;
+                        const costPriceZmw = currency === 'USD' ? ratePerUnit * exchangeRate : ratePerUnit;
+                        return `<br><span style="font-size: 0.65rem; color: #64748b;">≈ ZK ${formatNumber(costPriceZmw)} / unit${packSize > 1 ? ` (pack of ${packSize})` : ''}</span>`;
+                    })()}
                     ${line.last_purchase
                         ? `<br><span style="font-size: 0.65rem; color: #059669;">Last: ${line.last_purchase.currency === 'ZMW' ? 'ZK' : '$'}${Number(line.last_purchase.rate).toFixed(2)} &middot; ${formatDate(line.last_purchase.date)}</span>`
                         : ''}
@@ -1887,11 +1961,27 @@
                     ${line.cancelled_quantity > 0 ? `<span style="font-size: 0.6rem; color: #dc2626; display: block;">${line.cancelled_quantity} cancelled</span>` : ''}
                 </td>
                 <td>
-                    <input type="number" class="form-control" value="${line.purchase_rate || 0}" 
-                        style="width: 100px; padding: 4px 8px;" 
+                    <input type="number" class="form-control" value="${line.purchase_rate || 0}"
+                        style="width: 100px; padding: 4px 8px;"
                         onchange="updateGRNLine(${index}, 'purchase_rate', this.value)"
                         ${readonly ? 'disabled' : ''}
                         step="0.01" min="0">
+                    ${(() => {
+                        // 🔥 ADDED: live per-UNIT cost preview, computed with the exact
+                        // same formula updateInventory() uses to set batches.cost_price
+                        // (rate / pack size, then converted to ZMW). Whoever is typing
+                        // the purchase rate sees immediately what that implies per
+                        // tablet/capsule/etc, so a mistyped rate (extra digit, wrong
+                        // decimal place, or entering a per-unit price into this
+                        // per-pack field) is obvious before the GRN is posted, instead
+                        // of silently becoming a wrong batches.cost_price later.
+                        const packSize = line.pack_size || 1;
+                        const ratePerPack = line.purchase_rate || 0;
+                        const ratePerUnit = packSize > 0 ? ratePerPack / packSize : ratePerPack;
+                        const costPriceZmw = currency === 'USD' ? ratePerUnit * (state.currentGRNExchangeRate || 1) : ratePerUnit;
+                        if (!ratePerPack) return '';
+                        return `<div style="font-size: 0.65rem; color: #64748b; margin-top: 2px;">≈ ZK ${formatNumber(costPriceZmw)} / unit${packSize > 1 ? ` (pack of ${packSize})` : ''}</div>`;
+                    })()}
                 </td>
                 <td>
                     <input type="text" class="form-control" list="batchList-${index}" value="${line.batch_number || ''}" 
@@ -3007,7 +3097,12 @@
         const currencyDisplay = document.getElementById('grnCurrencyDisplay');
         const exchangeRateDisplay = document.getElementById('grnExchangeRateDisplay');
         const remainingInfo = document.getElementById('grnRemainingInfo');
-        
+        // 🔥 ADDED: default GRN payment type to Credit. Most stock is
+        // received on supplier credit, not paid cash on the spot -- Cash
+        // is still one click away in the dropdown, but the common case no
+        // longer needs to be re-selected on every single GRN.
+        const paymentType = document.getElementById('grnPaymentType');
+
         if (poRef) poRef.textContent = order.po_number || 'N/A';
         if (supplier) supplier.textContent = order.suppliers?.name || 'Unknown';
         if (entryDate) entryDate.value = new Date().toISOString().split('T')[0];
@@ -3017,7 +3112,8 @@
         if (insurance) insurance.value = 0;
         if (notes) notes.value = '';
         if (invoiceTotal) invoiceTotal.value = '';
-        
+        if (paymentType) paymentType.value = 'Credit';
+
         if (currencyDisplay) {
             currencyDisplay.textContent = state.currentGRNCurrency;
         }
@@ -3832,6 +3928,45 @@
     // ============================================
 
     async function postGRN() {
+        // 🔥 FIX: no click-guard here at all before -- clicking "Post GRN"
+        // more than once (e.g. a slow connection making the first click
+        // look like nothing happened) fired this whole function again
+        // before the first run finished. Since createGRN() inserts the
+        // goods_receipt_notes header before doing anything else, two
+        // overlapping clicks could each insert their OWN header row for
+        // the same delivery; only one of those runs (whichever actually
+        // reaches createGRNLines()/the rest of the flow without erroring)
+        // ends up complete, leaving the other(s) as empty, orphaned GRN
+        // records with a total but no line items, no accounting entry,
+        // and no supplier payable -- exactly what GRN-2026-00022 and
+        // GRN-2026-00023 turned out to be (duplicates of GRN-2026-00024,
+        // since deleted). Those orphans also silently corrupted the Daily
+        // Report: with no payable to point to, its cash-vs-credit guess
+        // (see pages/report/daily-report/index.js's computeTodayPurchaseBreakdown/
+        // computeCashBreakdown) read them as CASH purchases that never
+        // actually happened. Disabling the button for the duration of
+        // this whole function -- including every validation check below,
+        // via the try/finally -- makes a second click while the first is
+        // still running a no-op instead of a second full run.
+        const postBtn = document.getElementById('postGrnBtn');
+        if (postBtn?.disabled) return;
+        if (postBtn) {
+            postBtn.disabled = true;
+            postBtn.dataset.originalHtml = postBtn.innerHTML;
+            postBtn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Posting...';
+        }
+
+        try {
+            await postGRNInner();
+        } finally {
+            if (postBtn) {
+                postBtn.disabled = false;
+                postBtn.innerHTML = postBtn.dataset.originalHtml || '<i class="fa-solid fa-check-circle"></i> Post GRN';
+            }
+        }
+    }
+
+    async function postGRNInner() {
         const orderId = state.currentGRNOrderId;
         if (!orderId) {
             showToast('No order selected', 'error');
@@ -3839,7 +3974,7 @@
         }
 
         const hasReceived = state.grnLines.some(line => (line.received_quantity || 0) > 0);
-        
+
         if (!hasReceived) {
             showToast('Please receive at least one item', 'error');
             return;
@@ -4940,6 +5075,15 @@
     initSearchableSelect({ searchInputId: 'poSupplierSearch', selectId: 'poSupplier', panelId: 'poSupplierSearchPanel', matchMode: 'contains', getLabel: opt => opt.textContent });
     initSearchableSelect({ searchInputId: 'supplierFilterSearch', selectId: 'supplierFilter', panelId: 'supplierFilterSearchPanel', matchMode: 'contains', getLabel: opt => opt.textContent });
     initSearchableSelect({ searchInputId: 'reorderSupplierSearch', selectId: 'reorderSupplier', panelId: 'reorderSupplierSearchPanel', matchMode: 'contains', getLabel: opt => opt.textContent });
+
+    // 🔥 ADDED: same searchable-dropdown treatment for the Reorder
+    // Report's Category filter -- this one has no matching search
+    // <input> in the HTML, so it uses the auto-injecting version
+    // instead (builds its own search box next to the real <select>).
+    // Category options load asynchronously (populateReorderFilters());
+    // wiring it here is safe either way since initSearchableSelect()
+    // re-reads the live <option> list every time the box is opened.
+    makeSelectSearchable('reorderCategory', { matchMode: 'contains', getLabel: opt => opt.textContent });
 
     console.log("✅ Purchase module initialized successfully!");
 })();

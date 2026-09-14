@@ -505,7 +505,8 @@
             currentStatementData: null,
             currentReceiptData: null,
             currentRetailCustomerId: null,
-            currentWholesaleCustomerId: null
+            currentWholesaleCustomerId: null,
+            nhimaReconcile: null
         };
     
         // ============================================
@@ -746,7 +747,33 @@
             // authoritative flag (set at save time in Retail POS) so this
             // excludes it explicitly rather than relying on `status` text
             // matching alone.
+            // 🔥 FIX: THE "UNKNOWN" GHOST RECEIVABLE (found 2026-09-11) --
+            // this filter only ever checked client_sub_type, never
+            // client_type. WHOLESALE sales use the exact same sub-type
+            // vocabulary (REGULAR/ONLINE/STAFF) as Retail, so a WHOLESALE
+            // credit sale (confirmed: GWH-2026-931995-1786, K99,000 to
+            // Livingstone University Teaching Hospital, sub_type REGULAR)
+            // was leaking into this RETAIL calculation too -- double
+            // counted, once correctly under Wholesale Receivables and once
+            // wrongly here. Its wholesale customer_data uses `customer_name`
+            // (not `full_name`) and only exists under `_source ===
+            // 'wholesale'`, so the lookup below always failed and fell back
+            // to the generic { _displayName: 'Unknown', _customerId: null }
+            // placeholder -- explaining the mystery "Unknown" row. Worse,
+            // that placeholder's `_customerId: null` then coincidentally
+            // matched every OTHER unrelated receipt in the system that also
+            // has a null customer_id (real wholesale receipts always do,
+            // since they're linked via wholesale_customer_id instead) --
+            // confirmed via the data: 2 such receipts totalling
+            // K30,758.54 were being silently subtracted from this phantom
+            // entry, landing on exactly the K68,241.46 shown on screen
+            // (K99,000 - K30,758.54). Restricting to client_type === 'RETAIL'
+            // removes the wholesale sale from this list entirely, and the
+            // null-matching guard a few lines down (see 🔥 FIX there) stops
+            // any future unmatched customer from silently absorbing
+            // unrelated receipts the same way.
             const retailSales = state.sales.filter(sale =>
+                sale.client_type === 'RETAIL' &&
                 retailSubTypes.includes(sale.client_sub_type) &&
                 sale.payment?.type === 'Credit' &&
                 sale.status !== 'Paid' && sale.status !== 'Rejected' &&
@@ -819,7 +846,19 @@
                 });
 
             Object.values(customerMap).forEach(entry => {
-                const receipts = state.receipts.filter(r => r.customer_id === entry.customer._customerId);
+                // 🔥 FIX: `r.customer_id === entry.customer._customerId` used
+                // to run even when _customerId was null (an unmatched
+                // customer) -- that silently matched every OTHER receipt in
+                // the whole system that also happens to have a null
+                // customer_id (every wholesale receipt qualifies, since
+                // those are linked via wholesale_customer_id instead). See
+                // the retailSales fix above for the real-data case this
+                // caused. An unmatched customer has no reliable id to match
+                // receipts against at all, so it gets none rather than a
+                // random unrelated set.
+                const receipts = entry.customer._customerId
+                    ? state.receipts.filter(r => r.customer_id === entry.customer._customerId)
+                    : [];
                 receipts.forEach(r => entry.totalReceived += r.amount || 0);
                 entry.receipts = receipts;
                 entry.receivable = entry.opening_balance_zmw + entry.totalSales - entry.totalReceived;
@@ -898,7 +937,13 @@
                 });
 
             Object.values(customerMap).forEach(entry => {
-                const receipts = state.receipts.filter(r => r.wholesale_customer_id === entry.customer._customerId);
+                // 🔥 FIX: same null-matching guard as calculateRetailReceivables()
+                // above -- an unmatched customer's null _customerId must not
+                // be allowed to match every OTHER receipt that also has a
+                // null wholesale_customer_id (e.g. retail/NHIMA receipts).
+                const receipts = entry.customer._customerId
+                    ? state.receipts.filter(r => r.wholesale_customer_id === entry.customer._customerId)
+                    : [];
                 receipts.forEach(r => entry.totalReceived += r.amount || 0);
                 entry.receipts = receipts;
                 entry.receivable = entry.opening_balance_zmw + entry.totalSales - entry.totalReceived;
@@ -2692,6 +2737,364 @@
             safeToast('Template downloaded!', 'success');
         };
     
+        // ============================================
+        // NHIMA REPORT IMPORT & RECONCILIATION
+        // ============================================
+        // Ports the same logic used to build the one-off manual reconciliation
+        // workbook (suffix-key claim matching against NHIMA's own weekly claim
+        // report export) directly into the module, so this can be run
+        // self-service any week without asking for it each time.
+
+        function nhimaSuffixKey(cn) {
+            const raw = String(cn == null ? '' : cn).trim();
+            const parts = raw.split(/[-\s]+/).filter(Boolean);
+            if (parts.length >= 2) return parts.slice(-2).join('-').toUpperCase();
+            return raw.toUpperCase();
+        }
+
+        function loadScriptOnce(src) {
+            return new Promise((resolve, reject) => {
+                if (window.XLSX) { resolve(); return; }
+                const existing = document.querySelector(`script[src="${src}"]`);
+                if (existing) {
+                    existing.addEventListener('load', () => resolve());
+                    existing.addEventListener('error', () => reject(new Error('Failed to load ' + src)));
+                    return;
+                }
+                const s = document.createElement('script');
+                s.src = src;
+                s.onload = () => resolve();
+                s.onerror = () => reject(new Error('Failed to load ' + src));
+                document.head.appendChild(s);
+            });
+        }
+
+        async function ensureXLSXLibrary() {
+            if (window.XLSX) return window.XLSX;
+            await loadScriptOnce('https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js');
+            if (!window.XLSX) throw new Error('XLSX library failed to load');
+            return window.XLSX;
+        }
+
+        window.openNhimaReconcileModal = function() {
+            const modal = document.getElementById('nhimaReconcileModal');
+            if (!modal) return;
+            const resultsEl = document.getElementById('nhimaReconcileResults');
+            const statusEl = document.getElementById('nhimaReconcileStatus');
+            if (resultsEl) resultsEl.style.display = 'none';
+            if (statusEl) statusEl.style.display = 'none';
+            const fileInput = document.getElementById('nhimaReconcileFile');
+            if (fileInput) fileInput.value = '';
+            const fromEl = document.getElementById('nhimaReconcileFromDate');
+            const toEl = document.getElementById('nhimaReconcileToDate');
+            if (fromEl) fromEl.value = '';
+            if (toEl) toEl.value = '';
+            modal.classList.add('show');
+        };
+
+        function parseNhimaReportRows(rows) {
+            // Row 0: "ZM580826 GRIFFINS MEDICALS LIMITED" (title)
+            // Row 1: "Weekly claim report"
+            // Row 2: date range, e.g. "2026-08-30 - 2026-09-05"
+            // Row 3: the real header row
+            // Rows 4+: one row per claim LINE ITEM (CONS/SERV)
+            const metaLine = (rows[2] || []).map(v => v == null ? '' : String(v)).join(' ');
+            let startDate = null, endDate = null;
+            const dateMatch = metaLine.match(/(\d{4}-\d{2}-\d{2})\s*-\s*(\d{4}-\d{2}-\d{2})/);
+            if (dateMatch) { startDate = dateMatch[1]; endDate = dateMatch[2]; }
+
+            const header = rows[3] || [];
+            const idx = {};
+            header.forEach((h, i) => { if (h) idx[String(h).trim()] = i; });
+
+            const dataRows = (rows.slice(4) || []).filter(r => r && r.some(v => v !== null && v !== undefined && v !== ''));
+
+            const nhimaClaims = {};
+            dataRows.forEach(r => {
+                const cn = idx['Claim Number'] !== undefined ? r[idx['Claim Number']] : null;
+                if (!cn) return;
+                const key = nhimaSuffixKey(cn);
+                if (!nhimaClaims[key]) {
+                    nhimaClaims[key] = {
+                        claimNumber: cn,
+                        memberNumber: idx['Member Number'] !== undefined ? r[idx['Member Number']] : null,
+                        treatmentDate: idx['Treatment Date'] !== undefined ? String(r[idx['Treatment Date']] || '').slice(0, 10) : null,
+                        grossTotal: 0
+                    };
+                }
+                const gross = idx['Gross Amount'] !== undefined ? (Number(r[idx['Gross Amount']]) || 0) : 0;
+                nhimaClaims[key].grossTotal += gross;
+            });
+
+            return { nhimaClaims, startDate, endDate };
+        }
+
+        function buildOurNhimaClaims(startDate, endDate) {
+            const inRange = (dateStr) => {
+                if (!startDate || !endDate) return true;
+                const d = String(dateStr || '').slice(0, 10);
+                return d >= startDate && d <= endDate;
+            };
+            const ourSalesInWeek = (state.sales || []).filter(sale =>
+                sale.client_sub_type === 'NHIMA' &&
+                sale.claim_number && String(sale.claim_number).trim() !== '' &&
+                !sale.is_quotation &&
+                inRange(sale.created_at)
+            );
+            const ourClaims = {};
+            ourSalesInWeek.forEach(sale => {
+                const key = nhimaSuffixKey(sale.claim_number);
+                ourClaims[key] = {
+                    claimNumber: sale.claim_number,
+                    saleId: sale.id,
+                    memberNumber: sale.customer_data?.nhima_number || 'N/A',
+                    customerName: sale.customer_data?.full_name || 'Unknown',
+                    saleDate: String(sale.created_at || '').slice(0, 10),
+                    grandTotal: sale.grand_total || 0
+                };
+            });
+            return { ourClaims, ourSalesInWeek };
+        }
+
+        function renderNhimaReconcileResults(result) {
+            const resultsEl = document.getElementById('nhimaReconcileResults');
+            if (!resultsEl) return;
+
+            const metaEl = document.getElementById('nhimaReconcileMeta');
+            if (metaEl) {
+                if (result.startDate && result.endDate) {
+                    const modeLabel = result.isManualRange ? 'Custom period (manually set)' : 'Period (auto-detected from file)';
+                    let html = `<strong>${modeLabel}:</strong> ${result.startDate} to ${result.endDate}`;
+                    if (result.isManualRange && result.detectedStartDate && result.detectedEndDate) {
+                        html += ` <span style="color:#94a3b8;">(the file itself states ${result.detectedStartDate} to ${result.detectedEndDate})</span>`;
+                    } else if (result.isManualRange) {
+                        html += ` <span style="color:#94a3b8;">(the file didn't state a period)</span>`;
+                    }
+                    metaEl.innerHTML = html;
+                } else {
+                    metaEl.innerHTML = `<strong>Period:</strong> could not be read from the file and no From/To dates were set -- compared against all NHIMA sales currently in our system.`;
+                }
+            }
+
+            const matchedCountEl = document.getElementById('reconMatchedCount');
+            const onlyNhimaCountEl = document.getElementById('reconOnlyNhimaCount');
+            const onlyOursCountEl = document.getElementById('reconOnlyOursCount');
+            const mismatchCountEl = document.getElementById('reconMismatchCount');
+            if (matchedCountEl) matchedCountEl.textContent = result.matchedKeys.length;
+            if (onlyNhimaCountEl) onlyNhimaCountEl.textContent = result.onlyNhimaList.length;
+            if (onlyOursCountEl) onlyOursCountEl.textContent = result.onlyOursList.length;
+            if (mismatchCountEl) mismatchCountEl.textContent = result.mismatches.length;
+
+            const onlyNhimaBody = document.getElementById('reconOnlyNhimaBody');
+            if (onlyNhimaBody) {
+                onlyNhimaBody.innerHTML = result.onlyNhimaList.length ? result.onlyNhimaList.map(c => `
+                    <tr>
+                        <td>${c.claimNumber || '-'}</td>
+                        <td>${c.memberNumber || '-'}</td>
+                        <td>${c.treatmentDate || '-'}</td>
+                        <td style="text-align:right;">${formatNumber(c.grossTotal)}</td>
+                    </tr>
+                `).join('') : '<tr><td colspan="4" style="text-align:center;color:#94a3b8;padding:16px;">None -- every claim on the report was found in our system</td></tr>';
+            }
+
+            const onlyOursBody = document.getElementById('reconOnlyOursBody');
+            if (onlyOursBody) {
+                onlyOursBody.innerHTML = result.onlyOursList.length ? result.onlyOursList.map(s => `
+                    <tr>
+                        <td>${s.claimNumber || '-'}</td>
+                        <td>${s.memberNumber || '-'}</td>
+                        <td>${s.saleDate || '-'}</td>
+                        <td>${s.customerName || '-'}</td>
+                        <td style="text-align:right;">${formatNumber(s.grandTotal)}</td>
+                    </tr>
+                `).join('') : '<tr><td colspan="5" style="text-align:center;color:#94a3b8;padding:16px;">None -- every one of our claims for this week was found on the report</td></tr>';
+            }
+
+            const mismatchBody = document.getElementById('reconMismatchBody');
+            if (mismatchBody) {
+                mismatchBody.innerHTML = result.mismatches.length ? result.mismatches.map(m => `
+                    <tr>
+                        <td>${m.claimNumberNhima || '-'}</td>
+                        <td>${m.claimNumberOurs || '-'}</td>
+                        <td>${m.customerName || '-'}</td>
+                        <td style="text-align:right;">${formatNumber(m.nhimaGross)}</td>
+                        <td style="text-align:right;">${formatNumber(m.ourTotal)}</td>
+                        <td style="text-align:right;color:${m.difference < 0 ? '#dc2626' : '#0f172a'};">${formatNumber(m.difference)}</td>
+                    </tr>
+                `).join('') : '<tr><td colspan="6" style="text-align:center;color:#94a3b8;padding:16px;">No amount differences over ZK0.50</td></tr>';
+            }
+
+            resultsEl.style.display = 'block';
+        }
+
+        window.runNhimaReconciliation = async function() {
+            const fileInput = document.getElementById('nhimaReconcileFile');
+            const file = fileInput && fileInput.files && fileInput.files[0];
+            if (!file) { safeToast('Please choose the NHIMA report file first', 'warning'); return; }
+
+            const statusEl = document.getElementById('nhimaReconcileStatus');
+            const resultsEl = document.getElementById('nhimaReconcileResults');
+            const runBtn = document.getElementById('runNhimaReconcileBtn');
+            if (statusEl) statusEl.style.display = 'block';
+            if (resultsEl) resultsEl.style.display = 'none';
+            if (runBtn) runBtn.disabled = true;
+
+            try {
+                await ensureXLSXLibrary();
+
+                const arrayBuffer = await file.arrayBuffer();
+                const wb = XLSX.read(arrayBuffer, { type: 'array' });
+                const sheet = wb.Sheets[wb.SheetNames[0]];
+                const rows = XLSX.utils.sheet_to_json(sheet, { header: 1, raw: true, defval: null });
+
+                const { nhimaClaims, startDate: detectedStartDate, endDate: detectedEndDate } = parseNhimaReportRows(rows);
+
+                // Manual From/To override -- lets the user compare against any custom
+                // period (weekly, monthly, or otherwise) instead of relying on the
+                // date range auto-detected from the file's own metadata row.
+                const fromEl = document.getElementById('nhimaReconcileFromDate');
+                const toEl = document.getElementById('nhimaReconcileToDate');
+                const manualFrom = fromEl && fromEl.value ? fromEl.value : null;
+                const manualTo = toEl && toEl.value ? toEl.value : null;
+                const isManualRange = !!(manualFrom && manualTo);
+
+                const startDate = isManualRange ? manualFrom : detectedStartDate;
+                const endDate = isManualRange ? manualTo : detectedEndDate;
+
+                const { ourClaims, ourSalesInWeek } = buildOurNhimaClaims(startDate, endDate);
+
+                const nhimaKeys = Object.keys(nhimaClaims);
+                const ourKeys = Object.keys(ourClaims);
+                const nhimaKeySet = new Set(nhimaKeys);
+                const ourKeySet = new Set(ourKeys);
+
+                const matchedKeys = nhimaKeys.filter(k => ourKeySet.has(k));
+                const onlyNhimaKeys = nhimaKeys.filter(k => !ourKeySet.has(k));
+                const onlyOursKeys = ourKeys.filter(k => !nhimaKeySet.has(k));
+
+                const mismatches = [];
+                matchedKeys.forEach(k => {
+                    const nc = nhimaClaims[k], oc = ourClaims[k];
+                    const diff = Math.round((nc.grossTotal - Number(oc.grandTotal)) * 100) / 100;
+                    if (Math.abs(diff) > 0.5) {
+                        mismatches.push({
+                            claimNumberNhima: nc.claimNumber,
+                            claimNumberOurs: oc.claimNumber,
+                            memberNumber: nc.memberNumber,
+                            customerName: oc.customerName,
+                            nhimaGross: Math.round(nc.grossTotal * 100) / 100,
+                            ourTotal: Math.round(Number(oc.grandTotal) * 100) / 100,
+                            difference: diff
+                        });
+                    }
+                });
+                mismatches.sort((a, b) => Math.abs(b.difference) - Math.abs(a.difference));
+
+                const onlyNhimaList = onlyNhimaKeys.map(k => nhimaClaims[k])
+                    .sort((a, b) => (a.treatmentDate || '').localeCompare(b.treatmentDate || ''));
+                const onlyOursList = onlyOursKeys.map(k => ourClaims[k])
+                    .sort((a, b) => (a.saleDate || '').localeCompare(b.saleDate || ''));
+
+                state.nhimaReconcile = {
+                    startDate, endDate, isManualRange,
+                    detectedStartDate, detectedEndDate,
+                    nhimaClaims, ourClaims, ourSalesInWeek,
+                    matchedKeys, onlyNhimaList, onlyOursList, mismatches
+                };
+
+                renderNhimaReconcileResults(state.nhimaReconcile);
+                safeToast('Comparison complete', 'success');
+            } catch (err) {
+                console.error('NHIMA reconciliation failed:', err);
+                safeToast('Could not process that file: ' + (err.message || err), 'error');
+            } finally {
+                if (statusEl) statusEl.style.display = 'none';
+                if (runBtn) runBtn.disabled = false;
+            }
+        };
+
+        window.downloadNhimaReconciliationReport = async function() {
+            const result = state.nhimaReconcile;
+            if (!result) { safeToast('Run a comparison first', 'warning'); return; }
+
+            try {
+                await ensureXLSXLibrary();
+
+                const wb = XLSX.utils.book_new();
+                const label = (result.startDate && result.endDate) ? `${result.startDate}_to_${result.endDate}` : 'report';
+
+                // Sheet 1: Our NHIMA sales, line-item detail (mirrors NHIMA's own report structure)
+                const lineHeaders = ['Claim Number (our system)', 'Sale ID', 'Member Number', 'Customer Name', 'Sale Date',
+                    'Product/Description', 'Batch Number', 'Qty', 'Rate', 'Line Total', 'Status'];
+                const lineRows = [lineHeaders];
+                (result.ourSalesInWeek || []).forEach(sale => {
+                    const items = Array.isArray(sale.items) ? sale.items : [];
+                    if (items.length === 0) {
+                        lineRows.push([sale.claim_number, sale.id, sale.customer_data?.nhima_number || 'N/A',
+                            sale.customer_data?.full_name || 'Unknown', String(sale.created_at || '').slice(0, 10),
+                            '', '', '', '', sale.grand_total || 0, sale.status || '']);
+                    } else {
+                        items.forEach(item => {
+                            lineRows.push([
+                                sale.claim_number, sale.id, sale.customer_data?.nhima_number || 'N/A',
+                                sale.customer_data?.full_name || 'Unknown', String(sale.created_at || '').slice(0, 10),
+                                item.product_name || '', item.batch_number || '', item.qty || 0,
+                                item.rate || 0, item.total || 0, sale.status || ''
+                            ]);
+                        });
+                    }
+                });
+                const ws1 = XLSX.utils.aoa_to_sheet(lineRows);
+                XLSX.utils.book_append_sheet(wb, ws1, 'Our NHIMA Report');
+
+                // Sheet 2: Reconciliation Summary
+                const totalNhimaGross = Object.values(result.nhimaClaims).reduce((sum, c) => sum + c.grossTotal, 0);
+                const totalOurs = (result.ourSalesInWeek || []).reduce((sum, s) => sum + (Number(s.grand_total) || 0), 0);
+                const summaryRows = [
+                    ['NHIMA Weekly Claim Report vs Our System -- Reconciliation'],
+                    [(result.startDate && result.endDate) ? `Report week: ${result.startDate} to ${result.endDate}` : 'Report week: could not be read from the file'],
+                    [],
+                    ['Metric', 'Value'],
+                    ['Unique claims on NHIMA\'s report', Object.keys(result.nhimaClaims).length],
+                    ['Unique claims recorded in our system (this week)', Object.keys(result.ourClaims).length],
+                    ['Matched claims (same claim number, allowing for leading-code differences)', result.matchedKeys.length],
+                    ['On NHIMA\'s report but not found in our system', result.onlyNhimaList.length],
+                    ['In our system but not matched to NHIMA\'s report', result.onlyOursList.length],
+                    ['Matched claims where the amount differs by more than K0.50', result.mismatches.length],
+                    ['Total Gross on NHIMA\'s report (K)', Math.round(totalNhimaGross * 100) / 100],
+                    ['Total of our NHIMA sales for the week (K)', Math.round(totalOurs * 100) / 100],
+                    [],
+                    ['Note', 'If "In our system only" is high, check whether our claim_number field holds a short numeric portal reference instead of NHIMA\'s final claim number -- cross-check by member number, date and amount before assuming a claim is genuinely missing.']
+                ];
+                const ws2 = XLSX.utils.aoa_to_sheet(summaryRows);
+                XLSX.utils.book_append_sheet(wb, ws2, 'Reconciliation Summary');
+
+                // Sheet 3: On NHIMA report only
+                const s3Rows = [['Claim Number (NHIMA)', 'Member Number', 'Treatment Date', 'Gross Amount (K)']];
+                result.onlyNhimaList.forEach(c => s3Rows.push([c.claimNumber, c.memberNumber, c.treatmentDate, Math.round(c.grossTotal * 100) / 100]));
+                const ws3 = XLSX.utils.aoa_to_sheet(s3Rows);
+                XLSX.utils.book_append_sheet(wb, ws3, 'On NHIMA report only');
+
+                // Sheet 4: In our system only
+                const s4Rows = [['Claim Number (ours)', 'Sale ID', 'Member Number', 'Sale Date', 'Amount (K)', 'Customer Name']];
+                result.onlyOursList.forEach(s => s4Rows.push([s.claimNumber, s.saleId, s.memberNumber, s.saleDate, Math.round(Number(s.grandTotal) * 100) / 100, s.customerName]));
+                const ws4 = XLSX.utils.aoa_to_sheet(s4Rows);
+                XLSX.utils.book_append_sheet(wb, ws4, 'In our system only');
+
+                // Sheet 5: Amount Mismatches
+                const s5Rows = [['Claim Number (NHIMA)', 'Claim Number (ours)', 'Member Number', 'Customer Name', 'NHIMA Gross (K)', 'Our Total (K)', 'Difference (K)']];
+                result.mismatches.forEach(m => s5Rows.push([m.claimNumberNhima, m.claimNumberOurs, m.memberNumber, m.customerName, m.nhimaGross, m.ourTotal, m.difference]));
+                const ws5 = XLSX.utils.aoa_to_sheet(s5Rows);
+                XLSX.utils.book_append_sheet(wb, ws5, 'Amount Mismatches');
+
+                XLSX.writeFile(wb, `NHIMA_Reconciliation_${label}.xlsx`);
+                safeToast('Report downloaded', 'success');
+            } catch (err) {
+                console.error('Failed to build reconciliation report:', err);
+                safeToast('Could not build the report: ' + (err.message || err), 'error');
+            }
+        };
+
         window.refreshReceivableList = async function() {
             await loadCustomers();
             await loadReceipts();

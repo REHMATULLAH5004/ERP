@@ -2648,6 +2648,125 @@
     }, true);
 
     // ============================================
+    // 🔥 ADDED: BUNDLE/KIT PRODUCTS (e.g. "Maternity Pack")
+    // ============================================
+    // A bundle product has is_bundle=true and a recipe in bundle_components
+    // (component_product_id, qty_per_bundle) instead of its own stock. This
+    // renders that recipe as a single synthetic batch option so the rest of
+    // the POS (rate calc, totals, stock validation, invoice printing) can
+    // keep treating it as one ordinary line item -- the only place that
+    // needs to know it's a bundle is saveTransaction()'s stock deduction,
+    // which explodes it into the real component batches at the very end.
+    async function populateBundleBatchOptions(row, productId, product, batchSelect, qtyInput, taxInput) {
+        if (!batchSelect) return;
+        batchSelect.innerHTML = `<option value="">Select Batch</option>`;
+
+        const { data: anchorBatch, error: anchorErr } = await supabaseClient
+            .from('batches')
+            .select('id')
+            .eq('product_id', productId)
+            .eq('batch_number', 'BUNDLE-ANCHOR')
+            .maybeSingle();
+
+        if (anchorErr || !anchorBatch) {
+            batchSelect.innerHTML = `<option value="">⚠️ Bundle not set up correctly</option>`;
+            if (qtyInput) { qtyInput.value = 0; qtyInput.disabled = true; }
+            showToast('This bundle is missing its anchor batch -- contact an admin.', 'error');
+            return;
+        }
+
+        const { data: recipeRows, error: recipeError } = await supabaseClient
+            .from('bundle_components')
+            .select('component_product_id, qty_per_bundle, products!bundle_components_component_product_id_fkey(product_name)')
+            .eq('bundle_product_id', productId);
+
+        if (recipeError) {
+            console.error('Bundle recipe fetch error:', recipeError);
+            showToast('Error loading bundle recipe: ' + recipeError.message, 'error');
+            return;
+        }
+
+        if (!recipeRows || recipeRows.length === 0) {
+            batchSelect.innerHTML = `<option value="">⚠️ Bundle has no components configured</option>`;
+            if (qtyInput) { qtyInput.value = 0; qtyInput.disabled = true; }
+            showToast('This bundle has no components set up -- contact an admin.', 'warning');
+            return;
+        }
+
+        const componentIds = recipeRows.map(r => r.component_product_id);
+        const { data: compBatches, error: compBatchErr } = await supabaseClient
+            .from('batches')
+            .select('id, product_id, total_qty, cost_price, expiry_date')
+            .in('product_id', componentIds)
+            .gt('total_qty', 0)
+            .order('expiry_date', { ascending: true });
+
+        if (compBatchErr) {
+            console.error('Bundle component batch fetch error:', compBatchErr);
+            showToast('Error loading bundle component stock: ' + compBatchErr.message, 'error');
+            return;
+        }
+
+        let availableBundles = Infinity;
+        let totalCost = 0;
+        const recipe = [];
+
+        for (const r of recipeRows) {
+            const theseBatches = (compBatches || []).filter(b => b.product_id === r.component_product_id);
+            const stockUnits = theseBatches.reduce((sum, b) => sum + (b.total_qty || 0), 0);
+            const possible = Math.floor(stockUnits / r.qty_per_bundle);
+            availableBundles = Math.min(availableBundles, possible);
+            // Cost using the earliest-expiry batch's price -- the one FEFO
+            // would actually draw from first. Falls back to 0 if genuinely
+            // out of stock; the availableBundles<=0 check below blocks the
+            // sale in that case anyway, so this never overstates a real cost.
+            const fefoCost = theseBatches.length ? (theseBatches[0].cost_price || 0) : 0;
+            totalCost += fefoCost * r.qty_per_bundle;
+            recipe.push({
+                component_product_id: r.component_product_id,
+                component_name: r.products?.product_name || '',
+                qty_per_bundle: r.qty_per_bundle
+            });
+        }
+        if (!isFinite(availableBundles)) availableBundles = 0;
+
+        if (availableBundles <= 0) {
+            batchSelect.innerHTML = `<option value="">⚠️ No stock available</option>`;
+            if (qtyInput) { qtyInput.value = 0; qtyInput.disabled = true; }
+            showToast('No stock available -- one or more components of this bundle are out of stock', 'warning');
+            return;
+        }
+
+        if (qtyInput) { qtyInput.disabled = false; qtyInput.max = ''; }
+
+        let stockLabel = `${availableBundles} packs`;
+        if (availableBundles <= 5) stockLabel = `⚠️ ${availableBundles} packs (Low Stock)`;
+
+        const recipeJson = JSON.stringify(recipe).replace(/"/g, '&quot;');
+
+        batchSelect.innerHTML += `
+            <option value="${anchorBatch.id}"
+                data-cost="${totalCost}"
+                data-nhima="${product.nhima_price_fixed || 0}"
+                data-pack="1"
+                data-tax="${product.tax_percent || 0}"
+                data-expiry=""
+                data-qty="${availableBundles}"
+                data-batch-number="BUNDLE"
+                data-is-bundle="1"
+                data-bundle-recipe="${recipeJson}">
+                Bundle (assembled on sale) - ${stockLabel} @ K${totalCost.toFixed(2)}
+            </option>
+        `;
+
+        setTimeout(() => {
+            batchSelect.value = anchorBatch.id;
+            if (taxInput) taxInput.value = product.tax_percent || 0;
+            batchSelect.dispatchEvent(new Event('change', { bubbles: true }));
+        }, 50);
+    }
+
+    // ============================================
     // PRODUCT AND BATCH SELECTION
     // ============================================
     posTableBody.addEventListener('change', async function (e) {
@@ -2698,11 +2817,29 @@
                 // NHIMA still uses the product's own manually-entered nhima_price_fixed.
                 const { data: product, error: prodError } = await supabaseClient
                     .from('products')
-                    .select('conversion_rate, tax_percent, nhima_price_fixed')
+                    .select('conversion_rate, tax_percent, nhima_price_fixed, is_bundle')
                     .eq('id', productId)
                     .maybeSingle();
 
                 if (prodError) throw prodError;
+
+                // 🔥 ADDED: bundle/kit products (e.g. "Maternity Pack") carry no
+                // stock of their own -- they're a recipe (bundle_components) of
+                // real products. Availability and cost are computed live from
+                // the components' own batches (earliest-expiry-first, same as a
+                // normal sale would draw from), and rendered as ONE synthetic
+                // batch option pointing at the bundle's anchor batch row (which
+                // exists purely so sale_items.batch_id has something valid to
+                // point at -- see that row's own insert comment; it is never
+                // read for availability and never decremented at checkout).
+                // Everything downstream (getSaleData(), saveTransaction()) reads
+                // this exactly like a normal item until stock actually gets
+                // deducted, where saveTransaction() explodes it into real
+                // component-batch deductions instead.
+                if (product.is_bundle) {
+                    await populateBundleBatchOptions(row, productId, product, batchSelect, qtyInput, taxInput);
+                    return;
+                }
 
                 const { data: batches, error: batchError } = await supabaseClient
                     .from('batches')
@@ -2908,7 +3045,7 @@
         try {
             const { data: products, error } = await supabaseClient
                 .from('products')
-                .select('id, product_name, generic_name_id')
+                .select('id, product_name, generic_name_id, is_bundle')
                 .order('product_name');
 
             if (error) throw error;
@@ -2933,14 +3070,15 @@
             productCatalog = (products || []).map(p => ({
                 id: p.id,
                 product_name: p.product_name,
-                generic_name: genericMap[p.generic_name_id] || ''
+                generic_name: genericMap[p.generic_name_id] || '',
+                is_bundle: !!p.is_bundle
             }));
 
             selects.forEach(select => {
                 if (select) {
                     select.innerHTML = `<option value="">Select Item</option>`;
                     products.forEach(p => {
-                        select.innerHTML += `<option value="${p.id}">${p.product_name}</option>`;
+                        select.innerHTML += `<option value="${p.id}">${p.product_name}${p.is_bundle ? ' 📦 (Bundle)' : ''}</option>`;
                     });
                 }
             });
@@ -3026,7 +3164,7 @@
         } else {
             panel.innerHTML = searchPanelMatches.map((p, i) => `
                 <div class="retail-item-search-result" data-index="${i}" data-id="${p.id}" style="padding:8px 12px; cursor:pointer; border-bottom:1px solid #f1f5f9; ${i === searchPanelHighlightIndex ? 'background:#eff6ff;' : ''}">
-                    <div style="font-weight:600; color:#0f172a;">${p.product_name}</div>
+                    <div style="font-weight:600; color:#0f172a;">${p.product_name}${p.is_bundle ? ' 📦' : ''}</div>
                     ${p.generic_name ? `<div style="font-size:0.72rem; color:#94a3b8;">${p.generic_name}</div>` : ''}
                 </div>
             `).join('');
@@ -4074,10 +4212,28 @@
                         costPerUnit = parseFloat(selectedBatch.dataset.cost) || 0;
                     }
 
+                    // 🔥 ADDED: bundle/kit products (e.g. "Maternity Pack") carry
+                    // their recipe right here on the selected option (see
+                    // populateBundleBatchOptions()) -- flagging it on the item lets
+                    // saveTransaction() explode it into real component-batch
+                    // deductions instead of decrementing this item's (anchor) batch_id
+                    // directly, which is never real stock.
+                    const isBundle = selectedBatch?.dataset?.isBundle === '1';
+                    let bundleRecipe = null;
+                    if (isBundle) {
+                        try {
+                            bundleRecipe = JSON.parse(selectedBatch.dataset.bundleRecipe || '[]');
+                        } catch (e) {
+                            console.error('Could not parse bundle recipe for item:', e);
+                            bundleRecipe = [];
+                        }
+                    }
+
                     items.push({
                         product_id: itemSelect.value,
                         product_name: itemSelect.options[itemSelect.selectedIndex]?.text || '',
                         batch_id: batchSelect.value,
+                        ...(isBundle ? { is_bundle: true, bundle_recipe: bundleRecipe } : {}),
                         // 🔥 FIX: this used to store the ENTIRE dropdown
                         // display text (e.g. "LOM001 (Exp: 31/12/2026) -
                         // 50 units"), leaking live stock quantity into
@@ -4386,7 +4542,7 @@
             if (editingSaleDbId) {
                 const { data: oldItems, error: oldItemsError } = await supabaseClient
                     .from('sale_items')
-                    .select('batch_id, quantity, pack_size')
+                    .select('product_id, batch_id, quantity, pack_size')
                     .eq('sale_id', editingSaleDbId);
 
                 if (oldItemsError) {
@@ -4396,11 +4552,64 @@
                 }
 
                 if (oldItems && oldItems.length > 0) {
+                    // 🔥 ADDED: a bundle/kit line's batch_id points at its anchor
+                    // batch (not real stock -- see that row's insert comment), so
+                    // restoring it there would do nothing useful. Detect which of
+                    // the old lines were bundles and restore their RECIPE quantity
+                    // to the real component products instead.
+                    const productIds = [...new Set(oldItems.map(i => i.product_id))];
+                    const { data: productFlags } = await supabaseClient
+                        .from('products')
+                        .select('id, is_bundle')
+                        .in('id', productIds);
+                    const bundleProductIds = new Set((productFlags || []).filter(p => p.is_bundle).map(p => p.id));
+
                     const qtyToRestoreByBatch = new Map();
+                    const bundleOldItems = [];
                     for (const item of oldItems) {
+                        if (bundleProductIds.has(item.product_id)) {
+                            bundleOldItems.push(item);
+                            continue;
+                        }
                         const packQty = item.pack_size === 'EACH' ? 1 : (parseInt(item.pack_size) || 1);
                         qtyToRestoreByBatch.set(item.batch_id, (qtyToRestoreByBatch.get(item.batch_id) || 0) + item.quantity * packQty);
                     }
+
+                    if (bundleOldItems.length > 0) {
+                        const { data: recipeRows } = await supabaseClient
+                            .from('bundle_components')
+                            .select('bundle_product_id, component_product_id, qty_per_bundle')
+                            .in('bundle_product_id', [...new Set(bundleOldItems.map(i => i.product_id))]);
+
+                        const restoreByComponent = new Map();
+                        for (const item of bundleOldItems) {
+                            for (const r of (recipeRows || []).filter(r => r.bundle_product_id === item.product_id)) {
+                                restoreByComponent.set(r.component_product_id, (restoreByComponent.get(r.component_product_id) || 0) + item.quantity * r.qty_per_bundle);
+                            }
+                        }
+
+                        if (restoreByComponent.size > 0) {
+                            // Credit it back to whichever real batch is currently
+                            // earliest-expiry for that component -- batches of the
+                            // same product are fungible for total-stock purposes,
+                            // so this is correct even if it wasn't literally the
+                            // exact batch the original sale drew from.
+                            const { data: compBatches } = await supabaseClient
+                                .from('batches')
+                                .select('id, product_id, total_qty')
+                                .in('product_id', [...restoreByComponent.keys()])
+                                .order('expiry_date', { ascending: true });
+                            for (const [componentId, qty] of restoreByComponent.entries()) {
+                                const target = (compBatches || []).find(b => b.product_id === componentId);
+                                if (target) {
+                                    qtyToRestoreByBatch.set(target.id, (qtyToRestoreByBatch.get(target.id) || 0) + qty);
+                                } else {
+                                    console.warn(`Could not restore ${qty} units to component ${componentId} -- no batch found (all batches for it may have hit 0 stock).`);
+                                }
+                            }
+                        }
+                    }
+
                     const { data: batchesToRestore, error: batchFetchError } = await supabaseClient
                         .from('batches')
                         .select('id, total_qty')
@@ -4543,10 +4752,74 @@
                 // other's writes.
                 const stockUpdatePromise = (async () => {
                     const qtyByBatch = new Map();
+                    const bundleItems = [];
                     for (const item of saleData.items) {
+                        // 🔥 ADDED: bundle/kit items (e.g. "Maternity Pack") point at
+                        // an anchor batch that is NOT real stock (see its insert
+                        // comment) -- skip the normal per-item deduction for these
+                        // and explode them into real component-batch deductions
+                        // below instead.
+                        if (item.is_bundle) {
+                            bundleItems.push(item);
+                            continue;
+                        }
                         const totalQtyToDeduct = item.qty * (item.pack_size === 'EACH' ? 1 : parseInt(item.pack_size) || 1);
                         qtyByBatch.set(item.batch_id, (qtyByBatch.get(item.batch_id) || 0) + totalQtyToDeduct);
                     }
+
+                    if (bundleItems.length > 0) {
+                        const neededByComponent = new Map(); // component_product_id -> total units needed
+                        for (const item of bundleItems) {
+                            for (const comp of (item.bundle_recipe || [])) {
+                                const key = comp.component_product_id;
+                                neededByComponent.set(key, (neededByComponent.get(key) || 0) + item.qty * comp.qty_per_bundle);
+                            }
+                        }
+
+                        const componentIds = [...neededByComponent.keys()];
+                        if (componentIds.length > 0) {
+                            const { data: compBatches, error: compFetchError } = await supabaseClient
+                                .from('batches')
+                                .select('id, product_id, total_qty')
+                                .in('product_id', componentIds)
+                                .gt('total_qty', 0)
+                                .order('expiry_date', { ascending: true });
+
+                            if (compFetchError) {
+                                console.error('Bundle component batch fetch error:', compFetchError);
+                            } else {
+                                // Track how much of each fetched batch is still free
+                                // to allocate -- starts at its live total_qty minus
+                                // whatever this SAME sale already earmarked for it
+                                // via a normal (non-bundle) line on that batch, so a
+                                // product sold both standalone and as a bundle
+                                // component in one sale can't be double-allocated
+                                // past what's really there.
+                                const freeInBatch = new Map();
+                                for (const b of (compBatches || [])) {
+                                    freeInBatch.set(b.id, b.total_qty - (qtyByBatch.get(b.id) || 0));
+                                }
+
+                                for (const [componentId, neededUnits] of neededByComponent.entries()) {
+                                    let remaining = neededUnits;
+                                    const theseBatches = (compBatches || []).filter(b => b.product_id === componentId);
+                                    for (const b of theseBatches) {
+                                        if (remaining <= 0) break;
+                                        const free = freeInBatch.get(b.id) || 0;
+                                        if (free <= 0) continue;
+                                        const take = Math.min(remaining, free);
+                                        qtyByBatch.set(b.id, (qtyByBatch.get(b.id) || 0) + take);
+                                        freeInBatch.set(b.id, free - take);
+                                        remaining -= take;
+                                    }
+                                    if (remaining > 0) {
+                                        console.warn(`Bundle sale: component ${componentId} short by ${remaining} units -- sold anyway, its stock may go negative.`);
+                                    }
+                                }
+                            }
+                        }
+                    }
+
                     const batchIds = [...qtyByBatch.keys()];
                     if (batchIds.length === 0) return;
 

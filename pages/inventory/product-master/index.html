@@ -1,7 +1,13 @@
 <div class="module-view-container">
     <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
         <h3 style="margin: 0;">Product Master</h3>
-        <div style="display: flex; gap: 10px;">
+        <div style="display: flex; gap: 10px; flex-wrap: wrap;">
+            <button id="exportMasterBtn" style="background: #7c3aed; color: white; border: none; padding: 10px 20px; border-radius: 6px; cursor: pointer;">
+                <i class="fa-solid fa-file-export"></i> Export Master
+            </button>
+            <button id="bulkUpdateBtn" style="background: #d97706; color: white; border: none; padding: 10px 20px; border-radius: 6px; cursor: pointer;">
+                <i class="fa-solid fa-pen-to-square"></i> Bulk Update
+            </button>
             <button id="csvUploadBtn" style="background: #059669; color: white; border: none; padding: 10px 20px; border-radius: 6px; cursor: pointer;">
                 <i class="fa-solid fa-upload"></i> Import CSV
             </button>
@@ -47,7 +53,7 @@
 <!-- ============================================ -->
 <style>
     /* MODAL OVERLAY */
-    #addProductModal, #csvUploadModal {
+    #addProductModal, #csvUploadModal, #bulkUpdateModal {
         position: fixed;
         top: 0;
         left: 0;
@@ -60,7 +66,7 @@
         justify-content: center;
         align-items: center;
     }
-    #addProductModal > div, #csvUploadModal > div {
+    #addProductModal > div, #csvUploadModal > div, #bulkUpdateModal > div {
         background: white;
         padding: 30px;
         border-radius: 12px;
@@ -70,7 +76,7 @@
         overflow-y: auto;
         box-shadow: 0 20px 50px rgba(0,0,0,0.5);
     }
-    #csvUploadModal > div {
+    #csvUploadModal > div, #bulkUpdateModal > div {
         max-width: 600px;
     }
 
@@ -98,12 +104,31 @@
     }
     .form-group input:read-only { background: #f1f5f9; color: #64748b; }
 
-    /* QUICK ADD */
+    /* QUICK ADD (legacy -- no longer wired to any button, kept only so
+       nothing else referencing these classes breaks) */
     .quick-add-wrapper { display: flex; gap: 5px; }
     .quick-add-wrapper select { flex: 1; }
     .quick-add-btn {
         background: #2563eb; color: white; border: none; padding: 0 15px; border-radius: 6px; cursor: pointer;
     }
+
+    /* SEARCHABLE COMBOBOX (search existing, or type new to create) */
+    .combo-box { position: relative; display: flex; }
+    .combo-box .combo-input { flex: 1; padding-right: 34px; }
+    .combo-arrow {
+        position: absolute; right: 0; top: 0; bottom: 0; width: 34px;
+        background: none; border: none; cursor: pointer; color: #64748b;
+        display: flex; align-items: center; justify-content: center;
+    }
+    .combo-list {
+        display: none; position: absolute; top: calc(100% + 4px); left: 0; right: 0;
+        max-height: 220px; overflow-y: auto; background: white; border: 1px solid #e2e8f0;
+        border-radius: 6px; box-shadow: 0 8px 20px rgba(0,0,0,0.12); z-index: 50;
+    }
+    .combo-list.open { display: block; }
+    .combo-option { padding: 8px 12px; cursor: pointer; font-size: 0.9rem; }
+    .combo-option:hover { background: #eff6ff; color: #2563eb; }
+    .combo-empty { padding: 8px 12px; font-size: 0.82rem; color: #94a3b8; font-style: italic; }
 
     /* PRICE CONFIG */
     .price-config { margin-top: 20px; border-top: 1px solid #e2e8f0; padding-top: 20px; }
@@ -320,24 +345,38 @@
             </div>
 
             <!-- Generic Name & Dosage Forms -->
+            <!-- 🔥 CHANGED (per explicit request): these 6 fields used to
+                 be plain <select> dropdowns, each with a separate "+"
+                 button that opened a popup just to add a new entry.
+                 Now each is a single searchable text field -- type to
+                 filter the existing list, click a match (or the arrow
+                 to see everything), or just leave new text typed in and
+                 it's created automatically on Save. No add button. -->
             <div class="form-grid-2">
                 <div class="form-group">
                     <label>Generic Name</label>
-                    <div class="quick-add-wrapper">
-                        <select id="genericName">
-                            <option value="">Select Generic Name</option>
-                        </select>
-                        <button type="button" class="quick-add-btn" onclick="openQuickAdd('generic')">+</button>
+                    <div class="combo-box">
+                        <input type="text" id="genericName" class="combo-input" placeholder="Search or type new..." autocomplete="off">
+                        <button type="button" class="combo-arrow" data-for="genericName" tabindex="-1"><i class="fa-solid fa-chevron-down"></i></button>
+                        <div class="combo-list" id="genericNameComboList"></div>
                     </div>
                 </div>
                 <div class="form-group">
-                    <label>Dosage Form</label>
-                    <div class="quick-add-wrapper">
-                        <select id="dosageForm">
-                            <option value="">Select Dosage Form</option>
-                        </select>
-                        <button type="button" class="quick-add-btn" onclick="openQuickAdd('dosage')">+</button>
+                    <label style="display: flex; justify-content: space-between; align-items: center;">
+                        <span>Dosage Form</span>
+                        <span style="font-weight: 400; font-size: 0.8rem; color: #475569; display: flex; align-items: center; gap: 5px;">
+                            <input type="checkbox" id="dosageRequired" checked style="width: auto; margin: 0; cursor: pointer;">
+                            <label for="dosageRequired" style="margin: 0; font-weight: 400; cursor: pointer;">Dosage Required</label>
+                        </span>
+                    </label>
+                    <div class="combo-box">
+                        <input type="text" id="dosageForm" class="combo-input" placeholder="Search or type new..." autocomplete="off">
+                        <button type="button" class="combo-arrow" data-for="dosageForm" tabindex="-1"><i class="fa-solid fa-chevron-down"></i></button>
+                        <div class="combo-list" id="dosageFormComboList"></div>
                     </div>
+                    <p id="dosageFormHint" style="display: none; margin: 4px 0 0; font-size: 0.78rem; color: #94a3b8;">
+                        Dosage Form is optional -- untick "Dosage Required" for items like Surgical Instruments or Consumables that don't have a dosage.
+                    </p>
                 </div>
             </div>
 
@@ -345,20 +384,18 @@
             <div class="form-grid-2">
                 <div class="form-group">
                     <label>Category *</label>
-                    <div class="quick-add-wrapper">
-                        <select id="category" required>
-                            <option value="">Select Category</option>
-                        </select>
-                        <button type="button" class="quick-add-btn" onclick="openQuickAdd('category')">+</button>
+                    <div class="combo-box">
+                        <input type="text" id="category" class="combo-input" placeholder="Search or type new..." autocomplete="off" required>
+                        <button type="button" class="combo-arrow" data-for="category" tabindex="-1"><i class="fa-solid fa-chevron-down"></i></button>
+                        <div class="combo-list" id="categoryComboList"></div>
                     </div>
                 </div>
                 <div class="form-group">
                     <label>Sub-Category</label>
-                    <div class="quick-add-wrapper">
-                        <select id="subCategory">
-                            <option value="">Select Sub-Category</option>
-                        </select>
-                        <button type="button" class="quick-add-btn" onclick="openQuickAdd('subcategory')">+</button>
+                    <div class="combo-box">
+                        <input type="text" id="subCategory" class="combo-input" placeholder="Enter Category first..." autocomplete="off">
+                        <button type="button" class="combo-arrow" data-for="subCategory" tabindex="-1"><i class="fa-solid fa-chevron-down"></i></button>
+                        <div class="combo-list" id="subCategoryComboList"></div>
                     </div>
                 </div>
             </div>
@@ -367,20 +404,18 @@
             <div class="form-grid-2">
                 <div class="form-group">
                     <label>Brand</label>
-                    <div class="quick-add-wrapper">
-                        <select id="brand">
-                            <option value="">Select Brand</option>
-                        </select>
-                        <button type="button" class="quick-add-btn" onclick="openQuickAdd('brand')">+</button>
+                    <div class="combo-box">
+                        <input type="text" id="brand" class="combo-input" placeholder="Search or type new..." autocomplete="off">
+                        <button type="button" class="combo-arrow" data-for="brand" tabindex="-1"><i class="fa-solid fa-chevron-down"></i></button>
+                        <div class="combo-list" id="brandComboList"></div>
                     </div>
                 </div>
                 <div class="form-group">
                     <label>Supplier</label>
-                    <div class="quick-add-wrapper">
-                        <select id="supplier">
-                            <option value="">Select Supplier</option>
-                        </select>
-                        <button type="button" class="quick-add-btn" onclick="openQuickAdd('supplier')">+</button>
+                    <div class="combo-box">
+                        <input type="text" id="supplier" class="combo-input" placeholder="Search or type new..." autocomplete="off">
+                        <button type="button" class="combo-arrow" data-for="supplier" tabindex="-1"><i class="fa-solid fa-chevron-down"></i></button>
+                        <div class="combo-list" id="supplierComboList"></div>
                     </div>
                 </div>
             </div>
@@ -541,6 +576,75 @@
                 <button type="button" id="csvCancelModalBtn" class="btn-cancel">Cancel</button>
                 <button type="submit" id="csvImportSubmitBtn" class="btn-save" style="background: #059669;">
                     <i class="fa-solid fa-upload"></i> Import Products
+                </button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<!-- ============================================ -->
+<!-- BULK UPDATE MODAL -->
+<!-- ============================================ -->
+<!-- 🔥 NEW (per explicit request): pairs with the "Export Master" button
+     above -- export the current product list, edit fields (category,
+     sub-category, tax, pack size, etc.) in Excel, then upload it back
+     here. Deliberately separate from "Import CSV" above: this path ONLY
+     updates products it can match by SKU and never creates a new one,
+     so it's safe to use for bulk edits without risking accidental
+     duplicate products from a typo'd or blank SKU cell. -->
+<div id="bulkUpdateModal">
+    <div>
+        <div class="modal-header">
+            <h3><i class="fa-solid fa-pen-to-square" style="color: #d97706;"></i> Bulk Update Products</h3>
+            <button id="bulkUpdateCloseModalBtn" class="modal-close-btn">&times;</button>
+        </div>
+
+        <form id="bulkUpdateForm">
+            <p style="color: #64748b; margin-bottom: 15px; font-size: 0.95rem;">
+                <i class="fa-regular fa-circle-info" style="color: #2563eb;"></i>
+                Upload a CSV exported from <strong>Export Master</strong> (edited as needed). Each row is matched to an
+                existing product by <strong>SKU</strong> and its fields are updated -- this never creates new products,
+                so a row with a blank or unrecognized SKU is skipped and reported as an error.
+                <br><strong style="color: #dc2626;">Required column:</strong> sku
+                <br><span style="color: #92400e;">A blank cell for an optional field (Generic Name, Sub-Category, Brand, Supplier) clears it.</span>
+            </p>
+
+            <div class="csv-upload-zone" id="bulkUpdateDropZone">
+                <i class="fa-solid fa-cloud-arrow-up"></i>
+                <p><strong>Click to select CSV file</strong></p>
+                <p style="font-size: 0.85rem; color: #94a3b8;">or drag and drop</p>
+                <p id="bulkUpdateFileName" class="file-name" style="display: none;"></p>
+                <input type="file" id="bulkUpdateFileInput" accept=".csv" style="display: none;" required>
+            </div>
+
+            <div style="margin-top: 15px; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;">
+                <div>
+                    <button type="button" onclick="exportProductMaster()" style="background: #7c3aed; color: white; border: none; padding: 8px 16px; border-radius: 6px; cursor: pointer; font-size: 0.85rem;">
+                        <i class="fa-solid fa-file-export"></i> Export Master
+                    </button>
+                </div>
+                <div style="font-size: 0.85rem; color: #94a3b8;">
+                    <i class="fa-regular fa-circle-info"></i> Max 1000 rows
+                </div>
+            </div>
+
+            <!-- Progress Bar -->
+            <div id="bulkUpdateProgressContainer" class="csv-progress-container">
+                <div class="csv-progress-bar">
+                    <div id="bulkUpdateProgressBar" class="csv-progress-bar-fill"></div>
+                </div>
+                <div id="bulkUpdateProgressText" class="csv-progress-text">0%</div>
+            </div>
+
+            <!-- Status Container -->
+            <div id="bulkUpdateStatusContainer" class="csv-status-container">
+                <pre id="bulkUpdateStatusText" class="csv-status-text"></pre>
+            </div>
+
+            <div class="modal-footer">
+                <button type="button" id="bulkUpdateCancelModalBtn" class="btn-cancel">Cancel</button>
+                <button type="submit" id="bulkUpdateSubmitBtn" class="btn-save" style="background: #d97706;">
+                    <i class="fa-solid fa-pen-to-square"></i> Apply Updates
                 </button>
             </div>
         </form>

@@ -414,17 +414,21 @@ async function loadBatchRows(productId, container) {
 
         if (error) throw error;
 
-        const activeBatches = batches.filter(b => 
-            (b.total_qty || 0) > 0
-        );
-
-        if (activeBatches.length === 0) {
-            container.innerHTML = '<p style="color: #94a3b8; text-align: center;">No active batches found for this product.</p>';
+        // 🔥 FIX (per explicit request, 2026-09-11): this used to filter out
+        // any batch sitting at 0 (or negative -- see the Sinocare incident
+        // the same day) system quantity, so it never even showed up here to
+        // be counted. That's backwards -- Stock Take is exactly the tool
+        // that's supposed to catch "the system says 0 but there's actually
+        // stock on the shelf that was missed somewhere." Every batch for
+        // the product is now listed regardless of its current system
+        // quantity, so staff can always correct it.
+        if (batches.length === 0) {
+            container.innerHTML = '<p style="color: #94a3b8; text-align: center;">No batches found for this product yet.</p>';
             return;
         }
 
         container.innerHTML = '';
-        activeBatches.forEach(b => {
+        batches.forEach(b => {
             addBatchRow(container, b.id, b.batch_number, b.expiry_date, b.total_qty, b.cost_price);
         });
 

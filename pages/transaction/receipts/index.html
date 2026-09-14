@@ -20,7 +20,12 @@
             <button class="btn btn-outline" onclick="openNhimaSettlementModal()" style="border-color: #8b5cf6; color: #8b5cf6;">
                 <i class="fa-solid fa-upload"></i> CSV Upload
             </button>
-            
+
+            <!-- NHIMA Report Import & Reconciliation Button -->
+            <button class="btn btn-outline" onclick="openNhimaReconcileModal()" style="border-color: #0891b2; color: #0891b2;">
+                <i class="fa-solid fa-magnifying-glass-chart"></i> NHIMA Report Compare
+            </button>
+
             <button class="btn btn-outline" onclick="refreshReceivableList()">
                 <i class="fa-solid fa-rotate"></i> Refresh
             </button>
@@ -225,6 +230,119 @@
                 <button class="btn btn-primary" onclick="processNhimaSettlement()">
                     <i class="fa-solid fa-upload"></i> Process Settlement
                 </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- ============================================================ -->
+<!-- NHIMA REPORT IMPORT & RECONCILIATION MODAL -->
+<!-- ============================================================ -->
+<div class="modal" id="nhimaReconcileModal">
+    <div class="modal-dialog modal-xl">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h4><i class="fa-solid fa-magnifying-glass-chart"></i> NHIMA Report Compare</h4>
+                <button class="modal-close" onclick="document.getElementById('nhimaReconcileModal').classList.remove('show')">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div style="padding: 12px; background: #ecfeff; border-radius: 6px; border-left: 4px solid #0891b2; margin-bottom: 15px;">
+                    <p style="margin: 0; font-size: 0.85rem; color: #0e7490;">
+                        <i class="fa-solid fa-info-circle"></i>
+                        Upload any claim report you download from NHIMA's own portal (.xlsx) -- weekly, monthly, or any custom period. We'll match it against our own NHIMA sales for that same period and show what matches, what's missing on either side, and any amount differences.
+                    </p>
+                </div>
+
+                <div style="display:flex; gap:15px; align-items:flex-end; flex-wrap:wrap; margin-bottom: 15px;">
+                    <div class="form-group" style="margin-bottom:0; flex:1; min-width:250px;">
+                        <label class="required">NHIMA Claim Report (.xlsx) -- Weekly or Monthly</label>
+                        <input type="file" id="nhimaReconcileFile" accept=".xlsx,.xls" style="padding: 8px; border: 1px solid #e2e8f0; border-radius: 4px; width: 100%;">
+                    </div>
+                    <button class="btn btn-primary" id="runNhimaReconcileBtn" onclick="runNhimaReconciliation()">
+                        <i class="fa-solid fa-magnifying-glass-chart"></i> Compare
+                    </button>
+                </div>
+
+                <div style="display:flex; gap:15px; align-items:flex-end; flex-wrap:wrap; margin-bottom: 15px; padding: 10px 12px; background: #f8fafc; border-radius: 6px; border: 1px dashed #cbd5e1;">
+                    <div class="form-group" style="margin-bottom:0;">
+                        <label>From Date (optional override)</label>
+                        <input type="date" class="form-control" id="nhimaReconcileFromDate" style="width: 170px;">
+                    </div>
+                    <div class="form-group" style="margin-bottom:0;">
+                        <label>To Date (optional override)</label>
+                        <input type="date" class="form-control" id="nhimaReconcileToDate" style="width: 170px;">
+                    </div>
+                    <div style="flex:1; min-width: 220px; font-size: 0.78rem; color: #64748b; padding-bottom: 8px;">
+                        <i class="fa-solid fa-circle-info"></i>
+                        Leave blank to auto-detect the period from the file (works for weekly or monthly reports). Set both dates to compare against any custom range instead -- useful for checking manually or when the file doesn't state a clear period.
+                    </div>
+                </div>
+
+                <div id="nhimaReconcileStatus" style="display:none; margin-bottom: 15px; font-size: 0.85rem; color: #64748b;">
+                    <i class="fa-solid fa-spinner fa-spin"></i> Processing...
+                </div>
+
+                <div id="nhimaReconcileResults" style="display:none;">
+                    <div id="nhimaReconcileMeta" style="margin-bottom: 12px; font-size: 0.85rem; color: #475569;"></div>
+
+                    <div class="receivable-stats" style="grid-template-columns: repeat(4, 1fr); margin-bottom: 15px;">
+                        <div class="stat-card" style="border-left: 4px solid #2563eb;">
+                            <h4>Matched Claims</h4>
+                            <p id="reconMatchedCount">0</p>
+                        </div>
+                        <div class="stat-card" style="border-left: 4px solid #f59e0b;">
+                            <h4>On NHIMA Report Only</h4>
+                            <p id="reconOnlyNhimaCount">0</p>
+                        </div>
+                        <div class="stat-card" style="border-left: 4px solid #8b5cf6;">
+                            <h4>In Our System Only</h4>
+                            <p id="reconOnlyOursCount">0</p>
+                        </div>
+                        <div class="stat-card" style="border-left: 4px solid #dc2626;">
+                            <h4>Amount Mismatches</h4>
+                            <p id="reconMismatchCount">0</p>
+                        </div>
+                    </div>
+
+                    <div style="margin-bottom: 15px;">
+                        <button class="btn btn-success" onclick="downloadNhimaReconciliationReport()">
+                            <i class="fa-solid fa-file-excel"></i> Download Full Report (.xlsx)
+                        </button>
+                    </div>
+
+                    <div class="card" style="margin-bottom: 15px;">
+                        <div class="card-header"><span>On NHIMA's report but not found in our system</span></div>
+                        <div class="table-responsive" style="max-height: 220px; overflow-y:auto;">
+                            <table class="table-minimal">
+                                <thead><tr><th>Claim Number</th><th>Member Number</th><th>Treatment Date</th><th style="text-align:right;">Gross (ZMW)</th></tr></thead>
+                                <tbody id="reconOnlyNhimaBody"></tbody>
+                            </table>
+                        </div>
+                    </div>
+
+                    <div class="card" style="margin-bottom: 15px;">
+                        <div class="card-header"><span>In our system, not matched to NHIMA's report</span></div>
+                        <div class="table-responsive" style="max-height: 220px; overflow-y:auto;">
+                            <table class="table-minimal">
+                                <thead><tr><th>Claim Number</th><th>Member Number</th><th>Sale Date</th><th>Customer</th><th style="text-align:right;">Amount (ZMW)</th></tr></thead>
+                                <tbody id="reconOnlyOursBody"></tbody>
+                            </table>
+                        </div>
+                    </div>
+
+                    <div class="card">
+                        <div class="card-header"><span>Matched claims with an amount difference (&gt; ZK0.50)</span></div>
+                        <div class="table-responsive" style="max-height: 220px; overflow-y:auto;">
+                            <table class="table-minimal">
+                                <thead><tr><th>Claim (NHIMA)</th><th>Claim (Ours)</th><th>Customer</th><th style="text-align:right;">NHIMA Gross</th><th style="text-align:right;">Our Total</th><th style="text-align:right;">Difference</th></tr></thead>
+                                <tbody id="reconMismatchBody"></tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-outline" onclick="document.getElementById('nhimaReconcileModal').classList.remove('show')">Close</button>
             </div>
         </div>
     </div>
