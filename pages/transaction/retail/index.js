@@ -2604,13 +2604,17 @@
                 }
             }
 
-            // 🔥 REMOVED: this used to auto-append a brand new empty row
-            // the moment a quantity was typed into the last row. That's
-            // gone now -- a new row is only added when the cashier
-            // presses F3 (see the KEYBOARD SHORTCUTS block near the
-            // bottom of this file). All the other qty-entry behavior
-            // (batch-qty clamping for NHIMA, row/grand totals) above and
-            // below is unchanged.
+            // 🔥 RE-ADDED (by request): typing a qty into the LAST row now
+            // auto-appends a fresh empty row again, same as it used to
+            // before it was removed in favour of F3-only. Triggers on any
+            // qty > 0 -- including exactly 1 -- not just "more than 1".
+            // Only fires for the last row: once the new row exists, this
+            // same row is no longer last, so further digits typed into it
+            // (e.g. "1" -> "10") don't keep spawning extra rows. F3 still
+            // works too for adding a row without typing a qty first.
+            if (qty > 0 && row === posTableBody.querySelector('tr:last-child')) {
+                addPOSRow();
+            }
             updateRowTotal(row);
             updateTotals();
         }
@@ -4417,44 +4421,59 @@
     // SAVE TRANSACTION - WITH ACCOUNTING, CUSTOMER, AND sale_items SUPPORT
     // ============================================
     async function saveTransaction(status, prefix) {
-        const saleData = await getSaleData(status, prefix);
-        if (!saleData) return;
-
-        if (currentClientType === 'NHIMA') {
-            if (!saleData.customer.nhima_number) {
-                alert('Please select an NHIMA member.');
-                return;
-            }
-        } else {
-            if (!saleData.customer.phone) {
-                alert('Please select a phone number.');
-                return;
-            }
-        }
-
+        // 🔥 FIX: root cause of the duplicate-invoice bug found on 11
+        // September -- two NHIMA invoices for the same claim number,
+        // ~0.3 seconds apart, both with full accounting entries and both
+        // deducting stock (confirmed via a direct database investigation
+        // and cleaned up there). The button-disable guard used to run
+        // AFTER `await getSaleData(status, prefix)` -- but getSaleData()
+        // itself does an async round trip (the claim-number uniqueness
+        // check), so a fast double-click, or Ctrl+S landing twice, let a
+        // SECOND saveTransaction() call start, run its own getSaleData(),
+        // and pass its own uniqueness check -- all before the FIRST call
+        // ever got around to disabling the buttons. Both then went on to
+        // insert. Disabling here, as literally the first thing this
+        // function does (before any `await`), closes that window
+        // completely: this runs synchronously in one JS tick, so a
+        // second click physically cannot land before the button is
+        // already disabled -- and a disabled button never fires a click
+        // event at all, including from the Ctrl+S shortcut's own
+        // .click() call.
         const isQuotation = (status === 'QUOTATION');
-
-        // 🔥 ADDED: lock both buttons the moment a save genuinely starts,
-        // not just visually -- the accounting work below (journal entries,
-        // COGS entries, stock deduction) is several sequential awaited
-        // database calls, which takes long enough that a second click
-        // during that window would start an entirely separate save of
-        // the same sale. Disabling here closes that window completely,
-        // and the finally block below guarantees they're re-enabled
-        // whether the save succeeds or fails -- never left stuck.
         const activeBtn = isQuotation ? quoteBtn : saveBtn;
         const otherBtn = isQuotation ? saveBtn : quoteBtn;
+
+        // Already mid-save from an earlier click/keypress that hasn't
+        // finished yet -- ignore this one rather than starting a second
+        // save in parallel.
+        if (activeBtn?.disabled) return;
+
         const activeLabel = activeBtn?.querySelector('.btn-label');
         const originalLabelText = activeLabel?.textContent;
+        const activeIcon = activeBtn?.querySelector('i');
+        const originalIconClass = activeIcon?.className;
 
         if (activeBtn) activeBtn.disabled = true;
         if (otherBtn) otherBtn.disabled = true;
         if (activeLabel) activeLabel.textContent = 'Saving...';
-        const activeIcon = activeBtn?.querySelector('i');
-        const originalIconClass = activeIcon?.className;
         if (activeIcon) activeIcon.className = 'fa-solid fa-spinner fa-spin';
 
         try {
+            const saleData = await getSaleData(status, prefix);
+            if (!saleData) return;
+
+            if (currentClientType === 'NHIMA') {
+                if (!saleData.customer.nhima_number) {
+                    alert('Please select an NHIMA member.');
+                    return;
+                }
+            } else {
+                if (!saleData.customer.phone) {
+                    alert('Please select a phone number.');
+                    return;
+                }
+            }
+
             let customerId = await ensureCustomerExists(saleData.customer, currentClientType);
 
             if (!customerId && currentClientType === 'NHIMA' && saleData.customer.nhima_number) {
@@ -5221,11 +5240,54 @@
             console.log('Loading sale for edit:', saleData);
 
             if (saleData.client_sub_type) {
-                const clientType = saleData.client_sub_type;
-                const btn = document.querySelector(`.retail-client-btn[data-type="${clientType}"]`);
-                if (btn) {
-                    btn.click();
+                // 🔥 FIX: "the whole invoice sometimes doesn't load" --
+                // this used to rely entirely on finding a client-type
+                // button whose data-type EXACTLY matches this sale's
+                // stored client_sub_type, then clicking it to get the
+                // NHIMA/Regular panel switch, active-button highlight and
+                // Payment Type default as side effects of that click. If
+                // no button matched (a blank/legacy/mismatched
+                // client_sub_type on an older record), that click was a
+                // silent no-op -- nothing threw, so no error ever showed,
+                // but the visible panel, highlighted button and Payment
+                // Type were left however they happened to already be from
+                // whatever was on screen before Edit was clicked, while
+                // every other field below still populated with this
+                // sale's real data. That's exactly what "sometimes only
+                // part of it loads" looks like: which invoice you'd just
+                // clicked determined whether this quietly broke or not,
+                // not anything random. Apply the same effects directly
+                // here instead of depending on a button match at all.
+                const clientType = saleData.client_sub_type === 'NHIMA' ? 'NHIMA' : 'REGULAR';
+                currentClientType = clientType;
+
+                clientBtns.forEach(b => {
+                    const isActive = b.dataset.type === clientType;
+                    b.style.background = isActive ? '#2563eb' : 'transparent';
+                    b.style.color = isActive ? 'white' : '#475569';
+                });
+
+                if (clientType === 'NHIMA') {
+                    if (nhimaFields) nhimaFields.style.display = 'block';
+                    if (regularFields) regularFields.style.display = 'none';
+                    if (paymentSelect) {
+                        paymentSelect.value = 'Credit';
+                        paymentSelect.disabled = true;
+                    }
+                    if (quoteBtn) quoteBtn.style.display = 'none';
+                } else {
+                    if (nhimaFields) nhimaFields.style.display = 'none';
+                    if (regularFields) regularFields.style.display = 'block';
+                    if (paymentSelect) paymentSelect.disabled = false;
+                    if (quoteBtn) quoteBtn.style.display = '';
                 }
+
+                if (clientHistoryContainer) {
+                    clientHistoryContainer.style.display = 'none';
+                    historyVisible = false;
+                    if (historyToggleIcon) historyToggleIcon.className = 'fa-solid fa-chevron-down';
+                }
+                if (historyBadge) historyBadge.style.display = 'none';
             }
 
             if (saleData.customer_data) {
@@ -5436,9 +5498,35 @@
                     if (batchSelect && item.batch_id) {
                         const batchInfo = editBatchMap[item.batch_id];
                         const expiry = batchInfo ? new Date(batchInfo.expiry_date).toLocaleDateString() : '';
+                        // 🔥 FIX: "not enough stock" on a line you aren't even
+                        // touching. This used to show TODAY's live total_qty
+                        // as the available stock -- but that live figure
+                        // already has THIS SAME invoice's own original
+                        // quantity deducted from it (deducted back when it
+                        // was first saved -- see the totalQtyToDeduct math in
+                        // saveTransaction()). So editing an old invoice whose
+                        // stock has since been sold elsewhere always failed
+                        // the qty > availableQty check in getSaleData(), even
+                        // when you changed nothing about that line: e.g. 30
+                        // Paracetamol sold on 1 September (fine at the time)
+                        // now reads as "0 available" the moment today's
+                        // stock runs out, because the 30 this invoice already
+                        // holds was never added back. Add this line's own
+                        // original committed quantity (converted to the same
+                        // base-unit terms as total_qty, via its pack size --
+                        // same conversion saveTransaction() itself uses) back
+                        // on top of the live figure, so validation reflects
+                        // what's truly available once this invoice's own
+                        // hold is accounted for. Reducing the quantity can
+                        // only ever free up more stock, never need more, so
+                        // this can never let a real over-sell through.
+                        const originalPackSize = item.pack_size === 'EACH' ? 1 : (parseInt(item.pack_size) || 1);
+                        const originalUnitsHeld = (parseInt(item.qty) || 0) * originalPackSize;
+                        const liveUnits = batchInfo?.total_qty ?? item.available_qty ?? item.qty ?? 0;
+                        const effectiveAvailable = liveUnits + originalUnitsHeld;
                         batchSelect.innerHTML = `<option value="${item.batch_id}"
                             data-cost="${item.cost_per_unit || 0}"
-                            data-qty="${batchInfo?.total_qty ?? item.available_qty ?? item.qty}"
+                            data-qty="${effectiveAvailable}"
                             data-batch-number="${item.batch_number || batchInfo?.batch_number || ''}"
                             data-expiry="${expiry}">
                             ${item.batch_number || batchInfo?.batch_number || 'Unknown batch'} ${expiry ? `(Exp: ${expiry})` : ''}
@@ -6200,7 +6288,7 @@
         if (!workspaceContent) return;
 
         function pollForOptionAndSelect(selectId, value, attemptsLeft) {
-            if (!value || attemptsLeft <= 0) return;
+            if (!value) return;
             const select = document.getElementById(selectId);
             if (select) {
                 const opt = Array.from(select.options).find(o => o.value === value);
@@ -6209,6 +6297,39 @@
                     select.dispatchEvent(new Event('change'));
                     return;
                 }
+            }
+            if (attemptsLeft <= 0) {
+                // 🔥 FIX: THE BUG -- "next patient loads but their details
+                // never fill in" until the page is refreshed. This
+                // dropdown's option list (retailNhimaNumber / retailRegPhone)
+                // is loaded once from the database at page load. It goes
+                // stale the moment a NEW patient is registered elsewhere
+                // (CRM) later in the same shift -- their NHIMA number/phone
+                // simply isn't in this list yet, so polling for a matching
+                // <option> here was never going to find one no matter how
+                // many times it retried, and silently gave up after 4.5s
+                // with the select still empty. Since .value never matched a
+                // real <option>, it never fired 'change' -- so nothing
+                // downstream (name/NRC/phone/address/history) ever loaded.
+                // A page refresh "fixed" it only because that reloads this
+                // dropdown fresh from the database, picking up the new
+                // registration. Instead of depending on a reload that may
+                // never come, synthesize the missing <option> directly from
+                // the ticket's own data -- already known to be valid, since
+                // it came from a real queue_tickets row -- and select it the
+                // same way a real option would be.
+                if (select) {
+                    const stillMissing = !Array.from(select.options).some(o => o.value === value);
+                    if (stillMissing) {
+                        const opt = document.createElement('option');
+                        opt.value = value;
+                        opt.textContent = value;
+                        select.appendChild(opt);
+                    }
+                    select.value = value;
+                    select.dispatchEvent(new Event('change'));
+                }
+                return;
             }
             setTimeout(() => pollForOptionAndSelect(selectId, value, attemptsLeft - 1), 300);
         }

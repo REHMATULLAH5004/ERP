@@ -492,6 +492,20 @@
     // ============================================
     async function loadMyAdvances() {
         const listEl = document.getElementById('dashSidebarMyAdvanceList');
+        // 🔥 FIX: the sidebar "My Advances" LIST display was removed from
+        // dashboard-view.html at some point (the "Request Advance" modal/
+        // button were kept, see the comment near the top of that file) but
+        // this function was never updated to match, so listEl is always
+        // null now. That crashed here with "Cannot set properties of null
+        // (setting 'innerHTML')" -- and because this whole function is
+        // awaited directly in the INIT sequence below with no try/catch,
+        // the crash silently killed every widget that runs after it in the
+        // INIT sequence below (month summary, admin approvals, dispense
+        // queue, exchange rate, sidebar stats, sidebar notices), even
+        // though none of those have anything to do with advances. Bail
+        // out cleanly if the list container isn't there instead of
+        // crashing.
+        if (!listEl) return;
         if (!currentEmployeeId) { listEl.innerHTML = ''; return; }
 
         const [empRes, requestsRes, recoveriesRes] = await Promise.all([
@@ -1489,16 +1503,30 @@
     // ============================================
     // INIT
     // ============================================
-    await resolveCurrentEmployee();
-    await loadMyLeave();
-    await loadMyAdvances();
-    await loadMonthSummary();
-    await loadAdminApprovals();
-    await loadDispenseQueue();
-    initDispatchQueueCard();
-    await loadExchangeRateWidget();
-    await loadSidebarStats();
-    await loadSidebarNotices();
+    // 🔥 FIX: each dashboard widget is now isolated with its own try/catch.
+    // Previously these ran as one plain await chain -- a single unhandled
+    // error in ANY one widget (e.g. the loadMyAdvances() crash above)
+    // silently aborted the whole sequence, so every widget listed AFTER
+    // the failing one never ran at all, with nothing visible to say why.
+    // Now one broken widget only loses that widget, not everything below it.
+    async function safeInit(label, fn) {
+        try {
+            await fn();
+        } catch (error) {
+            console.error(`❌ Dashboard widget "${label}" failed to load:`, error);
+        }
+    }
+
+    await safeInit('resolveCurrentEmployee', resolveCurrentEmployee);
+    await safeInit('loadMyLeave', loadMyLeave);
+    await safeInit('loadMyAdvances', loadMyAdvances);
+    await safeInit('loadMonthSummary', loadMonthSummary);
+    await safeInit('loadAdminApprovals', loadAdminApprovals);
+    await safeInit('loadDispenseQueue', loadDispenseQueue);
+    await safeInit('initDispatchQueueCard', initDispatchQueueCard);
+    await safeInit('loadExchangeRateWidget', loadExchangeRateWidget);
+    await safeInit('loadSidebarStats', loadSidebarStats);
+    await safeInit('loadSidebarNotices', loadSidebarNotices);
 
     console.log("✅ Dashboard initialized successfully!");
 })();

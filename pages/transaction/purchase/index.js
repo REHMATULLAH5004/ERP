@@ -1947,16 +1947,16 @@
                 <td>${line.pack_size || 1}</td>
                 <td><strong>${totalOrderedQty}</strong></td>
                 <td>
-                    <input type="number" class="form-control" value="${line.received_quantity || 0}" 
-                        style="width: 70px; padding: 4px 8px; ${isCancelled ? 'background: #fef2f2;' : ''}" 
+                    <input type="number" class="form-control" value="${line.received_quantity || 0}"
+                        style="width: 70px; padding: 4px 8px; ${isCancelled ? 'background: #fef2f2;' : ''}"
                         onchange="updateGRNLine(${index}, 'received_quantity', this.value)"
                         ${readonly || isCancelled ? 'disabled' : ''}
-                        min="0" max="${line.order_quantity - line.cancelled_quantity || 0}">
+                        min="0">
                     ${line.received_quantity > 0 ? `<span style="font-size: 0.6rem; color: #059669;">${line.received_quantity} received</span>` : ''}
                 </td>
                 <td>
-                    <span style="font-weight: 600; color: ${remainingQty > 0 ? '#f59e0b' : '#059669'};">
-                        ${remainingQty > 0 ? remainingQty : '✅'}
+                    <span style="font-weight: 600; color: ${remainingQty > 0 ? '#f59e0b' : (remainingQty < 0 ? '#2563eb' : '#059669')};">
+                        ${remainingQty > 0 ? remainingQty : (remainingQty < 0 ? `+${Math.abs(remainingQty)} over` : '✅')}
                     </span>
                     ${line.cancelled_quantity > 0 ? `<span style="font-size: 0.6rem; color: #dc2626; display: block;">${line.cancelled_quantity} cancelled</span>` : ''}
                 </td>
@@ -3630,11 +3630,17 @@
         if (!line) return;
         
         if (field === 'received_quantity') {
+            // 🔥 FIX: GRN is allowed to receive MORE than the ordered qty --
+            // suppliers routinely over-ship, and the whole point of this
+            // screen is to record what actually arrived (and at what rate),
+            // not to enforce the PO as a ceiling. Previously this clamped
+            // any entry above order_quantity back down, silently discarding
+            // real received stock. Now it's a non-blocking heads-up only.
             const maxQty = line.max_receivable || line.order_quantity || 0;
             let qty = parseInt(value) || 0;
-            if (qty > maxQty) {
-                qty = maxQty;
-                showToast(`Maximum receivable is ${maxQty}`, 'warning');
+            if (qty < 0) qty = 0;
+            if (maxQty > 0 && qty > maxQty) {
+                showToast(`Receiving ${qty} — more than the ${maxQty} ordered (over-delivery).`, 'info');
             }
             line.received_quantity = qty;
             line.total_amount = (line.received_quantity || 0) * (line.purchase_rate || 0);
@@ -3997,15 +4003,11 @@
             return;
         }
 
-        // Validate received quantity doesn't exceed remaining
-        const overReceived = state.grnLines.filter(line => {
-            const maxQty = (line.order_quantity || 0) - (line.cancelled_quantity || 0);
-            return (line.received_quantity || 0) > maxQty;
-        });
-        if (overReceived.length > 0) {
-            showToast(`Received quantity exceeds available quantity for: ${overReceived.map(l => l.product_name).join(', ')}`, 'error');
-            return;
-        }
+        // 🔥 FIX: removed the old block that rejected posting whenever a
+        // line's received_quantity exceeded (order_quantity - cancelled).
+        // Over-receiving is a normal, legitimate GRN scenario (supplier
+        // ships more than ordered) -- the GRN's job is to record what was
+        // actually received and at what rate, not to cap it at the PO.
 
         const totalReceived = state.grnLines.reduce((sum, l) => sum + (l.received_quantity || 0), 0);
         const grnTotal = parseFloat(document.getElementById('grnGrandTotal')?.textContent?.replace(/[^0-9.]/g, '')) || 0;

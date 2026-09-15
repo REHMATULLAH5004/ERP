@@ -853,21 +853,43 @@
         }
     }
 
+    // 🔥 ADDED: resolve generic names for every product, same two-query
+    // pattern (products, then a batch generic_names lookup keyed by
+    // generic_name_id) already used by Purchase/Retail -- needed so each
+    // item row's dropdown option can carry a data-generic attribute,
+    // which is how getSaleData() picks up the Generic Name for the new
+    // Delivery Note print-out below.
+    async function buildGenericNameMap(products) {
+        const genericIds = [...new Set((products || []).map(p => p.generic_name_id).filter(Boolean))];
+        const map = {};
+        if (genericIds.length === 0) return map;
+        const { data: generics, error } = await supabaseClient
+            .from('generic_names')
+            .select('id, name')
+            .in('id', genericIds);
+        if (!error && generics) {
+            generics.forEach(g => { map[g.id] = g.name; });
+        }
+        return map;
+    }
+
     async function loadProductDropdowns() {
         const selects = document.querySelectorAll('.wholesale-pos-item');
         try {
             const { data: products, error } = await supabaseClient
                 .from('products')
-                .select('id, product_name')
+                .select('id, product_name, generic_name_id')
                 .order('product_name');
-            
+
             if (error) throw error;
-            
+
+            const genericMap = await buildGenericNameMap(products);
+
             selects.forEach(select => {
                 if (select) {
                     select.innerHTML = `<option value="">Select Item</option>`;
                     products.forEach(p => {
-                        select.innerHTML += `<option value="${p.id}">${p.product_name}</option>`;
+                        select.innerHTML += `<option value="${p.id}" data-generic="${genericMap[p.generic_name_id] || ''}">${p.product_name}</option>`;
                     });
                 }
             });
@@ -881,14 +903,16 @@
         try {
             const { data: products, error } = await supabaseClient
                 .from('products')
-                .select('id, product_name')
+                .select('id, product_name, generic_name_id')
                 .order('product_name');
-            
+
             if (error) throw error;
-            
+
+            const genericMap = await buildGenericNameMap(products);
+
             select.innerHTML = `<option value="">Select Item</option>`;
             products.forEach(p => {
-                select.innerHTML += `<option value="${p.id}">${p.product_name}</option>`;
+                select.innerHTML += `<option value="${p.id}" data-generic="${genericMap[p.generic_name_id] || ''}">${p.product_name}</option>`;
             });
         } catch (e) {
             console.warn("Could not load products for row:", e);
@@ -1440,11 +1464,17 @@
                     items.push({
                         product_id: itemSelect.value,
                         product_name: itemSelect.options[itemSelect.selectedIndex]?.text || '',
+                        // 🔥 ADDED: for the Delivery Note (Item/Generic/Batch/
+                        // Expiry) -- read straight off the dropdown options'
+                        // own data attributes, same as batch_number below, so
+                        // no extra DB round-trip is needed at save time.
+                        generic_name: itemSelect.options[itemSelect.selectedIndex]?.dataset.generic || '',
                         batch_id: batchSelect.value,
                         // 🔥 FIX: same as retail.js -- this used to store
                         // the entire dropdown display text including
                         // live stock quantity.
                         batch_number: batchSelect.options[batchSelect.selectedIndex]?.dataset.batchNumber || '',
+                        expiry: selectedBatch?.dataset?.expiry || '',
                         qty: qty,
                         rate: parseFloat(rateInput.value) || 0,
                         pack_size: packInput.value || '1s',
@@ -1794,6 +1824,12 @@
                             const newOpt = document.createElement('option');
                             newOpt.value = item.product_id;
                             newOpt.textContent = editProductMap[item.product_id]?.product_name || item.product_name || 'Unknown item';
+                            // 🔥 ADDED: preserve this line's original Generic
+                            // Name (for the Delivery Note) even in the rare
+                            // case the product wasn't found in the already-
+                            // loaded dropdown -- getSaleData() reads this
+                            // same data-generic attribute back out on Save.
+                            newOpt.dataset.generic = item.generic_name || '';
                             itemSelect.appendChild(newOpt);
                         }
                         itemSelect.value = item.product_id;
@@ -1965,6 +2001,132 @@
     }
 
     // ============================================
+    // 🔥 ADDED: DELIVERY NOTE
+    // ============================================
+    // Printed right after the Invoice, one per copy (Customer/Merchant),
+    // so each copy is self-contained. No prices on a delivery note --
+    // it's proof of what physically went out (Item / Generic / Batch /
+    // Expiry / Qty), not a billing document -- with a signature line for
+    // whoever receives the goods. Only makes sense for an actual
+    // delivery, so this is skipped entirely for a Quotation (nothing has
+    // shipped yet).
+    function buildWholesaleDeliveryNoteHTML(saleData, copyLabel) {
+        return `
+            <div class="copy-page">
+                <div class="copy-label">${copyLabel} COPY</div>
+
+                <div class="doc-header">
+                    <div class="company-block">
+                        <h1>${companySettings.wholesale_company_name}</h1>
+                        <p>${companySettings.address}</p>
+                        <p>Phone: ${companySettings.phone} | ZAMRA: ${companySettings.wholesale_zamra_number}${companySettings.wholesale_tpin_number ? ` | TPIN: ${companySettings.wholesale_tpin_number}` : ''}</p>
+                    </div>
+                </div>
+
+                <div class="doc-title-row">
+                    <div class="doc-title">DELIVERY NOTE</div>
+                </div>
+
+                <div class="info-row">
+                    <div class="info-box">
+                        <div><strong>Delivery Note #:</strong> ${saleData.sale_id}</div>
+                        <div><strong>Date:</strong> ${saleData.date}</div>
+                        <div><strong>Ref. Invoice #:</strong> ${saleData.sale_id}</div>
+                    </div>
+                    <div class="bill-to">
+                        <strong>DELIVER TO:</strong><br>
+                        <strong>${saleData.customer.customer_name || 'N/A'}</strong><br>
+                        ${saleData.customer.contact_person ? `Attn: ${saleData.customer.contact_person}<br>` : ''}
+                        ${saleData.customer.address || ''}<br>
+                        ${saleData.customer.phone ? `Phone: ${saleData.customer.phone}<br>` : ''}
+                    </div>
+                </div>
+
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Item Name</th>
+                            <th>Generic Name</th>
+                            <th>Batch Number</th>
+                            <th>Expiry</th>
+                            <th class="text-center">Qty</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        ${saleData.items.map(item => `
+                            <tr>
+                                <td>${item.product_name}</td>
+                                <td>${item.generic_name || '-'}</td>
+                                <td>${cleanBatchDisplay(item.batch_number)}</td>
+                                <td>${item.expiry || '-'}</td>
+                                <td class="text-center">${item.qty} ${item.pack_size}</td>
+                            </tr>
+                        `).join('')}
+                    </tbody>
+                </table>
+
+                <div class="payment-info" style="margin-top: 40px; border-top: 1px solid #e2e8f0; padding-top: 16px;">
+                    <p style="margin-bottom: 32px;">Goods listed above dispatched in good condition. Please inspect item names, batch numbers and quantities on receipt.</p>
+                    <div style="display: flex; justify-content: space-between; gap: 30px; font-size: 0.85rem;">
+                        <div style="flex: 1; border-top: 1px solid #1e293b; padding-top: 6px;">
+                            Dispatched By &nbsp;&nbsp; Name / Signature / Date
+                        </div>
+                        <div style="flex: 1; border-top: 1px solid #1e293b; padding-top: 6px;">
+                            Received By &nbsp;&nbsp; Name / Signature / Date
+                        </div>
+                    </div>
+                </div>
+            </div>
+        `;
+    }
+
+    // ============================================
+    // 🔥 ADDED: backfill Generic Name / Expiry for older sales
+    // ============================================
+    // Sales saved before the Delivery Note feature don't have
+    // generic_name/expiry on their stored items (only product_name,
+    // batch_number, etc.) -- this fills those two fields in from the
+    // product/batch tables directly, live, so reprinting an OLD invoice
+    // still gets a correct Delivery Note. A brand-new sale's items
+    // already carry both straight from getSaleData(), so this is a
+    // no-op for the normal case.
+    async function enrichItemsForDeliveryNote(items) {
+        const productIds = [...new Set((items || []).map(i => i.product_id).filter(Boolean))];
+        const batchIds = [...new Set((items || []).map(i => i.batch_id).filter(Boolean))];
+
+        let genericByProduct = {};
+        if (productIds.length > 0) {
+            try {
+                const { data: products } = await supabaseClient
+                    .from('products').select('id, generic_name_id').in('id', productIds);
+                const genericMap = await buildGenericNameMap(products || []);
+                (products || []).forEach(p => { genericByProduct[p.id] = genericMap[p.generic_name_id] || ''; });
+            } catch (e) {
+                console.warn('Could not backfill generic names for print:', e);
+            }
+        }
+
+        let expiryByBatch = {};
+        if (batchIds.length > 0) {
+            try {
+                const { data: batches } = await supabaseClient
+                    .from('batches').select('id, expiry_date').in('id', batchIds);
+                (batches || []).forEach(b => {
+                    expiryByBatch[b.id] = b.expiry_date ? new Date(b.expiry_date).toLocaleDateString() : '';
+                });
+            } catch (e) {
+                console.warn('Could not backfill expiry dates for print:', e);
+            }
+        }
+
+        return (items || []).map(item => ({
+            ...item,
+            generic_name: item.generic_name || genericByProduct[item.product_id] || '',
+            expiry: item.expiry || expiryByBatch[item.batch_id] || ''
+        }));
+    }
+
+    // ============================================
     // PRINT FUNCTION
     // ============================================
     // 🔥 CHANGED: accepts an optional saleData override, falling back to
@@ -1974,11 +2136,23 @@
     // Search (currentSaleData is empty again after a page reload, or
     // once a different sale is saved). printSavedSale() below fetches an
     // older sale by id and passes it straight through here.
-    function printSale(saleDataOverride) {
+    async function printSale(saleDataOverride) {
         const saleData = saleDataOverride || currentSaleData;
         if (!saleData) {
             alert('No sale data to print.');
             return;
+        }
+
+        // 🔥 ADDED: only await the backfill lookup when this sale's items
+        // are actually missing generic_name/expiry (older, pre-Delivery-
+        // Note sales) -- a brand-new sale already has both from
+        // getSaleData(), so the normal path skips this fetch entirely and
+        // window.open() below still fires synchronously within the
+        // original click, same as before (some browsers block a popup
+        // opened after an awaited gap outside a user gesture).
+        const needsEnrichment = (saleData.items || []).some(i => !i.generic_name || !i.expiry);
+        if (needsEnrichment) {
+            saleData.items = await enrichItemsForDeliveryNote(saleData.items);
         }
 
         const isQuotation = saleData.status === 'QUOTATION';
@@ -2031,7 +2205,9 @@
         </head>
         <body>
             ${buildWholesaleCopyHTML(saleData, 'CUSTOMER')}
+            ${!isQuotation ? buildWholesaleDeliveryNoteHTML(saleData, 'CUSTOMER') : ''}
             ${buildWholesaleCopyHTML(saleData, 'MERCHANT')}
+            ${!isQuotation ? buildWholesaleDeliveryNoteHTML(saleData, 'MERCHANT') : ''}
         </body>
         </html>`;
 
