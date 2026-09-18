@@ -512,18 +512,56 @@
         // ============================================
         // LOAD DATA
         // ============================================
-    
+
+        // 🔥 FIX: THE REAL BUG BEHIND "LUSAKA HEALTHCARE NOT SHOWING IN
+        // RECEIVABLE" -- every loader below used a single bare
+        // `.select('*')...` with no `.range()`. Supabase/PostgREST caps an
+        // unranged select at 1000 rows per request by default -- it does
+        // NOT error or warn, it just silently returns the first 1000 rows
+        // in whatever order was requested and drops the rest. Confirmed
+        // directly against the data: `sales` currently has 1,270 rows, and
+        // Lusaka's K7,600 credit sale was row #1,019 by created_at ascending
+        // -- past the 1000-row cutoff -- so loadSales() never loaded it at
+        // all. It wasn't just Lusaka: EVERY sale after that cutoff (currently
+        // ~252 of them, growing every day) was invisible to this entire
+        // page -- NHIMA claims, Retail receivables, and Wholesale
+        // receivables alike -- not just this one customer. `customers`
+        // (1,169 rows) and `nhima_members` (1,178 rows) are past the same
+        // 1000-row cliff too, ordered by name ascending, so some
+        // alphabetically-later customers/members were silently missing as
+        // well. This helper pages through with `.range()` until a page
+        // comes back shorter than the page size, so every loader below now
+        // reliably gets ALL rows regardless of how large these tables grow.
+        async function fetchAllRows(tableName, selectCols, orderColumn, ascending) {
+            const pageSize = 1000;
+            let allRows = [];
+            let from = 0;
+            while (true) {
+                const { data, error } = await supabaseClient
+                    .from(tableName)
+                    .select(selectCols)
+                    .order(orderColumn, { ascending })
+                    .range(from, from + pageSize - 1);
+                if (error) throw error;
+                if (!data || data.length === 0) break;
+                allRows = allRows.concat(data);
+                if (data.length < pageSize) break;
+                from += pageSize;
+            }
+            return allRows;
+        }
+
         async function loadCustomers() {
             try {
                 const [nhimaMembers, regularCustomers, wholesaleCustomers] = await Promise.all([
-                    supabaseClient.from('nhima_members').select('*').order('full_name', { ascending: true }),
-                    supabaseClient.from('customers').select('*').order('full_name', { ascending: true }),
-                    supabaseClient.from('wholesale_customers').select('*').order('customer_name', { ascending: true })
+                    fetchAllRows('nhima_members', '*', 'full_name', true),
+                    fetchAllRows('customers', '*', 'full_name', true),
+                    fetchAllRows('wholesale_customers', '*', 'customer_name', true)
                 ]);
-    
-                state.nhimaMembers = nhimaMembers.data || [];
-                state.regularCustomers = regularCustomers.data || [];
-                state.wholesaleCustomers = wholesaleCustomers.data || [];
+
+                state.nhimaMembers = nhimaMembers || [];
+                state.regularCustomers = regularCustomers || [];
+                state.wholesaleCustomers = wholesaleCustomers || [];
     
                 const allCustomers = [];
     
@@ -584,12 +622,11 @@
     
         async function loadReceipts() {
             try {
-                const { data, error } = await supabaseClient
-                    .from('customer_receipts')
-                    .select('*')
-                    .order('receipt_date', { ascending: false });
-                
-                if (error) throw error;
+                // 🔥 FIX: see fetchAllRows() above -- paginated so a growing
+                // customer_receipts table can never silently lose rows past
+                // the 1000-row default cap the way sales/customers/
+                // nhima_members were.
+                const data = await fetchAllRows('customer_receipts', '*', 'receipt_date', false);
                 state.receipts = data || [];
                 console.log(`✅ Loaded ${state.receipts.length} receipts`);
                 return state.receipts;
@@ -599,18 +636,18 @@
                 return [];
             }
         }
-    
+
         async function loadSales() {
             try {
-                const { data, error } = await supabaseClient
-                    .from('sales')
-                    .select('*')
-                    .order('created_at', { ascending: true });
-                
-                if (error) throw error;
-    
+                // 🔥 FIX: THE core fix for "Lusaka Healthcare not showing in
+                // Receivable" -- see fetchAllRows() above. This used to be a
+                // single unranged `.select('*')`, which silently capped at
+                // the first 1000 sales (oldest-first) and dropped every sale
+                // after that -- currently ~252 of them, including Lusaka's.
+                const data = await fetchAllRows('sales', '*', 'created_at', true);
+
                 state.sales = data || [];
-    
+
                 console.log(`✅ Loaded ${state.sales.length} total sales`);
                 return state.sales;
             } catch (error) {
@@ -619,15 +656,12 @@
                 return [];
             }
         }
-    
+
         async function loadCustomerReceiptInvoices() {
             try {
-                const { data, error } = await supabaseClient
-                    .from('customer_receipt_invoices')
-                    .select('*')
-                    .order('created_at', { ascending: true });
-                
-                if (error) throw error;
+                // 🔥 FIX: see fetchAllRows() above -- same protection against
+                // silent 1000-row truncation as the other loaders.
+                const data = await fetchAllRows('customer_receipt_invoices', '*', 'created_at', true);
                 state.customerReceiptInvoices = data || [];
                 console.log(`✅ Loaded ${state.customerReceiptInvoices.length} receipt-invoice links`);
                 return state.customerReceiptInvoices;
@@ -936,6 +970,39 @@
                     };
                 });
 
+            // 🔥 FIX (by request): a wholesale customer whose balance is
+            // exactly zero -- e.g. LUSAKA HEALTHCARE PHARMACEUTICALS, whose
+            // opening balance had just been paid off in full -- used to be
+            // completely invisible here, same gap as the opening-balance
+            // fix above but for every OTHER wholesale customer too: one
+            // whose only sale was Cash (never enters wholesaleSales at all)
+            // or who has no opening balance either never got added to
+            // customerMap in the first place. Add every remaining wholesale
+            // customer explicitly so they always appear in the list -- with
+            // a statement always reachable via the customer-name link --
+            // regardless of whether they currently owe anything.
+            state.wholesaleCustomers.forEach(rawCustomer => {
+                const customerId = rawCustomer.id;
+                const alreadyPresent = Object.values(customerMap).some(entry => entry.customer._customerId === customerId);
+                if (alreadyPresent) return;
+                const customer = state.customers.find(c => c._source === 'wholesale' && c._customerId === customerId);
+                customerMap[`all_wholesale_${customerId}`] = {
+                    customer: customer || {
+                        _displayName: rawCustomer.customer_name || 'Unknown',
+                        _phone: rawCustomer.phone || '',
+                        _customerId: customerId,
+                        _source: 'wholesale',
+                        _type: 'WHOLESALE',
+                        _subType: rawCustomer.customer_type || 'REGULAR'
+                    },
+                    sales: [],
+                    totalSales: 0,
+                    totalReceived: 0,
+                    opening_balance_zmw: rawCustomer.opening_balance_zmw || 0,
+                    receipts: []
+                };
+            });
+
             Object.values(customerMap).forEach(entry => {
                 // 🔥 FIX: same null-matching guard as calculateRetailReceivables()
                 // above -- an unmatched customer's null _customerId must not
@@ -950,9 +1017,15 @@
                 entry.hasReceivable = entry.receivable > 0.01;
             });
 
-            return Object.values(customerMap).filter(c => c.hasReceivable);
+            // 🔥 FIX (by request): previously `.filter(c => c.hasReceivable)`
+            // hid every customer once their balance reached zero (or never
+            // had one). Now every wholesale customer is returned -- sorted
+            // with the largest outstanding balances first so the people who
+            // actually owe money still surface at the top -- so a statement
+            // can be pulled for anyone regardless of their current balance.
+            return Object.values(customerMap).sort((a, b) => b.receivable - a.receivable);
         }
-    
+
         // ============================================
         // RENDER FUNCTIONS
         // ============================================

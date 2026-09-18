@@ -1,0 +1,289 @@
+<div class="module-view-container">
+    <h3 style="margin: 0 0 4px 0;"><i class="fa-solid fa-money-bill-trend-up"></i> Cash Report</h3>
+    <p style="color:#64748b; font-size:0.85rem; margin-top:0; margin-bottom:20px;">
+        Where cash came from and where it went -- Cash in Hand, Bank (ZMW) and Bank (USD), sourced straight from the general ledger.
+    </p>
+
+    <!-- Filter Bar -->
+    <div class="cashrep-filter-bar card">
+        <div class="cashrep-filter-field">
+            <label>From</label>
+            <input type="date" id="cashrepFrom">
+        </div>
+        <div class="cashrep-filter-field">
+            <label>To</label>
+            <input type="date" id="cashrepTo">
+        </div>
+        <button class="btn btn-primary btn-sm" id="cashrepApplyBtn" onclick="window.cashReportApply()">
+            <i class="fa-solid fa-filter"></i> Apply
+        </button>
+        <button class="btn btn-sm cashrep-export-btn" onclick="window.cashReportExportCsv()">
+            <i class="fa-solid fa-file-csv"></i> Export CSV
+        </button>
+        <span id="cashrepRangeLabel" class="cashrep-range-label"></span>
+    </div>
+
+    <!-- Per-account summary cards -->
+    <div class="cashrep-account-cards" id="cashrepAccountCards"></div>
+
+    <!-- Charts Row -->
+    <div class="cashrep-charts">
+        <div class="card cashrep-chart-card">
+            <div class="cashrep-chart-header">
+                <div>
+                    <strong>Cash In By Source</strong>
+                    <span class="cashrep-chart-subtitle">ZMW (Cash in Hand + Bank) &middot; selected range</span>
+                </div>
+                <button class="cashrep-table-toggle" id="cashrepInTableToggle" onclick="window.toggleCashReportTable('in')">
+                    <i class="fa-solid fa-table"></i> View as table
+                </button>
+            </div>
+            <div id="cashrepInChartWrap">
+                <div id="cashrepInChart" class="cashrep-chart-svg-wrap"></div>
+                <div id="cashrepInTable" class="cashrep-chart-table-wrap" style="display:none;"></div>
+            </div>
+        </div>
+
+        <div class="card cashrep-chart-card">
+            <div class="cashrep-chart-header">
+                <div>
+                    <strong>Cash Out By Use</strong>
+                    <span class="cashrep-chart-subtitle">ZMW (Cash in Hand + Bank) &middot; selected range</span>
+                </div>
+                <button class="cashrep-table-toggle" id="cashrepOutTableToggle" onclick="window.toggleCashReportTable('out')">
+                    <i class="fa-solid fa-table"></i> View as table
+                </button>
+            </div>
+            <div id="cashrepOutChartWrap">
+                <div id="cashrepOutChart" class="cashrep-chart-svg-wrap"></div>
+                <div id="cashrepOutTable" class="cashrep-chart-table-wrap" style="display:none;"></div>
+            </div>
+        </div>
+    </div>
+
+    <div class="card cashrep-chart-card" style="margin-bottom:20px;">
+        <div class="cashrep-chart-header">
+            <div>
+                <strong>Daily Net Cash Flow</strong>
+                <span class="cashrep-chart-subtitle">ZMW (Cash in Hand + Bank) &middot; selected range</span>
+            </div>
+            <button class="cashrep-table-toggle" id="cashrepTrendTableToggle" onclick="window.toggleCashReportTable('trend')">
+                <i class="fa-solid fa-table"></i> View as table
+            </button>
+        </div>
+        <div id="cashrepTrendChartWrap">
+            <div id="cashrepTrendChart" class="cashrep-chart-svg-wrap"></div>
+            <div id="cashrepTrendTable" class="cashrep-chart-table-wrap" style="display:none;"></div>
+        </div>
+    </div>
+
+    <!-- Detailed ledger -->
+    <div class="card" style="padding:16px 20px 20px;">
+        <div class="cashrep-chart-header" style="margin-bottom:12px;">
+            <div>
+                <strong>Cash Movements</strong>
+                <span class="cashrep-chart-subtitle" id="cashrepLedgerCount"></span>
+            </div>
+            <div class="cashrep-account-filter">
+                <select id="cashrepAccountFilter" onchange="window.cashReportRenderLedger()">
+                    <option value="ALL">All accounts</option>
+                    <option value="1111">Cash in Hand (ZMW)</option>
+                    <option value="1121">Bank (ZMW)</option>
+                    <option value="1120">Bank (USD)</option>
+                </select>
+            </div>
+        </div>
+        <div class="cashrep-table-scroll">
+            <table class="cashrep-table-simple cashrep-ledger-table">
+                <thead>
+                    <tr>
+                        <th>Date</th>
+                        <th>Account</th>
+                        <th>Reference</th>
+                        <th>Description</th>
+                        <th>From / To</th>
+                        <th class="cashrep-num">Cash In</th>
+                        <th class="cashrep-num">Cash Out</th>
+                    </tr>
+                </thead>
+                <tbody id="cashrepLedgerBody"></tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+<style>
+.cashrep-filter-bar {
+    display: flex;
+    align-items: flex-end;
+    gap: 14px;
+    padding: 14px 18px;
+    margin-bottom: 20px;
+    flex-wrap: wrap;
+}
+.cashrep-filter-field { display: flex; flex-direction: column; gap: 4px; }
+.cashrep-filter-field label { font-size: 0.72rem; color: #64748b; font-weight: 600; text-transform: uppercase; letter-spacing: 0.4px; }
+.cashrep-filter-field input[type="date"] {
+    border: 1px solid #e2e8f0;
+    border-radius: 6px;
+    padding: 6px 10px;
+    font-size: 0.85rem;
+    color: #1e293b;
+}
+.cashrep-export-btn {
+    background: transparent;
+    color: #059669;
+    border: 1px solid #059669;
+    border-radius: 6px;
+    padding: 7px 12px;
+}
+.cashrep-export-btn:hover { background: #ecfdf5; }
+.cashrep-range-label { margin-left: auto; font-size: 0.78rem; color: #94a3b8; align-self: center; }
+
+.cashrep-account-cards {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 15px;
+    margin-bottom: 20px;
+}
+@media (max-width: 900px) {
+    .cashrep-account-cards { grid-template-columns: 1fr; }
+}
+.cashrep-account-card {
+    background: white;
+    border: 1px solid #e8edf3;
+    border-radius: 8px;
+    padding: 16px 18px;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.06);
+    border-left: 4px solid #2563eb;
+}
+.cashrep-account-card h4 {
+    margin: 0 0 10px 0;
+    font-size: 0.82rem;
+    color: #1e293b;
+    font-weight: 700;
+}
+.cashrep-account-card .cashrep-row {
+    display: flex;
+    justify-content: space-between;
+    font-size: 0.78rem;
+    color: #64748b;
+    padding: 3px 0;
+}
+.cashrep-account-card .cashrep-row span:last-child { font-weight: 600; color: #1e293b; }
+.cashrep-account-card .cashrep-row.cashrep-in span:last-child { color: #059669; }
+.cashrep-account-card .cashrep-row.cashrep-out span:last-child { color: #dc2626; }
+.cashrep-account-card .cashrep-row.cashrep-closing { border-top: 1px dashed #e2e8f0; margin-top: 6px; padding-top: 8px; }
+.cashrep-account-card .cashrep-row.cashrep-closing span:last-child { font-size: 0.95rem; }
+
+.cashrep-account-filter select {
+    border: 1px solid #e2e8f0;
+    border-radius: 6px;
+    padding: 5px 10px;
+    font-size: 0.78rem;
+    color: #1e293b;
+}
+
+.cashrep-table-scroll { overflow-x: auto; max-height: 480px; overflow-y: auto; }
+.cashrep-ledger-table { min-width: 760px; }
+.cashrep-ledger-table thead th { position: sticky; top: 0; background: white; z-index: 1; }
+.cashrep-badge {
+    display: inline-block;
+    padding: 1px 8px;
+    border-radius: 8px;
+    font-size: 0.68rem;
+    font-weight: 600;
+    background: #eff6ff;
+    color: #2563eb;
+    white-space: nowrap;
+}
+
+/* -- self-contained chart/table chrome (this page is loaded independently
+   of report-view.html, so nothing here depends on that page's styles
+   still being present in the DOM) -- */
+.cashrep-charts {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 20px;
+    margin-bottom: 20px;
+}
+@media (max-width: 900px) {
+    .cashrep-charts { grid-template-columns: 1fr; }
+}
+.cashrep-chart-card { padding: 16px 20px 20px; }
+.cashrep-chart-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    margin-bottom: 8px;
+}
+.cashrep-chart-header strong { font-size: 0.9rem; color: #1e293b; }
+.cashrep-chart-subtitle {
+    display: block;
+    font-size: 0.72rem;
+    color: #94a3b8;
+    margin-top: 2px;
+}
+.cashrep-table-toggle {
+    background: none;
+    border: 1px solid #e2e8f0;
+    color: #64748b;
+    border-radius: 6px;
+    padding: 4px 10px;
+    font-size: 0.72rem;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    white-space: nowrap;
+}
+.cashrep-table-toggle:hover { background: #f8fafc; color: #2563eb; border-color: #2563eb; }
+.cashrep-chart-svg-wrap { position: relative; }
+.cashrep-chart-svg-wrap svg { width: 100%; height: auto; display: block; overflow: visible; }
+.cashrep-chart-empty { text-align: center; padding: 40px 10px; color: #94a3b8; font-size: 0.85rem; }
+
+/* Marks -- single accent hue throughout (magnitude/ranked comparisons,
+   not categorical identity), matching the house dataviz convention. Green
+   for cash-in bars, red for cash-out bars -- a deliberate two-hue
+   exception since "in vs out" is a polarity, not a category list. */
+.cashrep-line-path { fill: none; stroke: #2563eb; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.cashrep-area-fill-pos { fill: #059669; opacity: 0.12; }
+.cashrep-area-fill-neg { fill: #dc2626; opacity: 0.12; }
+.cashrep-grid-line { stroke: #e2e8f0; stroke-width: 1; }
+.cashrep-zero-line { stroke: #cbd5e1; stroke-width: 1; }
+.cashrep-axis-label { fill: #94a3b8; font-size: 9px; font-family: inherit; }
+.cashrep-crosshair-line { stroke: #cbd5e1; stroke-width: 1; }
+.cashrep-crosshair-dot { fill: #2563eb; stroke: #ffffff; stroke-width: 2; }
+.cashrep-hit-rect { fill: transparent; cursor: pointer; }
+.cashrep-bar-in { fill: #059669; transition: fill 0.1s; }
+.cashrep-bar-in:hover, .cashrep-bar-in.cashrep-bar-hover { fill: #047857; }
+.cashrep-bar-out { fill: #dc2626; transition: fill 0.1s; }
+.cashrep-bar-out:hover, .cashrep-bar-out.cashrep-bar-hover { fill: #b91c1c; }
+.cashrep-bar-hit { fill: transparent; cursor: pointer; }
+.cashrep-bar-label { fill: #1e293b; font-size: 11px; font-family: inherit; }
+.cashrep-bar-value { fill: #475569; font-size: 11px; font-weight: 600; font-family: inherit; }
+
+.cashrep-tooltip {
+    position: absolute;
+    pointer-events: none;
+    background: #0f172a;
+    color: #ffffff;
+    padding: 6px 10px;
+    border-radius: 6px;
+    font-size: 0.75rem;
+    line-height: 1.4;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.2);
+    z-index: 20;
+    white-space: nowrap;
+    opacity: 0;
+    transition: opacity 0.1s;
+}
+.cashrep-tooltip.show { opacity: 1; }
+.cashrep-tooltip .cashrep-tooltip-value { font-weight: 700; }
+.cashrep-tooltip .cashrep-tooltip-label { color: #cbd5e1; }
+
+.cashrep-table-simple { width: 100%; border-collapse: collapse; font-size: 0.8rem; }
+.cashrep-table-simple th { text-align: left; padding: 6px 8px; color: #64748b; border-bottom: 1px solid #e2e8f0; font-weight: 600; }
+.cashrep-table-simple td { padding: 6px 8px; border-bottom: 1px solid #f1f5f9; }
+.cashrep-table-simple td.cashrep-num, .cashrep-table-simple th.cashrep-num { text-align: right; }
+</style>

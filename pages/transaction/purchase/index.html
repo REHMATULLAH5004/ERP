@@ -557,10 +557,112 @@
                 <!-- Dynamic content -->
             </div>
             <div class="modal-footer">
+                <button class="btn btn-outline" id="viewPOCreditNoteBtn" style="display: none; color: #b91c1c; border-color: #fca5a5;" onclick="openCreditNoteModal()">
+                    <i class="fa-solid fa-rotate-left"></i> Create Credit Note
+                </button>
                 <button class="btn btn-primary" id="viewPOPrintBtn" onclick="printFromView()">
                     <i class="fa-solid fa-print"></i> <span id="viewPOPrintBtnLabel">Print PO</span>
                 </button>
                 <button class="btn btn-outline" onclick="closeModal('viewPOModal')">Close</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- 🔥 ADDED: CREDIT NOTE MODAL -- lets the user return received goods
+     against a specific GRN/batch back to the supplier, reducing stock and
+     adjusting the invoice (either against the outstanding payable, or as a
+     supplier credit balance if the GRN was paid in Cash). -->
+<div class="modal" id="creditNoteModal">
+    <div class="modal-dialog modal-xl">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h4><i class="fa-solid fa-rotate-left"></i> Create Credit Note (Return Goods to Supplier)</h4>
+                <button class="modal-close" onclick="closeCreditNoteModal()">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="grn-info-grid" style="margin-bottom: 16px;">
+                    <div class="grn-field">
+                        <label>GRN Number</label>
+                        <span id="cnGRNNumber" class="grn-value">-</span>
+                    </div>
+                    <div class="grn-field">
+                        <label>PO Reference</label>
+                        <span id="cnPONumber" class="grn-value">-</span>
+                    </div>
+                    <div class="grn-field">
+                        <label>Supplier</label>
+                        <span id="cnSupplierName" class="grn-value">-</span>
+                    </div>
+                    <div class="grn-field">
+                        <label>Invoice Number</label>
+                        <span id="cnInvoiceNumber" class="grn-value">-</span>
+                    </div>
+                    <div class="grn-field">
+                        <label>Payment Type</label>
+                        <span id="cnPaymentType" class="grn-value">-</span>
+                    </div>
+                    <div class="grn-field">
+                        <label>Currency</label>
+                        <span id="cnCurrency" class="grn-value">-</span>
+                    </div>
+                </div>
+                <div class="grn-field" style="margin-bottom: 16px;">
+                    <label>Reason for Return *</label>
+                    <textarea class="form-control" id="cnReason" rows="2" placeholder="e.g. damaged on arrival, wrong item supplied, near-expiry rejected..."></textarea>
+                </div>
+
+                <div class="grn-lines-section">
+                    <div class="grn-lines-header">
+                        <span>Items to Return</span>
+                        <span id="cnLineCount">0 lines available</span>
+                    </div>
+                    <div class="table-responsive">
+                        <table class="table-minimal" id="cnLinesTable">
+                            <thead>
+                                <tr>
+                                    <th style="width: 30px;">#</th>
+                                    <th>Product</th>
+                                    <th style="width: 110px;">Batch</th>
+                                    <th style="width: 100px;">Expiry</th>
+                                    <th style="width: 70px;">Received</th>
+                                    <th style="width: 80px;">Already Returned</th>
+                                    <th style="width: 80px;">Max Returnable</th>
+                                    <th style="width: 90px;">Rate</th>
+                                    <th style="width: 90px;">Return Qty</th>
+                                    <th style="width: 100px; text-align: right;">Line Total</th>
+                                </tr>
+                            </thead>
+                            <tbody id="cnLinesBody">
+                                <tr><td colspan="10" class="text-center text-muted" style="padding: 30px;">Loading...</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <div class="grn-summary">
+                    <div class="grn-summary-item total">
+                        <span>Total Credit Amount</span>
+                        <strong id="cnTotalAmount">$0.00</strong>
+                    </div>
+                    <div class="grn-summary-item">
+                        <span>Applied to Outstanding Payable</span>
+                        <strong id="cnPayableApplied" style="color: #2563eb;">$0.00</strong>
+                    </div>
+                    <div class="grn-summary-item">
+                        <span>Added to Supplier Credit Balance</span>
+                        <strong id="cnCreditBalanceApplied" style="color: #15803d;">$0.00</strong>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-primary" id="saveCreditNoteBtn" onclick="saveCreditNote()">
+                    <i class="fa-solid fa-check-circle"></i> Save Credit Note
+                </button>
+                <button class="btn btn-outline" id="printCreditNoteBtn" style="display: none;" onclick="printSavedCreditNote()">
+                    <i class="fa-solid fa-print"></i> Print Credit Note
+                </button>
+                <button class="btn btn-outline" onclick="closeCreditNoteModal()">Cancel</button>
             </div>
         </div>
     </div>

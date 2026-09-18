@@ -126,8 +126,20 @@
                                         <i class="fa-regular fa-trash-can"></i>
                                     </button>
                                 </td>
-                                <td style="padding: 2px 4px;">
-                                    <select class="wholesale-pos-item" style="width: 100%; padding: 3px 6px; border: 1px solid #e2e8f0; border-radius: 3px; background: white; font-size: 0.8rem;">
+                                <td style="padding: 2px 4px; position: relative;">
+                                    <!-- 🔥 CHANGED: item picking used to be a plain <select> that
+                                         only matched by the item's own name. Replaced with a
+                                         type-to-search text box that filters against BOTH the item
+                                         name and its generic name (a shared dropdown list, built in
+                                         index.js, is positioned under whichever row's search box is
+                                         active). The original <select> is kept -- just hidden -- so
+                                         every existing piece of logic that reads/writes its .value,
+                                         .options, or listens for its 'change' event (batch loading,
+                                         rate calc, getSaleData(), edit-loading, etc.) keeps working
+                                         unchanged; picking a result in the new dropdown just sets
+                                         this select's value and dispatches a real 'change' on it. -->
+                                    <input type="text" class="wholesale-pos-item-search" placeholder="Search item or generic name..." autocomplete="off" style="width: 100%; padding: 3px 6px; border: 1px solid #e2e8f0; border-radius: 3px; background: white; font-size: 0.8rem;">
+                                    <select class="wholesale-pos-item" style="display: none;">
                                         <option value="">Select Item</option>
                                     </select>
                                 </td>
@@ -164,6 +176,13 @@
                         </tbody>
                     </table>
                 </div>
+
+                <!-- 🔥 ADDED: shared item-search results dropdown, used by every row's
+                     .wholesale-pos-item-search box (see index.js). One reusable element,
+                     positioned with `fixed` and anchored under whichever search box is
+                     currently active -- avoids being clipped by the item table's own
+                     horizontal-scroll container, which a per-row dropdown would be. -->
+                <div id="wholesaleItemSearchDropdown" style="display: none; position: fixed; z-index: 2000; background: white; border: 1px solid #e2e8f0; border-radius: 6px; box-shadow: 0 8px 24px rgba(0,0,0,0.15); max-height: 260px; overflow-y: auto;"></div>
 
                 <!-- Totals Section -->
                 <div style="margin-top: 8px; padding: 8px 15px; background: #f8fafc; border-radius: 4px; border: 1px solid #e2e8f0;">

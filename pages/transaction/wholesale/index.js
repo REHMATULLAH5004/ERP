@@ -137,6 +137,20 @@
     const printModal = document.getElementById('printModal');
     let currentSaleData = null;
 
+    // 🔥 ADDED: item search-by-name-or-generic-name (see the matching HTML
+    // change). productCatalogCache holds the full product list (id, name,
+    // generic) so every row's search box can filter instantly without a
+    // DB round-trip per keystroke; it's (re)populated wherever the product
+    // dropdown itself is loaded. itemSearchDropdownEl is the one shared
+    // results list (fixed-positioned) reused by whichever row's search box
+    // currently has focus; activeItemSearchRow/Input/Select track which
+    // row that dropdown is currently acting on.
+    let productCatalogCache = [];
+    const itemSearchDropdownEl = document.getElementById('wholesaleItemSearchDropdown');
+    let activeItemSearchRow = null;
+    let activeItemSearchInput = null;
+    let activeItemSearchSelect = null;
+
     // 🔥 FIX: this used to not exist at all -- loadWholesaleForEdit()
     // populated the form from an existing sale, but saveTransaction() had
     // no way to know it was looking at an edit rather than a new sale, so
@@ -740,6 +754,144 @@
         }
     });
 
+    // ============================================
+    // 🔥 ADDED: ITEM SEARCH (by item name OR generic name)
+    // ============================================
+    // The item picker used to be a plain <select> -- browsers only jump to
+    // an option by matching the first letters you type against its VISIBLE
+    // text (the product name), so there was no way to find a product by its
+    // generic name. This adds a type-to-search text box per row, filtering
+    // against both product_name and generic name from productCatalogCache,
+    // with one shared results dropdown (fixed-positioned, so it's never
+    // clipped by the item table's own horizontal-scroll wrapper). Picking a
+    // result just sets the row's hidden <select class="wholesale-pos-item">
+    // value and dispatches a real 'change' event on it, so every existing
+    // handler (batch loading, rate calc, getSaleData(), etc.) keeps working
+    // completely unchanged.
+
+    // Sets a row's search box text to match whatever its hidden select
+    // currently has selected (or clears it if nothing is selected). Called
+    // after loading a saved sale into a row, and after Reset/new-row setup,
+    // so the visible text never drifts from the actual selected item.
+    function syncItemSearchDisplay(row) {
+        if (!row) return;
+        const select = row.querySelector('.wholesale-pos-item');
+        const searchInput = row.querySelector('.wholesale-pos-item-search');
+        if (!select || !searchInput) return;
+        const opt = select.options[select.selectedIndex];
+        searchInput.value = (opt && opt.value) ? opt.textContent.trim() : '';
+    }
+
+    function renderItemSearchResults(query) {
+        if (!itemSearchDropdownEl) return;
+        const q = (query || '').trim().toLowerCase();
+        let matches = productCatalogCache;
+        if (q) {
+            matches = productCatalogCache.filter(p =>
+                (p.product_name || '').toLowerCase().includes(q) ||
+                (p.generic || '').toLowerCase().includes(q)
+            );
+        }
+        matches = matches.slice(0, 50);
+
+        if (matches.length === 0) {
+            itemSearchDropdownEl.innerHTML = `<div style="padding:10px 12px; color:#94a3b8; font-size:0.8rem;">No matching items</div>`;
+        } else {
+            itemSearchDropdownEl.innerHTML = matches.map(p => `
+                <div class="wholesale-item-search-option" data-id="${p.id}" style="padding:6px 12px; cursor:pointer; font-size:0.8rem; border-bottom:1px solid #f1f5f9;">
+                    <div style="color:#0f172a;">${p.product_name}</div>
+                    ${p.generic ? `<div style="color:#94a3b8; font-size:0.7rem; margin-top:1px;">${p.generic}</div>` : ''}
+                </div>
+            `).join('');
+        }
+    }
+
+    function showItemDropdownFor(row, searchInput, select, query) {
+        if (!itemSearchDropdownEl) return;
+        activeItemSearchRow = row;
+        activeItemSearchInput = searchInput;
+        activeItemSearchSelect = select;
+        renderItemSearchResults(query);
+
+        const rect = searchInput.getBoundingClientRect();
+        itemSearchDropdownEl.style.left = `${rect.left}px`;
+        itemSearchDropdownEl.style.top = `${rect.bottom + 2}px`;
+        itemSearchDropdownEl.style.width = `${Math.max(rect.width, 240)}px`;
+        itemSearchDropdownEl.style.display = 'block';
+    }
+
+    function hideItemDropdown() {
+        if (!itemSearchDropdownEl) return;
+        itemSearchDropdownEl.style.display = 'none';
+        activeItemSearchRow = null;
+        activeItemSearchInput = null;
+        activeItemSearchSelect = null;
+    }
+
+    posTableBody.addEventListener('input', function(e) {
+        if (e.target.classList.contains('wholesale-pos-item-search')) {
+            const row = e.target.closest('tr');
+            const select = row.querySelector('.wholesale-pos-item');
+            // Typing invalidates whatever was previously selected until a
+            // result is actually clicked -- mirrors a plain <select> being
+            // reset to "Select Item" while you're still choosing.
+            if (select.value) {
+                select.value = '';
+                select.dispatchEvent(new Event('change', { bubbles: true }));
+            }
+            showItemDropdownFor(row, e.target, select, e.target.value);
+        }
+    });
+
+    // 'focus' doesn't bubble, so this listener has to run in the capture
+    // phase to see it via delegation on posTableBody.
+    posTableBody.addEventListener('focus', function(e) {
+        if (e.target.classList.contains('wholesale-pos-item-search')) {
+            const row = e.target.closest('tr');
+            const select = row.querySelector('.wholesale-pos-item');
+            showItemDropdownFor(row, e.target, select, e.target.value);
+        }
+    }, true);
+
+    // Picking a result: 'mousedown' (not 'click') so this fires BEFORE the
+    // search box's own 'blur' handler below, which would otherwise hide the
+    // dropdown first and cause the click to land on nothing.
+    posTableBody.addEventListener('mousedown', function(e) {
+        const option = e.target.closest('.wholesale-item-search-option');
+        if (!option || !activeItemSearchRow) return;
+        e.preventDefault();
+
+        const select = activeItemSearchSelect;
+        const searchInput = activeItemSearchInput;
+        select.value = option.dataset.id;
+        syncItemSearchDisplay(activeItemSearchRow);
+        hideItemDropdown();
+        select.dispatchEvent(new Event('change', { bubbles: true }));
+        searchInput.blur();
+    });
+
+    // 'blur' doesn't bubble either -- capture phase again. Delayed slightly
+    // so the mousedown handler above (which runs first) has already set the
+    // select's value before this resyncs the visible text.
+    posTableBody.addEventListener('blur', function(e) {
+        if (e.target.classList.contains('wholesale-pos-item-search')) {
+            const row = e.target.closest('tr');
+            setTimeout(() => {
+                hideItemDropdown();
+                syncItemSearchDisplay(row);
+            }, 150);
+        }
+    }, true);
+
+    // Click anywhere outside the dropdown/search boxes closes it (covers
+    // clicking a different row, another field, etc.).
+    document.addEventListener('click', function(e) {
+        if (!itemSearchDropdownEl || itemSearchDropdownEl.style.display === 'none') return;
+        if (e.target.classList.contains('wholesale-pos-item-search')) return;
+        if (itemSearchDropdownEl.contains(e.target)) return;
+        hideItemDropdown();
+    });
+
     // Remove row handler
     posTableBody.addEventListener('click', function(e) {
         if (e.target.closest('.wholesale-remove-btn')) {
@@ -767,6 +919,7 @@
         const firstRow = posTableBody.querySelector('tr:first-child');
         if (firstRow) {
             const itemSelect = firstRow.querySelector('.wholesale-pos-item');
+            const itemSearchInput = firstRow.querySelector('.wholesale-pos-item-search');
             const batchSelect = firstRow.querySelector('.wholesale-pos-batch');
             const packInput = firstRow.querySelector('.wholesale-pos-pack-size');
             const taxInput = firstRow.querySelector('.wholesale-pos-tax');
@@ -775,6 +928,7 @@
             const totalInput = firstRow.querySelector('.wholesale-pos-total');
 
             if (itemSelect) itemSelect.value = '';
+            if (itemSearchInput) itemSearchInput.value = ''; // 🔥 ADDED: keep in sync with itemSelect above
             if (batchSelect) batchSelect.innerHTML = `<option value="">Select Batch</option>`;
             if (packInput) packInput.value = '';
             if (taxInput) taxInput.value = '';
@@ -807,6 +961,7 @@
         newRow.classList.remove('wholesale-pos-row');
 
         const itemSelect = newRow.querySelector('.wholesale-pos-item');
+        const itemSearchInput = newRow.querySelector('.wholesale-pos-item-search');
         const batchSelect = newRow.querySelector('.wholesale-pos-batch');
         const packInput = newRow.querySelector('.wholesale-pos-pack-size');
         const taxInput = newRow.querySelector('.wholesale-pos-tax');
@@ -818,6 +973,7 @@
             itemSelect.value = '';
             loadProductDropdownsForRow(itemSelect);
         }
+        if (itemSearchInput) itemSearchInput.value = ''; // 🔥 ADDED: keep in sync with itemSelect above (cloned from the template, which may carry stale text)
         if (batchSelect) batchSelect.innerHTML = `<option value="">Select Batch</option>`;
         if (packInput) packInput.value = '';
         if (taxInput) taxInput.value = '';
@@ -885,6 +1041,15 @@
 
             const genericMap = await buildGenericNameMap(products);
 
+            // 🔥 ADDED: feeds the item search box's filtering (matches on
+            // BOTH product_name and generic name) -- see the item-search
+            // block above.
+            productCatalogCache = products.map(p => ({
+                id: p.id,
+                product_name: p.product_name,
+                generic: genericMap[p.generic_name_id] || ''
+            }));
+
             selects.forEach(select => {
                 if (select) {
                     select.innerHTML = `<option value="">Select Item</option>`;
@@ -909,6 +1074,15 @@
             if (error) throw error;
 
             const genericMap = await buildGenericNameMap(products);
+
+            // Keep the shared search cache fresh here too -- this runs on
+            // every Reset/new-row, so it doubles as a periodic refresh in
+            // case products were added since the page loaded.
+            productCatalogCache = products.map(p => ({
+                id: p.id,
+                product_name: p.product_name,
+                generic: genericMap[p.generic_name_id] || ''
+            }));
 
             select.innerHTML = `<option value="">Select Item</option>`;
             products.forEach(p => {
@@ -1778,8 +1952,10 @@
                 const firstRow = posTableBody.querySelector('tr:first-child');
                 if (firstRow) {
                     const itemSelect = firstRow.querySelector('.wholesale-pos-item');
+                    const itemSearchInput = firstRow.querySelector('.wholesale-pos-item-search');
                     const batchSelect = firstRow.querySelector('.wholesale-pos-batch');
                     if (itemSelect) itemSelect.value = '';
+                    if (itemSearchInput) itemSearchInput.value = ''; // 🔥 ADDED: keep in sync with itemSelect above
                     if (batchSelect) batchSelect.innerHTML = `<option value="">Select Batch</option>`;
                 }
 
@@ -1833,6 +2009,7 @@
                             itemSelect.appendChild(newOpt);
                         }
                         itemSelect.value = item.product_id;
+                        syncItemSearchDisplay(targetRow); // 🔥 ADDED: reflect the selected item in the new search box
                     }
 
                     if (batchSelect && item.batch_id) {
@@ -1996,6 +2173,27 @@
                         ` : ''}
                     ` : `<p>This is a quotation only and does not constitute a tax invoice. Prices valid for 30 days.</p>`}
                 </div>
+
+                ${!isQuotation ? `
+                <!-- 🔥 ADDED: sign-off boxes on the invoice itself, separate
+                     from the Delivery Note's Dispatched/Received boxes --
+                     Prepared By covers whoever drew up the invoice, before
+                     the goods have necessarily even left the building. Only
+                     on actual invoices, not quotations (nothing's shipped
+                     yet, same reasoning as the Delivery Note being skipped
+                     for quotations below). -->
+                <div style="margin-top: 30px; display: flex; justify-content: space-between; gap: 20px; font-size: 0.85rem;">
+                    <div style="flex: 1; border-top: 1px solid #1e293b; padding-top: 6px;">
+                        Prepared By &nbsp;&nbsp; Name / Signature &amp; Date
+                    </div>
+                    <div style="flex: 1; border-top: 1px solid #1e293b; padding-top: 6px;">
+                        Delivered By &nbsp;&nbsp; Name / Signature &amp; Date
+                    </div>
+                    <div style="flex: 1; border-top: 1px solid #1e293b; padding-top: 6px;">
+                        Received By &nbsp;&nbsp; Name / Signature &amp; Date
+                    </div>
+                </div>
+                ` : ''}
             </div>
         `;
     }
@@ -2171,20 +2369,29 @@
                 .copy-page:last-child { page-break-after: auto; }
                 .copy-label { text-align: center; background: #0f172a; color: white; padding: 4px; font-weight: bold; letter-spacing: 0.1em; font-size: 0.8rem; margin-bottom: 16px; }
 
-                .doc-header { border-bottom: 3px solid #0f766e; padding-bottom: 14px; margin-bottom: 14px; }
-                .company-block h1 { margin: 0; color: #0f766e; font-size: 1.4rem; letter-spacing: 0.02em; }
+                /* 🔥 CHANGED: this whole invoice/quotation/delivery-note
+                   print-out used to be themed in teal (#0f766e). On a
+                   black-and-white printer, a colored fill like that gets
+                   dithered to a muddy grey instead of printing as a clean
+                   solid -- every accent below is now pure black (or the
+                   existing near-black #0f172a already used for the copy
+                   label), which a monochrome printer renders crisply with
+                   no dithering at all. Nothing here depends on color to
+                   convey meaning, so this is a pure look-and-feel change. */
+                .doc-header { border-bottom: 3px solid #000000; padding-bottom: 14px; margin-bottom: 14px; }
+                .company-block h1 { margin: 0; color: #000000; font-size: 1.4rem; letter-spacing: 0.02em; }
                 .company-block p { margin: 3px 0 0; color: #64748b; font-size: 0.85rem; }
 
                 .doc-title-row { margin-bottom: 16px; }
-                .doc-title { font-size: 2rem; font-weight: 800; color: #0f766e; letter-spacing: 0.03em; }
-                .quotation-badge { display: inline-block; background: #f59e0b; color: white; padding: 3px 14px; border-radius: 10px; font-weight: bold; font-size: 0.8rem; margin-left: 12px; vertical-align: middle; }
+                .doc-title { font-size: 2rem; font-weight: 800; color: #000000; letter-spacing: 0.03em; }
+                .quotation-badge { display: inline-block; background: #000000; color: white; padding: 3px 14px; border-radius: 10px; font-weight: bold; font-size: 0.8rem; margin-left: 12px; vertical-align: middle; }
 
                 .info-row { display: flex; justify-content: space-between; gap: 20px; margin-bottom: 20px; }
                 .info-box { background: #f1f5f9; border-radius: 6px; padding: 12px 16px; font-size: 0.85rem; line-height: 1.7; flex: 1; }
                 .bill-to { text-align: right; font-size: 0.85rem; line-height: 1.6; flex: 1; }
 
                 table { width: 100%; border-collapse: collapse; margin-bottom: 20px; font-size: 0.85rem; }
-                th { background: #0f766e; color: white; padding: 10px; text-align: left; font-weight: 600; }
+                th { background: #000000; color: white; padding: 10px; text-align: left; font-weight: 600; }
                 th.text-right { text-align: right; }
                 th.text-center { text-align: center; }
                 td { padding: 10px; border-bottom: 1px solid #e2e8f0; }
@@ -2194,10 +2401,10 @@
 
                 .totals-box { max-width: 300px; margin-left: auto; margin-bottom: 24px; }
                 .totals-row { display: flex; justify-content: space-between; padding: 6px 12px; font-size: 0.9rem; }
-                .totals-row.grand { background: #0f766e; color: white; font-weight: bold; font-size: 1rem; border-radius: 4px; margin-top: 4px; }
+                .totals-row.grand { background: #000000; color: white; font-weight: bold; font-size: 1rem; border-radius: 4px; margin-top: 4px; }
 
                 .payment-info { border-top: 1px solid #e2e8f0; padding-top: 16px; font-size: 0.85rem; color: #334155; }
-                .payment-info strong { display: block; margin-bottom: 4px; color: #0f766e; }
+                .payment-info strong { display: block; margin-bottom: 4px; color: #000000; }
                 .payment-info p { margin: 0 0 12px; line-height: 1.6; }
 
                 @media print { body { margin: 0; padding: 15px; } }

@@ -1,0 +1,286 @@
+<div class="module-view-container">
+    <h3 style="margin: 0 0 4px 0;"><i class="fa-solid fa-receipt"></i> Expense Report</h3>
+    <p style="color:#64748b; font-size:0.85rem; margin-top:0; margin-bottom:20px;">
+        Every recorded expense, by category and by payment account.
+    </p>
+
+    <!-- Filter Bar -->
+    <div class="exprep-filter-bar card">
+        <div class="exprep-filter-field">
+            <label>From</label>
+            <input type="date" id="exprepFrom">
+        </div>
+        <div class="exprep-filter-field">
+            <label>To</label>
+            <input type="date" id="exprepTo">
+        </div>
+        <div class="exprep-filter-field">
+            <label>Category</label>
+            <select id="exprepCategoryFilter">
+                <option value="ALL">All categories</option>
+            </select>
+        </div>
+        <button class="btn btn-primary btn-sm" id="exprepApplyBtn" onclick="window.expenseReportApply()">
+            <i class="fa-solid fa-filter"></i> Apply
+        </button>
+        <button class="btn btn-sm exprep-export-btn" onclick="window.expenseReportExportCsv()">
+            <i class="fa-solid fa-file-csv"></i> Export CSV
+        </button>
+        <span id="exprepRangeLabel" class="exprep-range-label"></span>
+    </div>
+
+    <!-- KPI Row -->
+    <div class="exprep-kpis">
+        <div class="exprep-kpi-card" style="border-left: 4px solid #dc2626;">
+            <h4>Total Expenses</h4>
+            <p id="exprepStatTotal">--</p>
+        </div>
+        <div class="exprep-kpi-card" style="border-left: 4px solid #f59e0b;">
+            <h4>Transactions</h4>
+            <p id="exprepStatCount">--</p>
+        </div>
+        <div class="exprep-kpi-card" style="border-left: 4px solid #7c3aed;">
+            <h4>Top Category</h4>
+            <p id="exprepStatTopCategory">--</p>
+        </div>
+        <div class="exprep-kpi-card" style="border-left: 4px solid #2563eb;">
+            <h4>Average / Transaction</h4>
+            <p id="exprepStatAverage">--</p>
+        </div>
+    </div>
+
+    <!-- Charts Row -->
+    <div class="exprep-charts">
+        <div class="card exprep-chart-card">
+            <div class="exprep-chart-header">
+                <div>
+                    <strong>Expenses By Category</strong>
+                    <span class="exprep-chart-subtitle">Selected range</span>
+                </div>
+                <button class="exprep-table-toggle" id="exprepCatTableToggle" onclick="window.toggleExpenseReportTable('category')">
+                    <i class="fa-solid fa-table"></i> View as table
+                </button>
+            </div>
+            <div id="exprepCatChartWrap">
+                <div id="exprepCatChart" class="exprep-chart-svg-wrap"></div>
+                <div id="exprepCatTable" class="exprep-chart-table-wrap" style="display:none;"></div>
+            </div>
+        </div>
+
+        <div class="card exprep-chart-card">
+            <div class="exprep-chart-header">
+                <div>
+                    <strong>By Payment Account</strong>
+                    <span class="exprep-chart-subtitle">Selected range</span>
+                </div>
+                <button class="exprep-table-toggle" id="exprepAcctTableToggle" onclick="window.toggleExpenseReportTable('account')">
+                    <i class="fa-solid fa-table"></i> View as table
+                </button>
+            </div>
+            <div id="exprepAcctChartWrap">
+                <div id="exprepAcctChart" class="exprep-chart-svg-wrap"></div>
+                <div id="exprepAcctTable" class="exprep-chart-table-wrap" style="display:none;"></div>
+            </div>
+        </div>
+    </div>
+
+    <div class="card exprep-chart-card" style="margin-bottom:20px;">
+        <div class="exprep-chart-header">
+            <div>
+                <strong>Expense Trend</strong>
+                <span class="exprep-chart-subtitle">Selected range</span>
+            </div>
+            <button class="exprep-table-toggle" id="exprepTrendTableToggle" onclick="window.toggleExpenseReportTable('trend')">
+                <i class="fa-solid fa-table"></i> View as table
+            </button>
+        </div>
+        <div id="exprepTrendChartWrap">
+            <div id="exprepTrendChart" class="exprep-chart-svg-wrap"></div>
+            <div id="exprepTrendTable" class="exprep-chart-table-wrap" style="display:none;"></div>
+        </div>
+    </div>
+
+    <!-- Detailed list -->
+    <div class="card" style="padding:16px 20px 20px;">
+        <div class="exprep-chart-header" style="margin-bottom:12px;">
+            <div>
+                <strong>Expense Transactions</strong>
+                <span class="exprep-chart-subtitle" id="exprepListCount"></span>
+            </div>
+        </div>
+        <div class="exprep-table-scroll">
+            <table class="exprep-table-simple exprep-list-table">
+                <thead>
+                    <tr>
+                        <th>Date</th>
+                        <th>Transaction #</th>
+                        <th>Category</th>
+                        <th>Description</th>
+                        <th>Reference</th>
+                        <th>Paid Via</th>
+                        <th class="exprep-num">Amount</th>
+                    </tr>
+                </thead>
+                <tbody id="exprepListBody"></tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+<style>
+.exprep-filter-bar {
+    display: flex;
+    align-items: flex-end;
+    gap: 14px;
+    padding: 14px 18px;
+    margin-bottom: 20px;
+    flex-wrap: wrap;
+}
+.exprep-filter-field { display: flex; flex-direction: column; gap: 4px; }
+.exprep-filter-field label { font-size: 0.72rem; color: #64748b; font-weight: 600; text-transform: uppercase; letter-spacing: 0.4px; }
+.exprep-filter-field input[type="date"], .exprep-filter-field select {
+    border: 1px solid #e2e8f0;
+    border-radius: 6px;
+    padding: 6px 10px;
+    font-size: 0.85rem;
+    color: #1e293b;
+}
+.exprep-export-btn {
+    background: transparent;
+    color: #059669;
+    border: 1px solid #059669;
+    border-radius: 6px;
+    padding: 7px 12px;
+}
+.exprep-export-btn:hover { background: #ecfdf5; }
+.exprep-range-label { margin-left: auto; font-size: 0.78rem; color: #94a3b8; align-self: center; }
+
+.exprep-kpis {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 15px;
+    margin-bottom: 20px;
+}
+@media (max-width: 900px) {
+    .exprep-kpis { grid-template-columns: repeat(2, 1fr); }
+}
+.exprep-kpi-card {
+    background: white;
+    padding: 16px 20px;
+    border-radius: 8px;
+    border: 1px solid #e8edf3;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+}
+.exprep-kpi-card h4 {
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: #64748b;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin: 0 0 6px 0;
+}
+.exprep-kpi-card p {
+    font-size: 1.3rem;
+    font-weight: 700;
+    margin: 0;
+    color: #1e293b;
+}
+
+.exprep-charts {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 20px;
+    margin-bottom: 20px;
+}
+@media (max-width: 900px) {
+    .exprep-charts { grid-template-columns: 1fr; }
+}
+.exprep-chart-card { padding: 16px 20px 20px; }
+.exprep-chart-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    margin-bottom: 8px;
+}
+.exprep-chart-header strong { font-size: 0.9rem; color: #1e293b; }
+.exprep-chart-subtitle {
+    display: block;
+    font-size: 0.72rem;
+    color: #94a3b8;
+    margin-top: 2px;
+}
+.exprep-table-toggle {
+    background: none;
+    border: 1px solid #e2e8f0;
+    color: #64748b;
+    border-radius: 6px;
+    padding: 4px 10px;
+    font-size: 0.72rem;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    white-space: nowrap;
+}
+.exprep-table-toggle:hover { background: #f8fafc; color: #2563eb; border-color: #2563eb; }
+.exprep-chart-svg-wrap { position: relative; }
+.exprep-chart-svg-wrap svg { width: 100%; height: auto; display: block; overflow: visible; }
+.exprep-chart-empty { text-align: center; padding: 40px 10px; color: #94a3b8; font-size: 0.85rem; }
+
+/* Marks -- single accent hue (magnitude/ranked comparisons, not identity) */
+.exprep-line-path { fill: none; stroke: #dc2626; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.exprep-area-fill { fill: #dc2626; opacity: 0.10; }
+.exprep-grid-line { stroke: #e2e8f0; stroke-width: 1; }
+.exprep-axis-label { fill: #94a3b8; font-size: 9px; font-family: inherit; }
+.exprep-end-dot-ring { fill: #ffffff; }
+.exprep-end-dot { fill: #dc2626; }
+.exprep-value-label { fill: #475569; font-size: 10px; font-weight: 600; font-family: inherit; }
+.exprep-crosshair-line { stroke: #cbd5e1; stroke-width: 1; }
+.exprep-crosshair-dot { fill: #dc2626; stroke: #ffffff; stroke-width: 2; }
+.exprep-hit-rect { fill: transparent; cursor: pointer; }
+.exprep-bar { fill: #dc2626; transition: fill 0.1s; }
+.exprep-bar:hover, .exprep-bar.exprep-bar-hover { fill: #b91c1c; }
+.exprep-bar-acct { fill: #2563eb; transition: fill 0.1s; }
+.exprep-bar-acct:hover, .exprep-bar-acct.exprep-bar-hover { fill: #1d4ed8; }
+.exprep-bar-hit { fill: transparent; cursor: pointer; }
+.exprep-bar-label { fill: #1e293b; font-size: 11px; font-family: inherit; }
+.exprep-bar-value { fill: #475569; font-size: 11px; font-weight: 600; font-family: inherit; }
+
+.exprep-tooltip {
+    position: absolute;
+    pointer-events: none;
+    background: #0f172a;
+    color: #ffffff;
+    padding: 6px 10px;
+    border-radius: 6px;
+    font-size: 0.75rem;
+    line-height: 1.4;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.2);
+    z-index: 20;
+    white-space: nowrap;
+    opacity: 0;
+    transition: opacity 0.1s;
+}
+.exprep-tooltip.show { opacity: 1; }
+.exprep-tooltip .exprep-tooltip-value { font-weight: 700; }
+.exprep-tooltip .exprep-tooltip-label { color: #cbd5e1; }
+
+.exprep-table-simple { width: 100%; border-collapse: collapse; font-size: 0.8rem; }
+.exprep-table-simple th { text-align: left; padding: 6px 8px; color: #64748b; border-bottom: 1px solid #e2e8f0; font-weight: 600; }
+.exprep-table-simple td { padding: 6px 8px; border-bottom: 1px solid #f1f5f9; }
+.exprep-table-simple td.exprep-num, .exprep-table-simple th.exprep-num { text-align: right; }
+
+.exprep-table-scroll { overflow-x: auto; max-height: 480px; overflow-y: auto; }
+.exprep-list-table { min-width: 760px; }
+.exprep-list-table thead th { position: sticky; top: 0; background: white; z-index: 1; }
+.exprep-badge {
+    display: inline-block;
+    padding: 1px 8px;
+    border-radius: 8px;
+    font-size: 0.68rem;
+    font-weight: 600;
+    background: #fef2f2;
+    color: #dc2626;
+    white-space: nowrap;
+}
+</style>

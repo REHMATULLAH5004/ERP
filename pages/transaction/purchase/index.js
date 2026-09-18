@@ -73,6 +73,11 @@
         // button prints the Purchase Order or the Goods Receipt Note.
         currentViewOrderId: null,
         currentViewHasGRN: false,
+        // 🔥 ADDED: Credit Note feature.
+        currentViewGRNData: null,
+        creditNoteLines: [],
+        creditNoteSupplierPayable: null,
+        lastSavedCreditNoteId: null,
         isEditing: false,
         reorderItems: [],
         // 🔥 ADDED: products sharing a generic_name_id with something
@@ -103,7 +108,12 @@
         { code: '1121', name: 'Bank - ZMW', type: 'Asset', category: 'Current Asset', normal_balance: 'Debit' },
         { code: '1400', name: 'Inventory', type: 'Asset', category: 'Current Asset', normal_balance: 'Debit' },
         { code: '2001', name: 'Accounts Payable', type: 'Liability', category: 'Current Liability', normal_balance: 'Credit' },
-        { code: '3000', name: 'Opening Balance Equity', type: 'Equity', category: 'Equity', normal_balance: 'Credit' }
+        { code: '3000', name: 'Opening Balance Equity', type: 'Equity', category: 'Equity', normal_balance: 'Credit' },
+        // 🔥 ADDED: Credit Note feature -- the ZMW balance a supplier owes
+        // back to us when goods are returned against a Cash-paid GRN (no
+        // supplier_payables row exists to reduce, so the credit is tracked
+        // here instead, and drawn down against future purchases).
+        { code: '1205', name: 'Advances to Suppliers', type: 'Asset', category: 'Current Asset', normal_balance: 'Debit' }
     ];
 
     async function ensureChartOfAccounts() {
@@ -171,7 +181,8 @@
                 bank_zmw: accountMap['bank_zmw'] || '1121',
                 inventory: accountMap['inventory'] || '1400',
                 accounts_payable: accountMap['accounts_payable'] || '2001',
-                opening_balance_equity: accountMap['opening_balance_equity'] || '3000'
+                opening_balance_equity: accountMap['opening_balance_equity'] || '3000',
+                advances_to_suppliers: accountMap['advances_to_suppliers'] || '1205'
             };
         } catch (error) {
             console.error('Error fetching account codes:', error);
@@ -180,7 +191,8 @@
                 bank_zmw: '1121',
                 inventory: '1400',
                 accounts_payable: '2001',
-                opening_balance_equity: '3000'
+                opening_balance_equity: '3000',
+                advances_to_suppliers: '1205'
             };
         }
     }
@@ -320,7 +332,7 @@
         const searchInput = document.getElementById('poProductSearch');
         const searchTerm = searchInput ? searchInput.value.trim() : '';
         const resultsDiv = document.getElementById('poSearchResults');
-        
+
         if (!resultsDiv) return;
 
         try {
@@ -328,10 +340,27 @@
                 .from('products')
                 .select('id, product_name, conversion_rate, generic_name_id')
                 .order('product_name', { ascending: true })
-                .limit(searchTerm ? 10 : 20);
+                .limit(searchTerm ? 30 : 20);
 
             if (searchTerm) {
-                query = query.ilike('product_name', `%${searchTerm}%`);
+                // 🔥 CHANGED: match on generic name too, not just product
+                // name -- staff often know a drug by its generic name
+                // rather than the brand name it's stocked under. Finds any
+                // generic_names rows matching the term first, then ORs
+                // their ids into the same products query alongside the
+                // existing product_name match.
+                const escapedTerm = searchTerm.replace(/[%_]/g, '\\$&').replace(/[,()]/g, ' ');
+                const { data: matchingGenerics } = await supabaseClient
+                    .from('generic_names')
+                    .select('id')
+                    .ilike('name', `%${escapedTerm}%`);
+                const genericIds = (matchingGenerics || []).map(g => g.id);
+
+                const orClauses = [`product_name.ilike.%${escapedTerm}%`];
+                if (genericIds.length > 0) {
+                    orClauses.push(`generic_name_id.in.(${genericIds.join(',')})`);
+                }
+                query = query.or(orClauses.join(','));
             }
 
             const { data: products, error } = await query;
@@ -377,18 +406,34 @@
         }
     }
 
+    // 🔥 ADDED: keyboard state for the product search dropdown -- ArrowUp/
+    // ArrowDown move productSearchHighlightIndex, Enter/Tab add whichever
+    // result it's currently pointing at. Mirrors the same highlight
+    // pattern initSearchableSelect() already uses for Supplier search.
+    let productSearchResults = [];
+    let productSearchHighlightIndex = -1;
+
     function displaySearchResults(products) {
+        productSearchResults = products || [];
+        productSearchHighlightIndex = productSearchResults.length ? 0 : -1;
+        renderSearchResultsList();
+        const resultsDiv = document.getElementById('poSearchResults');
+        if (resultsDiv) resultsDiv.style.display = 'block';
+    }
+
+    // Separate render step so arrow-key navigation can just redraw the
+    // highlight without re-querying the database on every keypress.
+    function renderSearchResultsList() {
         const resultsDiv = document.getElementById('poSearchResults');
         if (!resultsDiv) return;
-        
-        if (!products || products.length === 0) {
+
+        if (!productSearchResults || productSearchResults.length === 0) {
             resultsDiv.innerHTML = `<div class="result-item" style="color: #94a3b8; justify-content: center;">No products found</div>`;
-            resultsDiv.style.display = 'block';
             return;
         }
 
-        resultsDiv.innerHTML = products.map(p => `
-            <div class="result-item" onclick="addProductToPO('${p.id}')">
+        resultsDiv.innerHTML = productSearchResults.map((p, i) => `
+            <div class="result-item" data-index="${i}" onclick="addProductToPO('${p.id}')" style="${i === productSearchHighlightIndex ? 'background:#eff6ff;' : ''}">
                 <div>
                     <strong>${p.product_name}</strong>
                     <div style="font-size: 0.75rem; color: #94a3b8;">${p.generic_name || 'No generic'}</div>
@@ -397,8 +442,12 @@
                 <span style="color: #94a3b8; font-size: 0.8rem; background: #f1f5f9; padding: 2px 8px; border-radius: 4px;">Pack: ${p.conversion_rate || 1}</span>
             </div>
         `).join('');
-        
-        resultsDiv.style.display = 'block';
+    }
+
+    function scrollProductHighlightIntoView() {
+        const resultsDiv = document.getElementById('poSearchResults');
+        const el = resultsDiv?.querySelector(`.result-item[data-index="${productSearchHighlightIndex}"]`);
+        if (el) el.scrollIntoView({ block: 'nearest' });
     }
 
     // ============================================
@@ -471,6 +520,8 @@
         const search = document.getElementById('poProductSearch');
         if (results) results.style.display = 'none';
         if (search) search.value = '';
+        productSearchResults = [];
+        productSearchHighlightIndex = -1;
     }
 
     // ============================================
@@ -1502,7 +1553,24 @@
             }
         });
 
-        window.addEventListener('scroll', () => hide(), true);
+        // 🔥 FIX: "sometimes it can be selected, sometimes not" -- 'scroll'
+        // events don't bubble, but a capturing-phase listener on window
+        // still sees them fire for ANY scrollable descendant, including
+        // this dropdown's OWN results list (max-height + overflow-y:auto
+        // above). With more than a handful of suppliers, scrolling down
+        // inside the list itself to reach one further down immediately
+        // fired this handler and closed the whole dropdown out from under
+        // the click -- looked exactly like "the dropdown opens but you
+        // can't always pick something", and reopening/retyping (or a full
+        // page refresh, which resets everything back to a short list that
+        // doesn't need scrolling) was the only way around it. Only hide on
+        // a scroll that happens OUTSIDE the panel -- e.g. the modal body
+        // scrolling underneath it -- which is what this was meant to catch
+        // in the first place.
+        window.addEventListener('scroll', (e) => {
+            if (panel.contains(e.target)) return;
+            hide();
+        }, true);
         window.addEventListener('resize', () => hide());
 
         function currentLabel() {
@@ -2039,9 +2107,21 @@
     // MODAL FUNCTIONS
     // ============================================
 
-    function openNewPurchaseOrder() {
+    async function openNewPurchaseOrder() {
         state.poLines = [];
         state.isEditing = false;
+        // 🔥 FIX: "not taking the right rate from dashboard" -- sharedZmwPerUsd
+        // used to be fetched ONCE, when this whole module first loaded, and
+        // never again. If the shared exchange rate got corrected on the
+        // Dashboard afterwards (without a full page reload of Purchase),
+        // every "New Purchase Order" from then on kept quietly using the
+        // stale rate captured at page load. Re-fetching it here, every time
+        // this modal opens, means it's always current.
+        try {
+            sharedZmwPerUsd = await getSharedExchangeRate();
+        } catch (e) {
+            console.warn('Could not refresh shared exchange rate, using last known value:', e);
+        }
         resetPOForm();
         renderPOLines();
         updatePOTotal();
@@ -3369,6 +3449,14 @@
         const printLabel = document.getElementById('viewPOPrintBtnLabel');
         if (printLabel) printLabel.textContent = 'Print GRN';
 
+        // 🔥 ADDED: Credit Note feature -- keep the full GRN object around
+        // (with its lines + PO/supplier context) so the Credit Note modal
+        // doesn't need to re-fetch it, and show the "Create Credit Note"
+        // button now that a single GRN is actually in view.
+        state.currentViewGRNData = grn;
+        const cnBtn = document.getElementById('viewPOCreditNoteBtn');
+        if (cnBtn) cnBtn.style.display = '';
+
         showModal('viewPOModal');
     }
 
@@ -3557,6 +3645,13 @@
         state.currentViewHasGRN = false;
         const printLabel = document.getElementById('viewPOPrintBtnLabel');
         if (printLabel) printLabel.textContent = 'Print PO';
+
+        // 🔥 ADDED: this is a multi-GRN summary, not one specific receipt --
+        // Create Credit Note needs a single GRN (use "View" on a row, which
+        // routes through viewSingleGRNById -> viewSingleGRN instead).
+        state.currentViewGRNData = null;
+        const cnBtn = document.getElementById('viewPOCreditNoteBtn');
+        if (cnBtn) cnBtn.style.display = 'none';
 
         showModal('viewPOModal');
     }
@@ -4257,6 +4352,605 @@
     }
 
     // ============================================
+    // 🔥 ADDED: CREDIT NOTES -- "give something back and adjust the
+    // invoice again". A credit note always ties back to one specific GRN
+    // (physical returns only -- see openCreditNoteModal): it reduces the
+    // matching batch(es)' stock, and adjusts the money side either by
+    // reducing that GRN's supplier_payables row (if it was received on
+    // Credit) or by crediting suppliers.credit_balance (if it was Cash --
+    // there's no payable to reduce, so the amount is tracked as a balance
+    // the supplier owes back to us, drawable against future purchases).
+    // Deliberately does NOT touch purchase_order_lines/purchase_orders --
+    // those represent receipt history and feed updatePOHeader()'s status
+    // machine; a credit note is a separate, cross-referenced adjustment.
+    // ============================================
+
+    function closeCreditNoteModal() {
+        closeModal('creditNoteModal');
+    }
+
+    async function openCreditNoteModal() {
+        const grn = state.currentViewGRNData;
+        if (!grn) {
+            showToast('No GRN in view to create a credit note for', 'error');
+            return;
+        }
+
+        const lines = grn.goods_receipt_lines || [];
+        if (lines.length === 0) {
+            showToast('This GRN has no received lines to return', 'error');
+            return;
+        }
+
+        closeModal('viewPOModal');
+
+        document.getElementById('cnGRNNumber').textContent = grn.grn_number;
+        document.getElementById('cnPONumber').textContent = grn.purchase_orders?.po_number || 'N/A';
+        document.getElementById('cnSupplierName').textContent = grn.purchase_orders?.suppliers?.name || 'Unknown';
+        document.getElementById('cnInvoiceNumber').textContent = grn.invoice_number || 'N/A';
+        document.getElementById('cnCurrency').textContent = grn.currency || 'USD';
+        document.getElementById('cnPaymentType').textContent = 'Checking...';
+        const reasonField = document.getElementById('cnReason');
+        if (reasonField) reasonField.value = '';
+
+        const linesBody = document.getElementById('cnLinesBody');
+        if (linesBody) linesBody.innerHTML = `<tr><td colspan="10" class="text-center text-muted" style="padding: 30px;"><i class="fa-solid fa-spinner fa-spin"></i> Loading returnable items...</td></tr>`;
+
+        const printBtn = document.getElementById('printCreditNoteBtn');
+        if (printBtn) printBtn.style.display = 'none';
+        state.lastSavedCreditNoteId = null;
+
+        showModal('creditNoteModal');
+
+        try {
+            // A supplier_payables row only ever exists for a Credit GRN
+            // (createSupplierPayable() is only called when paymentType ===
+            // 'Credit') -- so its presence/absence IS the cash-vs-credit
+            // signal, with no separate payment_type column needed.
+            const { data: payable, error: payableError } = await supabaseClient
+                .from('supplier_payables')
+                .select('*')
+                .eq('grn_id', grn.id)
+                .maybeSingle();
+            if (payableError) console.error('Error checking supplier payable:', payableError);
+            state.creditNoteSupplierPayable = payable || null;
+            document.getElementById('cnPaymentType').textContent = payable
+                ? 'Credit (reduces outstanding payable first)'
+                : 'Cash (tracked as supplier credit balance)';
+
+            // Resolve the batch(es) each line was actually received into.
+            // goods_receipt_lines has no batch_id FK, so match on
+            // product_id + batch_number + expiry_date, same identity
+            // updateInventory() used to create the batch in the first place.
+            const productIds = [...new Set(lines.map(l => l.product_id).filter(Boolean))];
+            const { data: batchRows, error: batchError } = await supabaseClient
+                .from('batches')
+                .select('id, product_id, batch_number, expiry_date, total_qty')
+                .in('product_id', productIds.length ? productIds : ['00000000-0000-0000-0000-000000000000']);
+            if (batchError) throw batchError;
+
+            // Prior credit notes against these exact GRN lines, so a second
+            // return on the same GRN can't double-return the same stock.
+            const lineIds = lines.map(l => l.id);
+            const { data: priorReturns, error: priorError } = await supabaseClient
+                .from('purchase_credit_note_lines')
+                .select('goods_receipt_line_id, quantity_returned')
+                .in('goods_receipt_line_id', lineIds.length ? lineIds : ['00000000-0000-0000-0000-000000000000']);
+            if (priorError) throw priorError;
+
+            const priorReturnedByLine = {};
+            (priorReturns || []).forEach(r => {
+                priorReturnedByLine[r.goods_receipt_line_id] = (priorReturnedByLine[r.goods_receipt_line_id] || 0) + (r.quantity_returned || 0);
+            });
+
+            state.creditNoteLines = lines.map(line => {
+                const matches = (batchRows || []).filter(b =>
+                    b.product_id === line.product_id &&
+                    (b.batch_number || '') === (line.batch_number || '') &&
+                    (b.expiry_date || '') === (line.expiry_date || '')
+                );
+                const availableUnits = matches.reduce((sum, b) => sum + (b.total_qty || 0), 0);
+                const packSize = line.pack_size || 1;
+                const receivedQty = line.received_quantity || 0;
+                const alreadyReturnedQty = priorReturnedByLine[line.id] || 0;
+                // Capped by BOTH what's left of what we originally received
+                // (some may already have been returned via an earlier
+                // credit note) AND what's still physically in stock (some
+                // may already have been sold) -- whichever is smaller.
+                const maxReturnable = matches.length === 0
+                    ? 0
+                    : Math.max(0, Math.min(receivedQty - alreadyReturnedQty, Math.floor(availableUnits / packSize)));
+
+                return {
+                    goods_receipt_line_id: line.id,
+                    product_id: line.product_id,
+                    product_name: line.product_name,
+                    batch_number: line.batch_number,
+                    expiry_date: line.expiry_date,
+                    pack_size: packSize,
+                    purchase_rate: line.purchase_rate || 0,
+                    receivedQty,
+                    alreadyReturnedQty,
+                    batchMatches: matches.map(b => ({ id: b.id, total_qty: b.total_qty || 0 })),
+                    noBatchFound: matches.length === 0,
+                    maxReturnable,
+                    returnQty: 0
+                };
+            });
+
+            renderCreditNoteLines();
+        } catch (error) {
+            console.error('Error preparing credit note:', error);
+            showToast('Error loading GRN items for return: ' + error.message, 'error');
+            if (linesBody) linesBody.innerHTML = `<tr><td colspan="10" class="text-center text-muted" style="padding: 30px; color: #dc2626;">Failed to load items -- close and try again.</td></tr>`;
+        }
+    }
+
+    function renderCreditNoteLines() {
+        const grn = state.currentViewGRNData;
+        const symbol = grn?.currency === 'ZMW' ? 'ZK' : '$';
+        const linesBody = document.getElementById('cnLinesBody');
+        const countLabel = document.getElementById('cnLineCount');
+        if (!linesBody) return;
+
+        if (state.creditNoteLines.length === 0) {
+            linesBody.innerHTML = `<tr><td colspan="10" class="text-center text-muted" style="padding: 30px;">No items on this GRN</td></tr>`;
+            if (countLabel) countLabel.textContent = '0 lines available';
+            return;
+        }
+
+        linesBody.innerHTML = state.creditNoteLines.map((line, idx) => `
+            <tr>
+                <td>${idx + 1}</td>
+                <td>${line.product_name}${line.noBatchFound ? '<div style="color: #dc2626; font-size: 0.75rem;"><i class="fa-solid fa-triangle-exclamation"></i> Batch not found in stock -- cannot return</div>' : ''}</td>
+                <td>${line.batch_number || 'N/A'}</td>
+                <td>${formatDate(line.expiry_date)}</td>
+                <td>${line.receivedQty}</td>
+                <td>${line.alreadyReturnedQty}</td>
+                <td>${line.maxReturnable}</td>
+                <td>${symbol} ${formatNumber(line.purchase_rate)}</td>
+                <td>
+                    <input type="number" class="form-control cn-return-qty" data-idx="${idx}" min="0" max="${line.maxReturnable}" step="1"
+                        value="${line.returnQty}" ${line.maxReturnable <= 0 ? 'disabled' : ''}
+                        style="width: 75px; padding: 4px 6px;">
+                </td>
+                <td class="cn-line-total" style="text-align: right;">${symbol} ${formatNumber(line.returnQty * line.purchase_rate)}</td>
+            </tr>
+        `).join('');
+
+        if (countLabel) countLabel.textContent = `${state.creditNoteLines.length} line(s) available`;
+        recalcCreditNoteTotals();
+    }
+
+    function recalcCreditNoteTotals() {
+        const grn = state.currentViewGRNData;
+        const currency = grn?.currency || 'USD';
+        const exchangeRate = grn?.exchange_rate || 1;
+        const symbol = currency === 'ZMW' ? 'ZK' : '$';
+
+        const totalAmount = state.creditNoteLines.reduce((sum, l) => sum + (l.returnQty * l.purchase_rate), 0);
+
+        const payable = state.creditNoteSupplierPayable;
+        const payableRemaining = payable ? (payable.amount_remaining || 0) : 0;
+        const payableApplied = payable ? Math.min(totalAmount, payableRemaining) : 0;
+        const creditBalanceApplied = totalAmount - payableApplied;
+
+        const totalEl = document.getElementById('cnTotalAmount');
+        const payableEl = document.getElementById('cnPayableApplied');
+        const creditEl = document.getElementById('cnCreditBalanceApplied');
+        if (totalEl) totalEl.textContent = `${symbol} ${formatNumber(totalAmount)}`;
+        if (payableEl) payableEl.textContent = `${symbol} ${formatNumber(payableApplied)}`;
+        if (creditEl) creditEl.textContent = `${symbol} ${formatNumber(creditBalanceApplied)}`;
+
+        return { totalAmount, payableApplied, creditBalanceApplied, currency, exchangeRate };
+    }
+
+    async function generateCreditNoteNumber(attempt = 0) {
+        const { count, error } = await supabaseClient
+            .from('purchase_credit_notes')
+            .select('id', { count: 'exact', head: true });
+        if (error) throw error;
+        const next = (count || 0) + 1 + attempt;
+        return `CN-${new Date().getFullYear()}-${String(next).padStart(5, '0')}`;
+    }
+
+    async function saveCreditNote() {
+        const grn = state.currentViewGRNData;
+        if (!grn) {
+            showToast('No GRN in view', 'error');
+            return;
+        }
+
+        const reason = document.getElementById('cnReason')?.value?.trim() || '';
+        if (!reason) {
+            showToast('Please enter a reason for the return', 'error');
+            return;
+        }
+
+        const returnedLines = state.creditNoteLines.filter(l => (l.returnQty || 0) > 0);
+        if (returnedLines.length === 0) {
+            showToast('Please enter a return quantity for at least one item', 'error');
+            return;
+        }
+
+        for (const line of returnedLines) {
+            if (line.returnQty > line.maxReturnable) {
+                showToast(`${line.product_name}: return quantity exceeds what can be returned`, 'error');
+                return;
+            }
+        }
+
+        const saveBtn = document.getElementById('saveCreditNoteBtn');
+        if (saveBtn?.disabled) return;
+        if (saveBtn) {
+            saveBtn.disabled = true;
+            saveBtn.dataset.originalHtml = saveBtn.innerHTML;
+            saveBtn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Saving...';
+        }
+
+        try {
+            const currency = grn.currency || 'USD';
+            const exchangeRate = grn.exchange_rate || 1;
+            const supplierId = grn.supplier_id;
+            const symbol = currency === 'ZMW' ? 'ZK' : '$';
+
+            // Re-fetch the payable fresh right before writing -- the copy
+            // in state.creditNoteSupplierPayable could be a little stale if
+            // the modal was left open a while (e.g. someone else recorded a
+            // payment against it meanwhile).
+            let payable = null;
+            if (state.creditNoteSupplierPayable) {
+                const { data, error } = await supabaseClient
+                    .from('supplier_payables')
+                    .select('*')
+                    .eq('id', state.creditNoteSupplierPayable.id)
+                    .maybeSingle();
+                if (error) throw error;
+                payable = data || null;
+            }
+
+            const totalAmount = returnedLines.reduce((sum, l) => sum + (l.returnQty * l.purchase_rate), 0);
+            const zmwAmount = currency === 'USD' ? totalAmount * exchangeRate : totalAmount;
+            const payableRemaining = payable ? (payable.amount_remaining || 0) : 0;
+            const payableApplied = payable ? Math.min(totalAmount, payableRemaining) : 0;
+            const creditBalanceApplied = totalAmount - payableApplied;
+            const creditBalanceAppliedZmw = currency === 'USD' ? creditBalanceApplied * exchangeRate : creditBalanceApplied;
+            const payableAppliedZmw = currency === 'USD' ? payableApplied * exchangeRate : payableApplied;
+
+            const creditNoteNumber = await generateCreditNoteNumber();
+
+            const header = {
+                credit_note_number: creditNoteNumber,
+                po_id: grn.purchase_order_id,
+                grn_id: grn.id,
+                supplier_id: supplierId,
+                reason: reason,
+                currency: currency,
+                exchange_rate: exchangeRate,
+                total_amount: totalAmount,
+                zmw_amount: zmwAmount,
+                payable_applied: payableApplied,
+                credit_balance_applied: creditBalanceApplied,
+                status: 'Posted',
+                created_at: new Date().toISOString()
+            };
+
+            const { data: cnData, error: cnError } = await withAuthRetry(() => supabaseClient
+                .from('purchase_credit_notes')
+                .insert([header])
+                .select());
+            if (cnError) throw cnError;
+            const creditNoteId = cnData[0].id;
+
+            const lineRows = returnedLines.map(l => ({
+                credit_note_id: creditNoteId,
+                goods_receipt_line_id: l.goods_receipt_line_id,
+                product_id: l.product_id,
+                product_name: l.product_name,
+                batch_id: l.batchMatches[0]?.id || null,
+                batch_number: l.batch_number,
+                pack_size: l.pack_size,
+                quantity_returned: l.returnQty,
+                purchase_rate: l.purchase_rate,
+                total_amount: l.returnQty * l.purchase_rate,
+                created_at: new Date().toISOString()
+            }));
+
+            const { error: linesError } = await withAuthRetry(() => supabaseClient
+                .from('purchase_credit_note_lines')
+                .insert(lineRows));
+            if (linesError) throw linesError;
+
+            // Reduce stock: walk each line's matching batch row(s), taking
+            // units out of whichever has stock first, never below zero.
+            for (const line of returnedLines) {
+                let unitsToRemove = line.returnQty * line.pack_size;
+                for (const batch of line.batchMatches) {
+                    if (unitsToRemove <= 0) break;
+                    const take = Math.min(batch.total_qty, unitsToRemove);
+                    if (take <= 0) continue;
+                    const newQty = Math.max(0, batch.total_qty - take);
+                    const { error: batchUpdateError } = await withAuthRetry(() => supabaseClient
+                        .from('batches')
+                        .update({ total_qty: newQty })
+                        .eq('id', batch.id));
+                    if (batchUpdateError) {
+                        console.error(`Error reducing stock for batch ${batch.id}:`, batchUpdateError);
+                    } else {
+                        batch.total_qty = newQty;
+                        unitsToRemove -= take;
+                    }
+                }
+            }
+
+            // Adjust the payable (if one exists) for the portion applied to it.
+            if (payable && payableApplied > 0) {
+                // amount_paid is left untouched -- this reduces what's
+                // owed, it isn't a cash payment against it.
+                const newRemaining = Math.max(0, (payable.amount_remaining || 0) - payableApplied);
+                const newTotal = Math.max(0, (payable.total_amount || 0) - payableApplied);
+                const { error: payableUpdateError } = await withAuthRetry(() => supabaseClient
+                    .from('supplier_payables')
+                    .update({
+                        total_amount: newTotal,
+                        amount_remaining: newRemaining,
+                        status: newRemaining <= 0 ? 'Paid' : (payable.status === 'Pending' ? 'Pending' : payable.status),
+                        notes: `${payable.notes || ''} | Credit note ${creditNoteNumber}: -${currency} ${formatNumber(payableApplied)}`.trim()
+                    })
+                    .eq('id', payable.id));
+                if (payableUpdateError) console.error('Error adjusting supplier payable:', payableUpdateError);
+            }
+
+            // Credit the supplier's balance for the portion not covered by
+            // the payable (the whole amount, for a Cash GRN).
+            if (creditBalanceApplied > 0) {
+                const { data: supplierRow, error: supplierFetchError } = await supabaseClient
+                    .from('suppliers')
+                    .select('credit_balance')
+                    .eq('id', supplierId)
+                    .maybeSingle();
+                if (supplierFetchError) console.error('Error fetching supplier credit balance:', supplierFetchError);
+                const newBalance = (supplierRow?.credit_balance || 0) + creditBalanceAppliedZmw;
+                const { error: supplierUpdateError } = await withAuthRetry(() => supabaseClient
+                    .from('suppliers')
+                    .update({ credit_balance: newBalance })
+                    .eq('id', supplierId));
+                if (supplierUpdateError) console.error('Error updating supplier credit balance:', supplierUpdateError);
+            }
+
+            // Reversing GL entry: Credit Inventory for the full ZMW amount;
+            // Debit Accounts Payable for the portion that reduced the
+            // payable, Debit Advances to Suppliers for the portion tracked
+            // as a credit balance -- mirrors createGRNAccountingEntries()
+            // in reverse.
+            await createCreditNoteAccountingEntries(creditNoteNumber, zmwAmount, payableAppliedZmw, creditBalanceAppliedZmw);
+
+            state.lastSavedCreditNoteId = creditNoteId;
+            closeModal('creditNoteModal');
+            showCreditNoteSavedSummary(creditNoteNumber, creditNoteId, symbol, totalAmount, payableApplied, creditBalanceApplied);
+        } catch (error) {
+            console.error('Error saving credit note:', error);
+            showToast('Error saving credit note: ' + error.message, 'error');
+        } finally {
+            if (saveBtn) {
+                saveBtn.disabled = false;
+                saveBtn.innerHTML = saveBtn.dataset.originalHtml || '<i class="fa-solid fa-check-circle"></i> Save Credit Note';
+            }
+        }
+    }
+
+    async function createCreditNoteAccountingEntries(creditNoteNumber, zmwAmount, payableAppliedZmw, creditBalanceAppliedZmw) {
+        try {
+            await ensureChartOfAccounts();
+            const accountCodes = await getAccountCodesFromChartOfAccounts();
+
+            const journal = {
+                entry_date: new Date().toISOString().split('T')[0],
+                reference: creditNoteNumber,
+                description: `Goods returned to supplier - ${creditNoteNumber}`,
+                journal_number: `CN-${new Date().getFullYear()}-${String(Math.floor(Math.random() * 10000)).padStart(4, '0')}`,
+                status: 'Posted',
+                created_at: new Date().toISOString()
+            };
+
+            const { data: journalData, error: jError } = await withAuthRetry(() => supabaseClient
+                .from('journal_entries')
+                .insert([journal])
+                .select());
+            if (jError) throw jError;
+
+            const lines = [
+                { journal_entry_id: journalData[0].id, account_code: accountCodes.inventory, description: `Inventory returned - ${creditNoteNumber}`, debit: 0, credit: zmwAmount }
+            ];
+            if (payableAppliedZmw > 0) {
+                lines.push({ journal_entry_id: journalData[0].id, account_code: accountCodes.accounts_payable, description: `Payable reduced by return - ${creditNoteNumber}`, debit: payableAppliedZmw, credit: 0 });
+            }
+            if (creditBalanceAppliedZmw > 0) {
+                lines.push({ journal_entry_id: journalData[0].id, account_code: accountCodes.advances_to_suppliers, description: `Supplier credit balance from return - ${creditNoteNumber}`, debit: creditBalanceAppliedZmw, credit: 0 });
+            }
+
+            const { error: jlError } = await withAuthRetry(() => supabaseClient.from('journal_lines').insert(lines));
+            if (jlError) throw jlError;
+
+            console.log(`✅ Credit note accounting entries created for ${creditNoteNumber} (ZK${zmwAmount.toFixed(2)})`);
+        } catch (error) {
+            console.error('Error creating credit note accounting entries:', error);
+            showToast('Credit note saved, but the accounting entry failed -- please check manually.', 'warning');
+        }
+    }
+
+    function printSavedCreditNote() {
+        const printBtn = document.getElementById('printCreditNoteBtn');
+        const creditNoteId = printBtn?.dataset.creditNoteId || state.lastSavedCreditNoteId;
+        if (!creditNoteId) {
+            showToast('No saved credit note to print', 'error');
+            return;
+        }
+        printCreditNoteById(creditNoteId);
+    }
+
+    function printCreditNoteById(creditNoteId) {
+        if (!creditNoteId) {
+            showToast('No saved credit note to print', 'error');
+            return;
+        }
+
+        supabaseClient
+            .from('purchase_credit_notes')
+            .select(`
+                *,
+                purchase_credit_note_lines (*),
+                suppliers:supplier_id (name),
+                purchase_orders:po_id (po_number)
+            `)
+            .eq('id', creditNoteId)
+            .single()
+            .then(({ data, error }) => {
+                if (error || !data) {
+                    showToast('Credit note data not found', 'error');
+                    return;
+                }
+                generateCreditNotePrint(data);
+            });
+    }
+
+    // 🔥 ADDED: success confirmation shown after a credit note saves,
+    // mirroring showPostGRNSummary()'s convention -- with its own Print
+    // button (this GRN's credit-note modal is already closed by the time
+    // this shows, so it doesn't depend on that modal's own print button).
+    function showCreditNoteSavedSummary(creditNoteNumber, creditNoteId, symbol, totalAmount, payableApplied, creditBalanceApplied) {
+        const existing = document.getElementById('cnSummaryModal');
+        if (existing) existing.remove();
+
+        const overlay = document.createElement('div');
+        overlay.id = 'cnSummaryModal';
+        overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(15,23,42,0.6);backdrop-filter:blur(4px);z-index:1200;display:flex;justify-content:center;align-items:center;';
+        overlay.innerHTML = `
+            <div class="modal-content-box" style="background:white;padding:30px;border-radius:12px;width:90%;max-width:440px;box-shadow:0 20px 50px rgba(0,0,0,0.5);text-align:center;">
+                <div style="margin-bottom:14px;"><i class="fa-solid fa-circle-check" style="font-size:3rem;color:#22c55e;"></i></div>
+                <h3 style="margin:0 0 16px 0;color:#0f172a;">Credit Note Saved</h3>
+                <div style="background:#f8fafc;border-radius:8px;padding:14px;text-align:left;font-size:0.9rem;color:#334155;margin-bottom:12px;">
+                    <div style="display:flex;justify-content:space-between;padding:4px 0;"><span>Credit Note #</span><strong>${creditNoteNumber}</strong></div>
+                    <div style="display:flex;justify-content:space-between;padding:4px 0;"><span>Total Credit</span><strong>${symbol} ${formatNumber(totalAmount)}</strong></div>
+                    ${payableApplied > 0 ? `<div style="display:flex;justify-content:space-between;padding:4px 0;"><span>Applied to Payable</span><strong style="color:#2563eb;">${symbol} ${formatNumber(payableApplied)}</strong></div>` : ''}
+                    ${creditBalanceApplied > 0 ? `<div style="display:flex;justify-content:space-between;padding:4px 0;"><span>Supplier Credit Balance</span><strong style="color:#15803d;">${symbol} ${formatNumber(creditBalanceApplied)}</strong></div>` : ''}
+                </div>
+                <div style="display:flex; gap:10px; justify-content:center; margin-top:20px;">
+                    <button id="cnSummaryPrintBtn" style="background:#2563eb;color:white;border:none;padding:10px 20px;border-radius:6px;cursor:pointer;">
+                        <i class="fa-solid fa-print"></i> Print
+                    </button>
+                    <button id="cnSummaryCloseBtn" style="background:#e2e8f0;color:#0f172a;border:none;padding:10px 20px;border-radius:6px;cursor:pointer;">
+                        <i class="fa-solid fa-check"></i> Done
+                    </button>
+                </div>
+            </div>
+        `;
+        document.body.appendChild(overlay);
+        overlay.querySelector('.modal-content-box').addEventListener('click', e => e.stopPropagation());
+        document.getElementById('cnSummaryPrintBtn').addEventListener('click', () => printCreditNoteById(creditNoteId));
+        document.getElementById('cnSummaryCloseBtn').addEventListener('click', () => overlay.remove());
+        overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
+    }
+
+    function generateCreditNotePrint(creditNote) {
+        const printWindow = window.open('', '_blank', 'width=800,height=600');
+        if (!printWindow) {
+            showToast('Please allow popups to print', 'error');
+            return;
+        }
+
+        const symbol = creditNote.currency === 'ZMW' ? 'ZK' : '$';
+        const lines = creditNote.purchase_credit_note_lines || [];
+
+        printWindow.document.write(`
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <title>Credit Note - ${creditNote.credit_note_number}</title>
+                <style>
+                    ${getPrintStyles()}
+                </style>
+            </head>
+            <body>
+                ${getPrintHeader()}
+                <h2 style="text-align: center;">CREDIT NOTE (GOODS RETURNED TO SUPPLIER)</h2>
+                ${getCreditNoteInfoTable(creditNote)}
+                ${getCreditNoteLinesTable(lines, creditNote, symbol)}
+                ${getPrintFooter()}
+                ${getPrintButton()}
+            </body>
+            </html>
+        `);
+        printWindow.document.close();
+        setTimeout(() => printWindow.focus(), 500);
+    }
+
+    function getCreditNoteInfoTable(cn) {
+        return `
+            <div class="info">
+                <table>
+                    <tr><td class="label">Credit Note #:</td><td><strong>${cn.credit_note_number}</strong></td></tr>
+                    <tr><td class="label">PO Reference:</td><td>${cn.purchase_orders?.po_number || 'N/A'}</td></tr>
+                    <tr><td class="label">Supplier:</td><td>${cn.suppliers?.name || 'Unknown'}</td></tr>
+                    <tr><td class="label">Date:</td><td>${formatDate(cn.created_at)}</td></tr>
+                    <tr><td class="label">Currency:</td><td>${cn.currency || 'USD'}</td></tr>
+                    <tr><td class="label">Reason:</td><td>${cn.reason || 'N/A'}</td></tr>
+                </table>
+            </div>
+        `;
+    }
+
+    function getCreditNoteLinesTable(lines, cn, symbol) {
+        return `
+            <h3>Returned Items</h3>
+            <table>
+                <thead>
+                    <tr>
+                        <th>#</th>
+                        <th>Product</th>
+                        <th>Batch</th>
+                        <th class="text-right">Qty Returned</th>
+                        <th class="text-right">Rate</th>
+                        <th class="text-right">Total</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    ${lines.length === 0 ? `
+                        <tr><td colspan="6" style="text-align: center; padding: 20px; color: #94a3b8;">No items</td></tr>
+                    ` : lines.map((line, idx) => `
+                        <tr>
+                            <td>${idx + 1}</td>
+                            <td>${line.product_name}</td>
+                            <td>${line.batch_number || 'N/A'}</td>
+                            <td class="text-right">${line.quantity_returned}</td>
+                            <td class="text-right">${symbol} ${formatNumber(line.purchase_rate)}</td>
+                            <td class="text-right">${symbol} ${formatNumber(line.total_amount)}</td>
+                        </tr>
+                    `).join('')}
+                </tbody>
+                <tfoot>
+                    <tr class="total-row">
+                        <td colspan="5" class="text-right">Total Credit Amount:</td>
+                        <td class="text-right">${symbol} ${formatNumber(cn.total_amount || 0)}</td>
+                    </tr>
+                    ${cn.payable_applied > 0 ? `
+                    <tr>
+                        <td colspan="5" class="text-right">Applied to Outstanding Payable:</td>
+                        <td class="text-right" style="color: #2563eb;">${symbol} ${formatNumber(cn.payable_applied)}</td>
+                    </tr>
+                    ` : ''}
+                    ${cn.credit_balance_applied > 0 ? `
+                    <tr>
+                        <td colspan="5" class="text-right">Added to Supplier Credit Balance:</td>
+                        <td class="text-right" style="color: #15803d;">${symbol} ${formatNumber(cn.credit_balance_applied)}</td>
+                    </tr>
+                    ` : ''}
+                </tfoot>
+            </table>
+        `;
+    }
+
+    // ============================================
     // DETERMINE PO STATUS - HELPER (optional)
     // ============================================
 
@@ -4832,7 +5526,7 @@
         return date.toISOString().split('T')[0];
     }
 
-    function updateExchangeRate() {
+    async function updateExchangeRate() {
         const currency = document.getElementById('poCurrency')?.value;
         const rateInput = document.getElementById('poExchangeRate');
 
@@ -4844,6 +5538,16 @@
         if (currency === 'ZMW' && rateInput) {
             rateInput.value = 1;
         } else if (rateInput) {
+            // 🔥 FIX: re-fetch live instead of trusting whatever
+            // sharedZmwPerUsd happened to hold already -- switching to USD
+            // is a natural moment to also pick up a rate someone just
+            // corrected on the Dashboard, not just whatever was current at
+            // page load or when this modal last opened.
+            try {
+                sharedZmwPerUsd = await getSharedExchangeRate();
+            } catch (e) {
+                console.warn('Could not refresh shared exchange rate, using last known value:', e);
+            }
             rateInput.value = sharedZmwPerUsd;
         }
         updatePOTotal();
@@ -4947,10 +5651,10 @@
         // Product search
         const searchInput = document.getElementById('poProductSearch');
         if (searchInput) {
-            searchInput.addEventListener('keyup', function(e) {
-                if (e.key === 'Enter') {
-                    e.preventDefault();
-                }
+            // 🔥 CHANGED: 'input' (not 'keyup') re-runs the search as you
+            // type -- keydown below now owns Enter/Tab/Arrow keys instead
+            // of keyup re-searching on every key including those.
+            searchInput.addEventListener('input', function() {
                 searchProducts();
             });
             // 🔥 FIX (issue #1): opening the dropdown no longer requires
@@ -4958,6 +5662,40 @@
             // the product list immediately, same as a normal dropdown.
             searchInput.addEventListener('focus', function() {
                 searchProducts();
+            });
+            // 🔥 ADDED: arrow keys navigate the results, Enter or Tab adds
+            // whichever one is highlighted -- same request as "arrow keys
+            // should be working to select and tab to add". Tab deliberately
+            // does NOT preventDefault: it adds the product AND lets focus
+            // continue moving to the next field, same as a native <select>.
+            searchInput.addEventListener('keydown', function(e) {
+                const results = document.getElementById('poSearchResults');
+                if (!results || results.style.display === 'none') return;
+
+                if (e.key === 'ArrowDown') {
+                    e.preventDefault();
+                    if (!productSearchResults.length) return;
+                    productSearchHighlightIndex = Math.min(productSearchHighlightIndex + 1, productSearchResults.length - 1);
+                    renderSearchResultsList();
+                    scrollProductHighlightIntoView();
+                } else if (e.key === 'ArrowUp') {
+                    e.preventDefault();
+                    if (!productSearchResults.length) return;
+                    productSearchHighlightIndex = Math.max(productSearchHighlightIndex - 1, 0);
+                    renderSearchResultsList();
+                    scrollProductHighlightIntoView();
+                } else if (e.key === 'Enter') {
+                    e.preventDefault();
+                    if (productSearchHighlightIndex >= 0 && productSearchResults[productSearchHighlightIndex]) {
+                        addProductToPO(productSearchResults[productSearchHighlightIndex].id);
+                    }
+                } else if (e.key === 'Tab') {
+                    if (productSearchHighlightIndex >= 0 && productSearchResults[productSearchHighlightIndex]) {
+                        addProductToPO(productSearchResults[productSearchHighlightIndex].id);
+                    }
+                } else if (e.key === 'Escape') {
+                    results.style.display = 'none';
+                }
             });
             document.addEventListener('click', function(e) {
                 const results = document.getElementById('poSearchResults');
@@ -4985,6 +5723,33 @@
         if (statusFilter) statusFilter.addEventListener('change', refreshPurchaseList);
         if (supplierFilter) supplierFilter.addEventListener('change', refreshPurchaseList);
         if (overdueFilter) overdueFilter.addEventListener('change', refreshPurchaseList);
+
+        // 🔥 ADDED: Credit Note return-quantity inputs -- delegated since
+        // the rows are re-rendered every time the modal opens.
+        const cnLinesBody = document.getElementById('cnLinesBody');
+        if (cnLinesBody) {
+            cnLinesBody.addEventListener('input', function(e) {
+                const input = e.target.closest('.cn-return-qty');
+                if (!input) return;
+                const idx = parseInt(input.dataset.idx, 10);
+                const line = state.creditNoteLines[idx];
+                if (!line) return;
+
+                let qty = parseInt(input.value, 10);
+                if (isNaN(qty) || qty < 0) qty = 0;
+                if (qty > line.maxReturnable) qty = line.maxReturnable;
+                line.returnQty = qty;
+                input.value = qty;
+
+                const row = input.closest('tr');
+                const grn = state.currentViewGRNData;
+                const symbol = grn?.currency === 'ZMW' ? 'ZK' : '$';
+                const totalCell = row?.querySelector('.cn-line-total');
+                if (totalCell) totalCell.textContent = `${symbol} ${formatNumber(qty * line.purchase_rate)}`;
+
+                recalcCreditNoteTotals();
+            });
+        }
     }
 
     // ============================================
@@ -5056,6 +5821,10 @@
     window.clearReceivedItems = clearReceivedItems;
     window.checkOverduePOs = checkOverduePOs;
     window.updateStats = updateStats;
+    window.openCreditNoteModal = openCreditNoteModal;
+    window.closeCreditNoteModal = closeCreditNoteModal;
+    window.saveCreditNote = saveCreditNote;
+    window.printSavedCreditNote = printSavedCreditNote;
 
     // ============================================
     // INITIALIZE

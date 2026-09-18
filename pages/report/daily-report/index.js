@@ -245,10 +245,28 @@
             else inward.retailCash += s.grand_total || 0;
         });
 
+        // 🔥 FIX: THE "OTHER / UNCATEGORIZED -K19,000" BUG -- this was
+        // filtering customer_receipts by `created_at` (when the row was
+        // typed into the system), but the GL entry this receipt actually
+        // posts (RCT-xxx) is dated by `receipt_date` (the date the user
+        // picked on the receipt form), confirmed directly against the
+        // data: a receipt entered on the 16th with receipt_date the 15th
+        // has entry_date = the 15th. computeGLTotals() above (the ground
+        // truth this breakdown has to add up to) scopes "today" by that
+        // same entry_date. So a receipt dated yesterday but entered today
+        // was being counted as +K19,000 of "Receivable Collections" on
+        // TODAY's report, while the correct GL total for today stayed
+        // K0.00 -- forcing the leftover() plug below to manufacture a
+        // -K19,000 "Other / Uncategorized" line just to make the numbers
+        // add up. Filtering on `receipt_date` instead (a plain DATE
+        // column, same pattern already used for payments/expenses/GRNs
+        // below) keeps this breakdown scoped to the exact same day as the
+        // GL truth, so a transaction only ever shows up on the day it was
+        // actually posted to the books.
         const { data: receipts } = await supabaseClient
             .from('customer_receipts')
             .select('payment_method, amount')
-            .gte('created_at', dayStart).lte('created_at', dayEnd);
+            .gte('receipt_date', reportDate).lte('receipt_date', reportDate);
         (receipts || []).forEach(r => {
             if (r.payment_method !== 'Bank Transfer') inward.receivableCash += r.amount || 0;
         });
@@ -343,10 +361,15 @@
             else inward.retailBank += s.grand_total || 0;
         });
 
+        // 🔥 FIX: same date-source mismatch as computeCashBreakdown() above
+        // -- scope by `receipt_date` (what actually dates the GL entry),
+        // not `created_at` (when the row was typed in), so a receipt
+        // entered today but dated yesterday doesn't show up as phantom
+        // "Receivable Collections" on today's report.
         const { data: receipts } = await supabaseClient
             .from('customer_receipts')
             .select('payment_method, amount')
-            .gte('created_at', dayStart).lte('created_at', dayEnd);
+            .gte('receipt_date', reportDate).lte('receipt_date', reportDate);
         (receipts || []).forEach(r => {
             if (r.payment_method === 'Bank Transfer') inward.receivableBank += r.amount || 0;
         });

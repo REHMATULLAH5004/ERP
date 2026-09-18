@@ -192,7 +192,7 @@
     }
 
     // 🔥 ADDED: "+ Add Item" button in the redesigned Items card header --
-    // manually appends a blank row, same as F3 or the "Add Row" button.
+    // manually appends a blank row on demand.
     const retailAddItemBtn = document.getElementById('retailAddItemBtn');
     if (retailAddItemBtn) {
         retailAddItemBtn.addEventListener('click', function () {
@@ -2131,7 +2131,21 @@
     // ============================================
     // ADD NHIMA BUTTON
     // ============================================
-    if (addNhimaBtn) {
+    // 🔥 FIX: guarded with a dataset flag on the button itself (same idiom
+    // as __posContainer.dataset.posInitialized up top) -- this is a real
+    // <button>, found via getElementById, so if the surrounding modal HTML
+    // ever ends up inserted into the page more than once (e.g. the
+    // container-level init guard doesn't apply here because
+    // #retailPosContainer isn't actually wrapping this page), getElementById
+    // still resolves to the SAME original node every time, and without this
+    // guard each extra init would stack ANOTHER 'click' listener onto it.
+    // That's exactly the shape of bug reported: registering one NHIMA
+    // patient fired the save logic more than once for a single click --
+    // one insert won (the patient really was saved), the other(s) hit the
+    // real unique-constraint and surfaced as a raw "duplicate key" error
+    // even though nothing had actually gone wrong.
+    if (addNhimaBtn && addNhimaBtn.dataset.listenerAttached !== 'true') {
+        addNhimaBtn.dataset.listenerAttached = 'true';
         addNhimaBtn.addEventListener('click', function (e) {
             e.preventDefault();
             e.stopPropagation(); // 🛑 STOPS the click from bubbling up to the document
@@ -2142,7 +2156,8 @@
     // ============================================
     // ADD PHONE BUTTON
     // ============================================
-    if (addPhoneBtn) {
+    if (addPhoneBtn && addPhoneBtn.dataset.listenerAttached !== 'true') {
+        addPhoneBtn.dataset.listenerAttached = 'true';
         addPhoneBtn.addEventListener('click', function (e) {
             e.preventDefault();
             e.stopPropagation(); // 🛑 STOPS the click from bubbling up to the document
@@ -2153,7 +2168,8 @@
     // ============================================
     // MODAL FORM SUBMISSION
     // ============================================
-    if (contactForm) {
+    if (contactForm && contactForm.dataset.listenerAttached !== 'true') {
+        contactForm.dataset.listenerAttached = 'true';
         contactForm.addEventListener('submit', async function (e) {
             e.preventDefault();
 
@@ -2231,7 +2247,25 @@
                         }])
                         .select();
 
-                    if (error) throw error;
+                    // 🔥 FIX: a raw 23505 here (the real unique-constraint
+                    // catching what the pre-check above missed -- e.g. a
+                    // genuine race between two terminals registering the
+                    // same NHIMA number within the same instant) used to
+                    // fall straight through to the generic catch below and
+                    // show the raw Postgres error text ("duplicate key
+                    // value violates unique constraint ..."), which reads
+                    // like a crash even on the one occasion it's actually
+                    // just "someone beat you to it, and the record already
+                    // exists" -- same friendly message as the pre-check,
+                    // and the record is safely left as whichever attempt
+                    // won, never duplicated.
+                    if (error) {
+                        if (error.code === '23505') {
+                            alert(`NHIMA Number "${nhimaNumber}" was just registered (possibly by another terminal, or a double click). Nothing extra was saved -- please search for the existing record instead.`);
+                            return;
+                        }
+                        throw error;
+                    }
 
                     // 🔥 Also create customer entry for NHIMA member
                     if (data && data.length > 0) {
@@ -2318,7 +2352,17 @@
                         }])
                         .select();
 
-                    if (error) throw error;
+                    // 🔥 FIX: same reasoning as the NHIMA insert above -- a
+                    // 23505 here means someone else's save (another
+                    // terminal, or a double click) won the race, not a
+                    // real failure, so it shouldn't read like one.
+                    if (error) {
+                        if (error.code === '23505') {
+                            alert(`Phone number "${phone}" was just registered (possibly by another terminal, or a double click). Nothing extra was saved -- please search for the existing record instead.`);
+                            return;
+                        }
+                        throw error;
+                    }
 
                     modal.style.display = 'none';
                     await loadPhoneDropdown();
@@ -2604,14 +2648,15 @@
                 }
             }
 
-            // 🔥 RE-ADDED (by request): typing a qty into the LAST row now
-            // auto-appends a fresh empty row again, same as it used to
-            // before it was removed in favour of F3-only. Triggers on any
-            // qty > 0 -- including exactly 1 -- not just "more than 1".
-            // Only fires for the last row: once the new row exists, this
-            // same row is no longer last, so further digits typed into it
-            // (e.g. "1" -> "10") don't keep spawning extra rows. F3 still
-            // works too for adding a row without typing a qty first.
+            // Typing a qty into the LAST row also opens a fresh empty row
+            // -- this is a fallback alongside the batch-select trigger
+            // below (see the '.retail-pos-batch' change handler's
+            // comment), for the case where the cashier edits qty by hand
+            // BEFORE a batch has been picked. Once the new row exists,
+            // this row is no longer last, so further digits typed into it
+            // (e.g. "1" -> "10") don't keep spawning extra rows, and if
+            // the batch-select trigger already added one, this is a no-op
+            // for the same reason.
             if (qty > 0 && row === posTableBody.querySelector('tr:last-child')) {
                 addPOSRow();
             }
@@ -2947,18 +2992,26 @@
             updateRowTotal(row);
             updateTotals();
 
-            // 🔥 REMOVED: this used to auto-add a new empty row the moment
-            // a batch was selected -- and since most products only have
-            // ONE batch, it's auto-picked (see the setTimeout above, which
-            // dispatches this same 'change' event purely so rate/tax/total
-            // still get filled in for that auto-pick), so in the common
-            // case a second row appeared the instant a product was chosen,
-            // before the cashier ever touched qty. That's exactly the bug
-            // that was reported: a row kept appearing on its own even with
-            // the qty-input trigger already removed elsewhere. Rows are
-            // only ever added by F3 (or the manual "Add Row" button) now --
-            // this handler still updates rate/total for the row as before,
-            // it just no longer adds a new one.
+            // 🔥 RE-ADDED (by request, replacing F3): a valid batch pick on
+            // the LAST row now opens a fresh empty row -- this is what
+            // actually fixes "qty of 1 doesn't open a new row". Every new
+            // row's qty starts pre-filled at 1 (see addPOSRow()), so if a
+            // cashier is happy with the default 1 and never types into the
+            // qty field at all, the qty 'input' listener below never fires
+            // for that row -- there's simply no keystroke to trigger it.
+            // Batch selection, on the other hand, always happens once an
+            // item is actually being added to the row (either picked by
+            // hand, or auto-picked for a single-batch product/bundle via
+            // the dispatched 'change' event above/in populateBundleBatchOptions),
+            // so it's a reliable "this row now has a real, priced item in
+            // it" signal regardless of whether qty was ever touched.
+            // Guarded to the LAST row and a real batch (not the "Select
+            // Batch"/warning placeholder options) so re-selecting a batch
+            // on an earlier row, or landing on a "No stock" placeholder,
+            // never spawns extra rows.
+            if (selectedBatch && selectedBatch.value && row === posTableBody.querySelector('tr:last-child')) {
+                addPOSRow();
+            }
         }
     });
 
@@ -3035,9 +3088,10 @@
 
         posTableBody.appendChild(newRow);
         updateItemCountBadge();
-        // 🔥 ADDED: return the new row so callers (e.g. the F3 shortcut)
-        // can focus it / scroll it into view without having to re-query
-        // the table for "whichever row is now last".
+        // 🔥 ADDED: return the new row so callers (the batch-select and
+        // qty-input auto-add triggers, the "+ Add Item" button) can focus
+        // it / scroll it into view without having to re-query the table
+        // for "whichever row is now last".
         return newRow;
     }
 
@@ -3282,16 +3336,43 @@
         window.addEventListener('resize', () => hideItemSearchPanel());
     }
 
+    // 🔥 FIX: THE actual cause of "typing a real, saved NHIMA number shows
+    // No matches" -- this and loadPhoneDropdown() below were plain
+    // .select() queries with no .range()/.limit(), so PostgREST/Supabase
+    // silently capped the result at its default page size (1000 rows).
+    // nhima_members alone already has 1274+ rows, and it only grows, so
+    // any member sorted past row 1000 (alphabetically/numerically, by
+    // nhima_number) simply never made it into the <select>'s options at
+    // all -- the searchable combobox built on top of it (initSearchableSelect,
+    // see liveOptions() further down) only ever filters whatever options
+    // are ACTUALLY on the element, so a missing option is a guaranteed
+    // "No matches.", no matter how correctly the number is typed. This
+    // pages through the full table instead of trusting a single request
+    // to return everything.
+    async function fetchAllRows(table, column) {
+        const pageSize = 1000;
+        let from = 0;
+        let all = [];
+        while (true) {
+            const { data, error } = await supabaseClient
+                .from(table)
+                .select(column)
+                .order(column)
+                .range(from, from + pageSize - 1);
+
+            if (error) throw error;
+            all = all.concat(data || []);
+            if (!data || data.length < pageSize) break;
+            from += pageSize;
+        }
+        return all;
+    }
+
     async function loadNhimaDropdown() {
         const select = document.getElementById('retailNhimaNumber');
         if (!select) return;
         try {
-            const { data, error } = await supabaseClient
-                .from('nhima_members')
-                .select('nhima_number')
-                .order('nhima_number');
-
-            if (error) throw error;
+            const data = await fetchAllRows('nhima_members', 'nhima_number');
 
             select.innerHTML = `<option value="">Select NHIMA</option>`;
             data.forEach(m => {
@@ -3306,12 +3387,7 @@
         const select = document.getElementById('retailRegPhone');
         if (!select) return;
         try {
-            const { data, error } = await supabaseClient
-                .from('customers')
-                .select('phone')
-                .order('phone');
-
-            if (error) throw error;
+            const data = await fetchAllRows('customers', 'phone');
 
             select.innerHTML = `<option value="">Select Phone</option>`;
             data.forEach(c => {
@@ -5816,18 +5892,16 @@
                 e.preventDefault();
                 document.getElementById('clearSaleBtn')?.click();
             }
-            // 🔥 ADDED: F3 adds a new empty item row and focuses its product
-            // search box -- this replaces the old "typing a qty auto-appends
-            // a row" behavior (see the POS TABLE LOGIC input listener
-            // above). Works from anywhere on the page (matches the other
-            // shortcuts here), not just from inside the grid.
-            if (e.key === 'F3') {
-                e.preventDefault();
-                const newRow = addPOSRow();
-                const focusTarget = newRow?.querySelector('.retail-pos-item-search');
-                if (focusTarget) focusTarget.focus();
-                if (newRow) newRow.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-            }
+            // 🔥 REMOVED (by request): the F3 "add a new empty item row"
+            // shortcut. It fired from anywhere on the page (document-level
+            // keydown), which meant it could go off while the cashier was
+            // mid-typing somewhere else and F3 is also the browser's own
+            // "Find" shortcut in some browsers/OSes -- preventDefault()
+            // here didn't reliably stop that everywhere, so it could open
+            // the browser's Find bar at the same time it added a row. Row
+            // creation is now driven purely by the item grid itself (see
+            // the '.retail-pos-batch' change handler and the qty 'input'
+            // handler below) instead of a separate global key handler.
         });
 
         // Mark all document-level (page-wide, persistent) listeners as
@@ -6213,7 +6287,8 @@
     // blank rows, not one. Only the static first row (already in the
     // HTML, and already re-populated with product options by
     // loadProductDropdowns() above) should be there at page open now;
-    // press F3 to add another.
+    // picking a batch for it opens the next row automatically (see the
+    // '.retail-pos-batch' change handler above).
     ensureChartOfAccounts().catch(e => console.warn("ensureChartOfAccounts failed:", e));
     syncNhimaMemberToCustomers().catch(e => console.warn("syncNhimaMemberToCustomers failed:", e));
 
