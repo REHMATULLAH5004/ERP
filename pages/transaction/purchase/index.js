@@ -2371,7 +2371,7 @@
         // it, so we can tell whether this save is the moment it BECOMES
         // Approved (e.g. Pending Approval -> Approved) vs. just re-saving
         // an already-approved PO or any other transition -- see
-        // notifySupplierIfApproved() below.
+        // promptSendPOIfApproved() below.
         const previousStatus = (state.orders || []).find(o => o.id === poId)?.status || null;
 
         // Calculate remaining = total - received - cancelled
@@ -2417,90 +2417,287 @@
         }
 
         // 🔥 ADDED: this is the actual "PO approved" moment for the normal
-        // workflow (Draft -> Pending Approval -> Approved) -- notify the
-        // supplier only when this save is what pushed the status into
-        // Approved.
-        notifySupplierIfApproved(poData, previousStatus);
+        // workflow (Draft -> Pending Approval -> Approved) -- prompt to
+        // send the PO document only when this save is what pushed the
+        // status into Approved.
+        promptSendPOIfApproved(poData, previousStatus, poId);
     }
 
     // ============================================
-    // 🔥 CHANGED: WHATSAPP SUPPLIER NOTIFICATION -- now fires on APPROVAL,
-    // not on PO creation.
+    // 🔥 CHANGED: WHATSAPP SUPPLIER PO DOCUMENT -- fires on APPROVAL, not on
+    // PO creation, and now sends the ACTUAL PO as a PDF (not just a text
+    // notification), after the approver confirms the PO number in a popup.
     // ============================================
     // Previously this fired the moment ANY new PO was saved, even a Draft
     // or one only "Submitted for Approval" -- so a supplier could be
     // notified about an order that wasn't actually confirmed yet, and an
     // existing PO that later got approved (the normal Draft -> Pending
-    // Approval -> Approved flow) never notified the supplier at all.
-    // Fixed: notifySupplier() below is called only at the moment a PO's
-    // status becomes 'Approved' -- whether that's a brand-new PO saved
-    // directly as Approved, or an existing PO transitioning into Approved
-    // from some other status. Calls the already-deployed
-    // send-whatsapp-message Edge Function using whichever phone number is
-    // saved on the supplier's record.
+    // Approval -> Approved flow) never notified the supplier at all. That
+    // was also just a plain text message using a placeholder template
+    // ('po_approved_supplier_notice') that was never actually approved in
+    // Meta, so it never really sent anything.
     //
-    // IMPORTANT -- this does not actually send anything yet. WhatsApp
-    // Cloud API requires (1) the pharmacy's WhatsApp Business phone number
-    // to be verified in Meta Business Manager (in progress -- pending
-    // being physically at the pharmacy to confirm it) and (2) the message
-    // template below to be submitted to and APPROVED by Meta before it
-    // can be used -- a business can't just send free-form WhatsApp
-    // messages. WHATSAPP_TEMPLATES.PO_APPROVED below is a PLACEHOLDER
-    // name -- once a real template is approved in Meta, update this name
-    // (and the order/count of parameters in notifySupplierWhatsApp's call
-    // below, if the approved template's variables differ) to match
-    // exactly. Until then, every call here fails harmlessly -- logged to
-    // the console only, never blocking the PO save itself (fire-and-forget,
-    // not awaited).
+    // Fixed + upgraded: promptSendPOIfApproved() below fires only at the
+    // moment a PO's status becomes 'Approved' -- whether that's a
+    // brand-new PO saved directly as Approved, or an existing PO
+    // transitioning into Approved from some other status -- and, instead
+    // of silently firing off a text message, opens a confirmation popup
+    // showing the PO number that's about to go out. The approver can edit
+    // it right there (fixing a typo before it reaches the supplier) or
+    // just confirm it, and only then is the PDF built and sent via the
+    // send-whatsapp-message Edge Function's 'send_document' action, using
+    // the APPROVED 'po_created_supplier_notice' Document-header template
+    // (confirmed Active in Meta WhatsApp Manager).
     const WHATSAPP_TEMPLATES = {
-        PO_APPROVED: 'po_approved_supplier_notice'
+        // Document-header template, 4 body vars: supplier name / po_number /
+        // date / amount, fixed footer "PLEASE CONSIDER FREE QTY AS PER THE
+        // DISCUSSION". Confirmed APPROVED in Meta.
+        PO_DOCUMENT: 'po_created_supplier_notice'
     };
 
-    async function notifySupplierWhatsApp(phone, templateName, bodyParams) {
+    async function ensureJsPDFLoaded() {
+        if (window.jspdf && window.jspdf.jsPDF) return;
+        await new Promise((resolve, reject) => {
+            const s = document.createElement('script');
+            s.src = 'https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.2/jspdf.umd.min.js';
+            s.onload = resolve;
+            s.onerror = () => reject(new Error('Could not load the PDF library (jsPDF) -- check your internet connection.'));
+            document.head.appendChild(s);
+        });
+        await new Promise((resolve, reject) => {
+            const s = document.createElement('script');
+            s.src = 'https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js';
+            s.onload = resolve;
+            s.onerror = () => reject(new Error('Could not load the PDF table library (jspdf-autotable) -- check your internet connection.'));
+            document.head.appendChild(s);
+        });
+    }
+
+    // Builds the same document generatePOPrint() shows on screen, as a real
+    // PDF, and returns it as base64 (no data: prefix) ready for the Edge
+    // Function to upload to WhatsApp. `order` must have `suppliers:(name,phone)`
+    // and `purchase_order_lines` embedded (see promptSendPOIfApproved below).
+    function generatePOPDFBase64(order) {
+        const { jsPDF } = window.jspdf;
+        const doc = new jsPDF();
+        const symbol = order.currency === 'ZMW' ? 'ZK' : '$';
+        const lines = order.purchase_order_lines || [];
+
+        doc.setFontSize(14);
+        doc.text(String(companySettings.company_name || 'Griffins Medicals Limited'), 14, 15);
+        doc.setFontSize(9);
+        doc.setTextColor(90);
+        doc.text(`${companySettings.address || ''}   Phone: ${companySettings.phone || ''}`, 14, 21);
+        doc.text(`ZAMRA #: ${companySettings.zamra_number || ''}`, 14, 26);
+        doc.setDrawColor(51);
+        doc.line(14, 30, 196, 30);
+
+        doc.setTextColor(15, 23, 42);
+        doc.setFontSize(13);
+        doc.text('PURCHASE ORDER', 105, 39, { align: 'center' });
+
+        doc.setFontSize(10);
+        let y = 47;
+        const infoRows = [
+            ['PO Number:', order.po_number || ''],
+            ['Supplier:', order.suppliers?.name || 'Unknown'],
+            ['Currency:', order.currency || 'USD'],
+            ['Exchange Rate:', String(order.exchange_rate || 1)],
+            ['Expected Delivery:', formatDate(order.expected_delivery_date) || 'TBC'],
+            ['Status:', order.status || 'Draft'],
+        ];
+        infoRows.forEach(([label, value]) => {
+            doc.setFont(undefined, 'bold');
+            doc.text(label, 14, y);
+            doc.setFont(undefined, 'normal');
+            doc.text(String(value), 55, y);
+            y += 6;
+        });
+
+        const tableRows = lines.map((line, idx) => [
+            String(idx + 1),
+            line.product_name || '',
+            String(line.pack_size || 1),
+            String(line.order_quantity || 0),
+            `${symbol} ${formatNumber(line.purchase_rate)}`,
+            `${symbol} ${formatNumber(line.total_amount)}`,
+        ]);
+
+        doc.autoTable({
+            startY: y + 4,
+            head: [['#', 'Product', 'Pack Size', 'Qty', 'Rate', 'Total']],
+            body: tableRows,
+            styles: { fontSize: 8, cellPadding: 2 },
+            headStyles: { fillColor: [30, 58, 95], textColor: 255 },
+            foot: [['', '', '', '', 'Grand Total:', `${symbol} ${formatNumber(order.total_amount || 0)}`]],
+            footStyles: { fontStyle: 'bold', fillColor: [248, 250, 252], textColor: [15, 23, 42] },
+        });
+
+        const footerY = (doc.lastAutoTable?.finalY || y + 20) + 14;
+        doc.setFontSize(8);
+        doc.setTextColor(100);
+        doc.text('This is a computer-generated purchase order.', 105, footerY, { align: 'center' });
+        doc.text(`Generated on: ${new Date().toLocaleString()}`, 105, footerY + 5, { align: 'center' });
+
+        // datauristring looks like "data:application/pdf;filename=...;base64,JVBERi0x..."
+        // -- only the part after the last comma is the actual base64 payload.
+        const dataUri = doc.output('datauristring');
+        return dataUri.substring(dataUri.indexOf(',') + 1);
+    }
+
+    // Low-level: given a full order row (with suppliers + lines embedded)
+    // and the exact po_number to print/send (may differ from order.po_number
+    // if the approver just edited it in the confirm popup), builds the PDF
+    // and sends it via the send-whatsapp-message Edge Function. Never
+    // throws -- returns { ok, message } so callers can toast the result.
+    async function sendPOPdfToSupplier(order, poNumberToSend) {
+        const phone = order.suppliers?.phone;
         if (!phone) {
-            console.log('WhatsApp: this supplier has no phone number on file -- skipping notification.');
-            return;
+            return { ok: false, message: 'This supplier has no phone number on file -- add one in Suppliers before sending.' };
         }
         try {
-            const { data, error } = await supabaseClient.functions.invoke('send-whatsapp-message', {
+            await ensureJsPDFLoaded();
+            const orderForPdf = { ...order, po_number: poNumberToSend };
+            const pdfBase64 = generatePOPDFBase64(orderForPdf);
+            const symbol = order.currency === 'ZMW' ? 'ZK' : '$';
+
+            const { data: sendResult, error: sendError } = await supabaseClient.functions.invoke('send-whatsapp-message', {
                 body: {
+                    action: 'send_document',
                     to: phone,
-                    template_name: templateName,
-                    components: [{
-                        type: 'body',
-                        parameters: bodyParams.map(p => ({ type: 'text', text: String(p) }))
-                    }]
+                    template_name: WHATSAPP_TEMPLATES.PO_DOCUMENT,
+                    filename: `${poNumberToSend || 'PurchaseOrder'}.pdf`,
+                    pdf_base64: pdfBase64,
+                    body_params: [
+                        order.suppliers?.name || '',
+                        poNumberToSend || '',
+                        formatDate(order.created_at) || new Date().toLocaleDateString(),
+                        `${symbol} ${formatNumber(order.total_amount || 0)}`
+                    ]
                 }
             });
-            if (error) {
-                console.warn(`WhatsApp notification (${templateName}) did not send -- expected until the WhatsApp number is verified and this template is approved in Meta:`, error);
-                return;
+
+            if (sendError || (sendResult && sendResult.success === false)) {
+                console.error('WhatsApp PO send failed:', sendError || sendResult);
+                return {
+                    ok: false,
+                    message: 'Could not send the PO on WhatsApp -- this usually means the "' + WHATSAPP_TEMPLATES.PO_DOCUMENT +
+                        '" template isn\'t approved/active in Meta right now. See console for the exact error.'
+                };
             }
-            console.log(`✅ WhatsApp notification sent (${templateName}):`, data);
+            return { ok: true, message: `Purchase Order ${poNumberToSend} sent to ${order.suppliers?.name || 'the supplier'} on WhatsApp!` };
         } catch (err) {
-            console.warn(`WhatsApp notification (${templateName}) failed:`, err);
+            console.error('Error sending PO via WhatsApp:', err);
+            return { ok: false, message: 'Error sending PO via WhatsApp: ' + err.message };
         }
     }
 
     // 🔥 ADDED: shared gate used by both createNewPO() and
-    // updateExistingPO() -- only notify the supplier the moment a PO's
-    // status BECOMES 'Approved' (previousStatus is null/undefined for a
-    // brand-new PO, so saving one directly as Approved also counts).
-    // Fire-and-forget, never blocks the PO save.
-    function notifySupplierIfApproved(poData, previousStatus) {
+    // updateExistingPO() -- only prompts to send the PO document the moment
+    // a PO's status BECOMES 'Approved' (previousStatus is null/undefined
+    // for a brand-new PO, so saving one directly as Approved also counts).
+    // Opens the confirm-PO-number popup rather than sending immediately.
+    function promptSendPOIfApproved(poData, previousStatus, poId) {
         if (poData.status !== 'Approved' || previousStatus === 'Approved') return;
+        if (!poId) return;
         const supplierRecord = (state.suppliers || []).find(s => s.id === poData.supplier_id);
         if (!supplierRecord) return;
-        notifySupplierWhatsApp(
-            supplierRecord.phone,
-            WHATSAPP_TEMPLATES.PO_APPROVED,
-            [
-                supplierRecord.name || '',
-                poData.po_number || '',
-                `${poData.currency} ${Number(poData.total_amount || 0).toFixed(2)}`,
-                poData.expected_delivery_date || 'TBC'
-            ]
-        );
+        if (!supplierRecord.phone) {
+            console.log('WhatsApp: this supplier has no phone number on file -- skipping PO document send.');
+            return;
+        }
+        showPOSendConfirmModal(poId, poData.po_number || '', supplierRecord.name || '');
+    }
+
+    // 🔥 ADDED: "ask for number to change or not, then send" -- popup shown
+    // the moment a PO becomes Approved, before anything goes out on
+    // WhatsApp. Lets the approver confirm the PO number that will be
+    // printed on the PDF and sent to the supplier, or correct it on the
+    // spot, before the send fires. Choosing "Don't Send" just closes the
+    // popup -- the PO stays Approved, nothing is sent.
+    function showPOSendConfirmModal(poId, currentPoNumber, supplierName) {
+        const existing = document.getElementById('poSendConfirmModal');
+        if (existing) existing.remove();
+
+        const overlay = document.createElement('div');
+        overlay.id = 'poSendConfirmModal';
+        overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(15,23,42,0.6);backdrop-filter:blur(4px);z-index:1300;display:flex;justify-content:center;align-items:center;';
+        overlay.innerHTML = `
+            <div class="modal-content-box" style="background:white;padding:28px;border-radius:12px;width:90%;max-width:440px;box-shadow:0 20px 50px rgba(0,0,0,0.5);">
+                <div style="text-align:center;margin-bottom:14px;"><i class="fa-brands fa-whatsapp" style="font-size:2.6rem;color:#25D366;"></i></div>
+                <h3 style="margin:0 0 8px 0;color:#0f172a;text-align:center;">Send Purchase Order to Supplier?</h3>
+                <p style="margin:0 0 16px 0;color:#64748b;font-size:0.88rem;text-align:center;">
+                    This PO has been approved. It will be sent to <strong>${supplierName || 'the supplier'}</strong> on WhatsApp as a PDF.
+                    Confirm the PO number below, or change it, before sending.
+                </p>
+                <label style="display:block;font-size:0.78rem;font-weight:600;color:#334155;margin-bottom:6px;">PO Number</label>
+                <input type="text" id="poSendConfirmNumberInput" value="${(currentPoNumber || '').replace(/"/g, '&quot;')}"
+                    style="width:100%;box-sizing:border-box;padding:9px 12px;border:1px solid #cbd5e1;border-radius:6px;font-size:0.95rem;margin-bottom:18px;">
+                <div style="display:flex;gap:10px;justify-content:flex-end;">
+                    <button id="poSendConfirmSkipBtn" style="background:#f1f5f9;color:#334155;border:none;padding:10px 18px;border-radius:6px;cursor:pointer;">
+                        Don't Send
+                    </button>
+                    <button id="poSendConfirmSendBtn" style="background:#25D366;color:white;border:none;padding:10px 18px;border-radius:6px;cursor:pointer;">
+                        <i class="fa-brands fa-whatsapp"></i> Send
+                    </button>
+                </div>
+            </div>
+        `;
+        document.body.appendChild(overlay);
+        overlay.querySelector('.modal-content-box').addEventListener('click', e => e.stopPropagation());
+        overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
+        document.getElementById('poSendConfirmSkipBtn').addEventListener('click', () => overlay.remove());
+
+        document.getElementById('poSendConfirmSendBtn').addEventListener('click', async () => {
+            const input = document.getElementById('poSendConfirmNumberInput');
+            const numberToSend = (input?.value || '').trim();
+            if (!numberToSend) {
+                showToast('PO number cannot be empty', 'error');
+                return;
+            }
+
+            const sendBtn = document.getElementById('poSendConfirmSendBtn');
+            const skipBtn = document.getElementById('poSendConfirmSkipBtn');
+            const originalHtml = sendBtn.innerHTML;
+            sendBtn.disabled = true;
+            skipBtn.disabled = true;
+            sendBtn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Sending...';
+
+            try {
+                // If the approver changed the number, save it on the PO
+                // record too, so what's stored matches what was sent.
+                if (numberToSend !== currentPoNumber) {
+                    const { error: updateError } = await withAuthRetry(() => supabaseClient
+                        .from('purchase_orders')
+                        .update({ po_number: numberToSend })
+                        .eq('id', poId));
+                    if (updateError) {
+                        console.error('Could not update PO number before sending:', updateError);
+                        showToast('Could not save the edited PO number -- sending with the original number instead.', 'warning');
+                    } else {
+                        const localOrder = (state.orders || []).find(o => o.id === poId);
+                        if (localOrder) localOrder.po_number = numberToSend;
+                    }
+                }
+
+                const { data: order, error: fetchError } = await supabaseClient
+                    .from('purchase_orders')
+                    .select(`*, suppliers:supplier_id (name, phone), purchase_order_lines (*)`)
+                    .eq('id', poId)
+                    .single();
+                if (fetchError) throw fetchError;
+
+                const result = await sendPOPdfToSupplier(order, numberToSend);
+                showToast(result.message, result.ok ? 'success' : 'error');
+                overlay.remove();
+            } catch (err) {
+                console.error('Error sending PO via WhatsApp:', err);
+                showToast('Error sending PO via WhatsApp: ' + err.message, 'error');
+                sendBtn.disabled = false;
+                skipBtn.disabled = false;
+                sendBtn.innerHTML = originalHtml;
+            }
+        });
     }
 
     async function createNewPO(poData, totalQty) {
@@ -2532,10 +2729,12 @@
             await insertPOLines(data[0].id, poData.lines, poData.currency);
         }
 
-        // 🔥 CHANGED: only notify if this brand-new PO was saved directly
-        // as Approved (skipping Draft/Pending Approval) -- see
-        // notifySupplierIfApproved()'s comment above.
-        notifySupplierIfApproved(poData, null);
+        // 🔥 CHANGED: only prompt to send if this brand-new PO was saved
+        // directly as Approved (skipping Draft/Pending Approval) -- see
+        // promptSendPOIfApproved()'s comment above.
+        if (data && data.length > 0) {
+            promptSendPOIfApproved(poData, null, data[0].id);
+        }
     }
 
     async function insertPOLines(poId, lines, currency) {
