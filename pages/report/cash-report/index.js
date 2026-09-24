@@ -78,25 +78,54 @@
         state.accountNames = map;
     }
 
+    // 🔥 PREVENTIVE FIX: PostgREST silently caps any .select() at 1000
+    // rows unless you page through it with .range() -- the exact bug that
+    // badly under-reported the Sales Report earlier (see fetchSales() in
+    // pages/report/sales-report/index.js). Cash ledger volume is small
+    // today (a few dozen rows), but it's growing at roughly the same rate
+    // as every other ledger-backed report in this app, so it's paginated
+    // from day one rather than waiting to get bitten by it later. Every
+    // page is ordered by the row's own primary key ('id') -- required
+    // because .range() is not guaranteed stable/deterministic otherwise.
+    const PAGE_SIZE = 1000;
+    async function fetchAllPaginated(queryBuilder) {
+        let all = [];
+        let from = 0;
+        while (true) {
+            const { data, error } = await queryBuilder(from, from + PAGE_SIZE - 1);
+            if (error) throw error;
+            all = all.concat(data || []);
+            if (!data || data.length < PAGE_SIZE) break;
+            from += PAGE_SIZE;
+        }
+        return all;
+    }
+
     async function loadCashLedger() {
-        // All cash-account lines, ever -- small volume (a few dozen rows
-        // today), and we need the full history anyway to compute a
-        // correct Opening Balance for whatever range is selected.
-        const { data: cashLines, error: cashError } = await supabaseClient
-            .from('journal_lines')
-            .select('journal_entry_id, account_code, description, debit, credit, journal_entries(entry_date, reference, description)')
-            .in('account_code', CASH_CODES);
-        if (cashError) throw cashError;
+        // All cash-account lines, ever -- we need the full history anyway
+        // to compute a correct Opening Balance for whatever range is
+        // selected.
+        const cashLines = await fetchAllPaginated((from, to) =>
+            supabaseClient
+                .from('journal_lines')
+                .select('id, journal_entry_id, account_code, description, debit, credit, journal_entries(entry_date, reference, description)')
+                .in('account_code', CASH_CODES)
+                .order('id')
+                .range(from, to)
+        );
 
         const entryIds = [...new Set((cashLines || []).map(l => l.journal_entry_id))];
         let counterpartyByEntry = {};
         if (entryIds.length > 0) {
-            const { data: counterLines, error: counterError } = await supabaseClient
-                .from('journal_lines')
-                .select('journal_entry_id, account_code, debit, credit')
-                .in('journal_entry_id', entryIds)
-                .not('account_code', 'in', `(${CASH_CODES.join(',')})`);
-            if (counterError) throw counterError;
+            const counterLines = await fetchAllPaginated((from, to) =>
+                supabaseClient
+                    .from('journal_lines')
+                    .select('id, journal_entry_id, account_code, debit, credit')
+                    .in('journal_entry_id', entryIds)
+                    .not('account_code', 'in', `(${CASH_CODES.join(',')})`)
+                    .order('id')
+                    .range(from, to)
+            );
             (counterLines || []).forEach(l => {
                 // An entry could in theory have more than one counterparty
                 // line -- keep the first one found rather than overwriting,

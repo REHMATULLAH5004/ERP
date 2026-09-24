@@ -44,6 +44,34 @@
         return;
     }
 
+    // 🔥 ADDED: withAuthRetry -- same stale-session gap fixed in the Admin
+    // Clients page and already present in Retail POS/Payments/Purchase/
+    // Dashboard. ensurePatientCustomer() below writes straight to
+    // `customers` with no retry, so a stale session surfaced here as a
+    // raw "new row violates row-level security policy for table
+    // customers" error with no recovery.
+    async function withAuthRetry(operationFn) {
+        let result = await operationFn();
+        const err = result?.error;
+        const looksLikeAuthRejection = err && (
+            err.code === '42501' ||
+            err.code === 'PGRST301' ||
+            /row-level security|jwt|permission denied/i.test(err.message || '')
+        );
+
+        if (looksLikeAuthRejection) {
+            console.warn('⚠️ Write rejected (looks like a stale session) -- refreshing session and retrying once:', err.message);
+            try {
+                await supabaseClient.auth.refreshSession();
+            } catch (refreshError) {
+                console.error('Session refresh failed:', refreshError);
+            }
+            result = await operationFn();
+        }
+
+        return result;
+    }
+
     const PHARMACY_NAME = 'Griffins Medicals Limited';
 
     // ---- DOM refs ----
@@ -299,12 +327,12 @@
             if (nhimaNumber) updates.nhima_number = nhimaNumber;
             if (nrc) updates.nrc = nrc;
 
-            const { data: updated, error: updateError } = await supabaseClient
+            const { data: updated, error: updateError } = await withAuthRetry(() => supabaseClient
                 .from('customers')
                 .update(updates)
                 .eq('id', selectedCustomerId)
                 .select()
-                .single();
+                .single());
             if (updateError) throw updateError;
             return { id: updated.id, full_name: updated.full_name, phone: updated.phone };
         }
@@ -326,7 +354,7 @@
         // two different patients into one record).
         const resolvedPhone = phone || `NRC-${nrc}-${Date.now()}`;
 
-        const { data: created, error: insertError } = await supabaseClient
+        const { data: created, error: insertError } = await withAuthRetry(() => supabaseClient
             .from('customers')
             .insert([{
                 full_name: fullName || 'Unknown Patient',
@@ -338,7 +366,7 @@
                 created_at: new Date().toISOString()
             }])
             .select()
-            .single();
+            .single());
 
         if (insertError) {
             const { data: retry } = await supabaseClient

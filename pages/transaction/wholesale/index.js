@@ -150,6 +150,12 @@
     let activeItemSearchRow = null;
     let activeItemSearchInput = null;
     let activeItemSearchSelect = null;
+    // 🔥 ADDED: tracks the currently-filtered result list and which one is
+    // highlighted, so ArrowUp/ArrowDown/Enter/Tab can navigate and pick
+    // without re-filtering productCatalogCache on every keypress -- mirrors
+    // retail/index.js's searchPanelMatches/searchPanelHighlightIndex.
+    let itemSearchMatches = [];
+    let itemSearchHighlightIndex = -1;
 
     // 🔥 FIX: this used to not exist at all -- loadWholesaleForEdit()
     // populated the form from an existing sale, but saveTransaction() had
@@ -720,9 +726,20 @@
                         setTimeout(() => {
                             batchSelect.value = batches[0].id;
                             if (taxInput) taxInput.value = product.tax_percent || 0;
-                            updateRowRate(row);
-                            updateRowTotal(row);
-                            updateTotals();
+                            // 🔥 FIX (ported from retail/index.js): setting .value
+                            // programmatically does NOT fire a 'change' event, so this
+                            // auto-pick of the first batch used to silently skip the
+                            // "auto-add next row" logic that only runs on a manual batch
+                            // selection (see the 'change' handler on .wholesale-pos-batch
+                            // below). That's exactly the real-world case reported: most
+                            // products only have one batch, it gets auto-selected here,
+                            // qty is already defaulted to 1, and nothing is ever "changed"
+                            // by hand -- so a second row never appeared even after the item
+                            // was fully entered, and the table stopped at whatever 2 rows
+                            // already existed. Dispatching a real 'change' event routes
+                            // through that same handler (rate/total/new-row all in one
+                            // place) instead of duplicating it here.
+                            batchSelect.dispatchEvent(new Event('change', { bubbles: true }));
                         }, 50);
                     }
                 }
@@ -736,21 +753,44 @@
             const row = e.target.closest('tr');
             const qtyInput = row.querySelector('.wholesale-pos-qty');
             const selectedBatch = e.target.options[e.target.selectedIndex];
-            
+
             if (qtyInput && selectedBatch && selectedBatch.value) {
                 const availableQty = parseInt(selectedBatch.dataset.qty) || 0;
                 const requestedQty = parseInt(qtyInput.value) || 1;
-                
+
                 if (requestedQty > availableQty) {
                     showToast(`Only ${availableQty} units available in this batch`, 'warning');
                     qtyInput.value = availableQty;
                 }
                 qtyInput.max = availableQty;
             }
-            
+
             updateRowRate(row);
             updateRowTotal(row);
             updateTotals();
+
+            // 🔥 FIX (ported from retail/index.js): THE actual cause of "it
+            // stops after two rows" -- the ONLY thing that ever added a new
+            // row here was the qty 'input' listener above, which only fires
+            // if someone actually TYPES into the last row's qty box. Every
+            // new row's qty starts pre-filled at 1 (see addPOSRow()), so if
+            // whoever's using the form is happy with the default 1 and
+            // never touches qty -- completely normal for a wholesale order
+            // -- there's simply no keystroke to ever trigger it, and the
+            // table just sits at whatever rows already existed (1 static +
+            // 1 from the init addPOSRow() call = 2, matching exactly what
+            // was reported). Retail hit this same bug and fixed it by
+            // opening a fresh row on a valid batch pick instead -- batch
+            // selection always happens once an item is genuinely being
+            // added to the row, so it's a reliable "this row now has a
+            // real, priced item in it" signal regardless of whether qty was
+            // ever touched. Guarded to the LAST row and a real batch (not
+            // the "Select Batch"/"No stock available" placeholder options)
+            // so re-picking a batch on an earlier row never spawns extra
+            // rows.
+            if (selectedBatch && selectedBatch.value && row === posTableBody.querySelector('tr:last-child')) {
+                addPOSRow();
+            }
         }
     });
 
@@ -782,6 +822,30 @@
         searchInput.value = (opt && opt.value) ? opt.textContent.trim() : '';
     }
 
+    // 🔥 ADDED: split out from renderItemSearchResults() so ArrowUp/ArrowDown
+    // can just re-paint the highlight without re-filtering
+    // productCatalogCache on every keypress -- mirrors retail/index.js's
+    // renderItemSearchResultsHtml().
+    function renderItemSearchOptionsHtml() {
+        if (!itemSearchDropdownEl) return;
+        if (itemSearchMatches.length === 0) {
+            itemSearchDropdownEl.innerHTML = `<div style="padding:10px 12px; color:#94a3b8; font-size:0.8rem;">No matching items</div>`;
+        } else {
+            itemSearchDropdownEl.innerHTML = itemSearchMatches.map((p, i) => `
+                <div class="wholesale-item-search-option" data-index="${i}" data-id="${p.id}" style="padding:6px 12px; cursor:pointer; font-size:0.8rem; border-bottom:1px solid #f1f5f9; ${i === itemSearchHighlightIndex ? 'background:#eff6ff;' : ''}">
+                    <div style="color:#0f172a;">${p.product_name}</div>
+                    ${p.generic ? `<div style="color:#94a3b8; font-size:0.7rem; margin-top:1px;">${p.generic}</div>` : ''}
+                </div>
+            `).join('');
+        }
+    }
+
+    function scrollItemSearchHighlightIntoView() {
+        if (!itemSearchDropdownEl) return;
+        const el = itemSearchDropdownEl.querySelector(`.wholesale-item-search-option[data-index="${itemSearchHighlightIndex}"]`);
+        if (el) el.scrollIntoView({ block: 'nearest' });
+    }
+
     function renderItemSearchResults(query) {
         if (!itemSearchDropdownEl) return;
         const q = (query || '').trim().toLowerCase();
@@ -792,18 +856,53 @@
                 (p.generic || '').toLowerCase().includes(q)
             );
         }
-        matches = matches.slice(0, 50);
+        itemSearchMatches = matches.slice(0, 50);
+        // 🔥 ADDED: first result starts highlighted so an immediate
+        // Enter/Tab (without ever touching the mouse) picks the top match
+        // -- mirrors retail/index.js.
+        itemSearchHighlightIndex = itemSearchMatches.length ? 0 : -1;
+        renderItemSearchOptionsHtml();
+    }
 
-        if (matches.length === 0) {
-            itemSearchDropdownEl.innerHTML = `<div style="padding:10px 12px; color:#94a3b8; font-size:0.8rem;">No matching items</div>`;
-        } else {
-            itemSearchDropdownEl.innerHTML = matches.map(p => `
-                <div class="wholesale-item-search-option" data-id="${p.id}" style="padding:6px 12px; cursor:pointer; font-size:0.8rem; border-bottom:1px solid #f1f5f9;">
-                    <div style="color:#0f172a;">${p.product_name}</div>
-                    ${p.generic ? `<div style="color:#94a3b8; font-size:0.7rem; margin-top:1px;">${p.generic}</div>` : ''}
-                </div>
-            `).join('');
-        }
+    // Picking a result just drives the hidden <select> exactly like a
+    // native option pick would -- same value assignment, same 'change'
+    // event -- so batch loading / rate calc / everything downstream runs
+    // completely unchanged.
+    function selectItemSearchOption(productId) {
+        if (!activeItemSearchRow || !activeItemSearchSelect) return;
+        // 🔥 FIX: this is the actual bug behind "mouse and Tab both looked
+        // like they selected the item (the name appeared) but batch/price
+        // never loaded" -- hideItemDropdown() (below) sets the module-level
+        // activeItemSearchRow/Input/Select back to null as part of closing
+        // the panel, but this function kept reading those SAME module-level
+        // variables AFTER calling it. So `activeItemSearchSelect.dispatchEvent(...)`
+        // was running on a null reference and throwing a TypeError right
+        // there -- which silently aborted the rest of this function. The
+        // name had already been written to the search box one line earlier
+        // (syncItemSearchDisplay, which ran fine before the crash), but the
+        // 'change' event that triggers the batch/price lookup never
+        // actually fired, because the code never reached that line. Fix:
+        // capture the row/select/input into local variables BEFORE calling
+        // hideItemDropdown(), so clearing the module-level state afterward
+        // can't pull the rug out from under the rest of this function.
+        const row = activeItemSearchRow;
+        const select = activeItemSearchSelect;
+        const input = activeItemSearchInput;
+        select.value = productId;
+        syncItemSearchDisplay(row);
+        hideItemDropdown();
+        select.dispatchEvent(new Event('change', { bubbles: true }));
+        if (input) input.blur();
+    }
+
+    // 🔥 ADDED: pick whichever result is currently highlighted (used by
+    // Enter and Tab). Returns false (does nothing) if there's nothing to
+    // pick, so the caller knows whether to let the key's default behavior
+    // continue -- mirrors retail/index.js's selectHighlightedItemSearchResult().
+    function selectHighlightedItemSearchOption() {
+        if (itemSearchHighlightIndex < 0 || !itemSearchMatches[itemSearchHighlightIndex]) return false;
+        selectItemSearchOption(itemSearchMatches[itemSearchHighlightIndex].id);
+        return true;
     }
 
     function showItemDropdownFor(row, searchInput, select, query) {
@@ -856,18 +955,65 @@
     // Picking a result: 'mousedown' (not 'click') so this fires BEFORE the
     // search box's own 'blur' handler below, which would otherwise hide the
     // dropdown first and cause the click to land on nothing.
-    posTableBody.addEventListener('mousedown', function(e) {
+    //
+    // 🔥 FIX: THE actual cause of "not selecting by mouse at all" -- this
+    // was attached to posTableBody, but #wholesaleItemSearchDropdown (where
+    // .wholesale-item-search-option rows actually live -- see the HTML
+    // comment right above that div in index.html) is NOT inside
+    // posTableBody. It's a sibling, fixed-positioned div appended right
+    // after the item table's closing </table></div>, specifically so it
+    // isn't clipped by the table's horizontal-scroll wrapper. Since it
+    // isn't a descendant of posTableBody, a mousedown on an option there
+    // never bubbles through a listener attached to posTableBody -- the
+    // event physically can't reach it, no matter how correctly the click
+    // lands on the element. Moved to `document`, exactly like retail's
+    // equivalent listener (see retail/index.js's product-search panel),
+    // which is a real ancestor of everything on the page and is already
+    // the proven-working pattern there.
+    document.addEventListener('mousedown', function(e) {
         const option = e.target.closest('.wholesale-item-search-option');
         if (!option || !activeItemSearchRow) return;
         e.preventDefault();
+        selectItemSearchOption(option.dataset.id);
+    });
 
-        const select = activeItemSearchSelect;
-        const searchInput = activeItemSearchInput;
-        select.value = option.dataset.id;
-        syncItemSearchDisplay(activeItemSearchRow);
-        hideItemDropdown();
-        select.dispatchEvent(new Event('change', { bubbles: true }));
-        searchInput.blur();
+    // 🔥 ADDED: keyboard navigation for the product search dropdown -- this
+    // didn't exist at all before, which was the other half of the report
+    // ("type, dropdown open, then arrow up/down + Tab to select" -- none of
+    // that worked because there was no keydown handling whatsoever). Mirrors
+    // retail/index.js's equivalent listener exactly: Down/Up moves the
+    // highlight, Enter picks it (and stays put), Tab picks it too but
+    // WITHOUT preventDefault so focus still naturally advances to whatever
+    // field comes next, Escape closes the dropdown. Delegated on
+    // posTableBody (like the other item-search listeners) since rows are
+    // added/removed dynamically -- unlike the mousedown fix above, this one
+    // is fine on posTableBody because the search INPUT itself (the keydown
+    // target) really does live inside the table row; only the dropdown
+    // panel of results lives outside it.
+    posTableBody.addEventListener('keydown', function(e) {
+        if (!e.target.classList.contains('wholesale-pos-item-search')) return;
+        const isOpen = itemSearchDropdownEl && itemSearchDropdownEl.style.display !== 'none' && activeItemSearchInput === e.target;
+        if (!isOpen) return;
+
+        if (e.key === 'ArrowDown') {
+            e.preventDefault();
+            if (!itemSearchMatches.length) return;
+            itemSearchHighlightIndex = Math.min(itemSearchHighlightIndex + 1, itemSearchMatches.length - 1);
+            renderItemSearchOptionsHtml();
+            scrollItemSearchHighlightIntoView();
+        } else if (e.key === 'ArrowUp') {
+            e.preventDefault();
+            if (!itemSearchMatches.length) return;
+            itemSearchHighlightIndex = Math.max(itemSearchHighlightIndex - 1, 0);
+            renderItemSearchOptionsHtml();
+            scrollItemSearchHighlightIntoView();
+        } else if (e.key === 'Enter') {
+            if (selectHighlightedItemSearchOption()) e.preventDefault();
+        } else if (e.key === 'Tab') {
+            selectHighlightedItemSearchOption();
+        } else if (e.key === 'Escape') {
+            hideItemDropdown();
+        }
     });
 
     // 'blur' doesn't bubble either -- capture phase again. Delayed slightly
@@ -2569,9 +2715,23 @@
             let savedData;
             try {
                 if (editingWholesaleDbId) {
+                    // 🔥 FIX: same bug fixed in retail/index.js's equivalent
+                    // save function -- dbRecord (built above) always carries
+                    // `created_at: new Date().toISOString()`, correct for a
+                    // brand-new sale, but this same object was also being
+                    // sent as-is to `.update()` when editing an EXISTING
+                    // invoice -- silently overwriting the original invoice's
+                    // created_at with "right now" on every edit (e.g. a
+                    // Bypass -> Claim correction), which moves the invoice's
+                    // date on every screen/report that reads created_at
+                    // away from when the order actually happened. Strip it
+                    // from the update payload so the original date/time is
+                    // preserved; `updated_at` (still in dbRecord) correctly
+                    // continues to reflect when the edit itself happened.
+                    const { created_at, ...updateRecord } = dbRecord;
                     const { data, error } = await supabaseClient
                         .from('sales')
-                        .update(dbRecord)
+                        .update(updateRecord)
                         .eq('id', editingWholesaleDbId)
                         .select();
 

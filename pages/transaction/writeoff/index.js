@@ -919,11 +919,21 @@
             // Create (or update) the write-off record
             let writeOff;
             if (editingWriteOffId) {
+                // 🔥 FIX: same bug fixed in retail/wholesale/donation's save
+                // functions -- this update was setting `date` to TODAY on
+                // every edit (it's correct for a brand-new write-off, which
+                // is where this literal came from originally), silently
+                // overwriting the original write-off date whenever an
+                // existing write-off was edited (e.g. correcting a
+                // quantity). write_offs has no separate `updated_at` column
+                // to record the edit time on instead, so the fix is simply
+                // to leave `date` out of the update payload entirely --
+                // Postgres leaves an omitted column untouched, so the
+                // original date is preserved exactly as it was.
                 const { data, error: woError } = await supabaseClient
                     .from('write_offs')
                     .update({
                         reference_number: refNumber,
-                        date: new Date().toISOString().split('T')[0],
                         reason: finalReason,
                         total_qty_written_off: totalQty,
                         total_cost_written_off: totalCost

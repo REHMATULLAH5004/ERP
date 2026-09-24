@@ -65,6 +65,47 @@ window.showAdminSection = showAdminSection;
         return;
     }
 
+    // 🔥 ADDED: withAuthRetry -- this page's Add/Edit Client save was the
+    // one write path onto `customers` in the whole app that had no
+    // protection against a stale session. Every other place that writes
+    // to `customers` (Retail POS quick-add, CRM registration, Payments,
+    // Purchase, Dashboard) already retries once after refreshing the
+    // session when a write gets rejected for looking like a stale-auth
+    // problem (RLS/JWT/permission errors) -- this was just missing here,
+    // so a session that had gone stale surfaced straight to the user as
+    // a raw "new row violates row-level security policy for table
+    // customers" error with no recovery. Same pattern as everywhere else.
+    async function withAuthRetry(operationFn) {
+        let result = await operationFn();
+        const err = result?.error;
+        const looksLikeAuthRejection = err && (
+            err.code === '42501' ||
+            err.code === 'PGRST301' ||
+            /row-level security|jwt|permission denied/i.test(err.message || '')
+        );
+
+        if (looksLikeAuthRejection) {
+            console.warn('⚠️ Write rejected (looks like a stale session) -- refreshing session and retrying once:', err.message);
+            try {
+                await supabaseClient.auth.refreshSession();
+            } catch (refreshError) {
+                console.error('Session refresh failed:', refreshError);
+            }
+            result = await operationFn();
+        }
+
+        return result;
+    }
+
+    // 🔥 ADDED: the same format rules the `customers` table enforces
+    // (customers_full_name_format / customers_phone_format), checked
+    // client-side before submit so a typo (a stray digit or symbol in
+    // the name, a phone missing the +260 country code) shows a plain-
+    // English message right on the field instead of a raw Postgres
+    // "violates check constraint" error after the round trip.
+    const CLIENT_NAME_RE = /^[A-Za-z][A-Za-z '.-]*$/;
+    const CLIENT_PHONE_RE = /^\+260\d{9}$/;
+
     const PAGE_SIZE = 25;
     let currentPage = 0;
     let currentSearch = '';
@@ -189,10 +230,33 @@ window.showAdminSection = showAdminSection;
             errorBox.style.display = 'block';
             return;
         }
+        // 🔥 ADDED: matches customers_full_name_format -- letters, spaces,
+        // apostrophes, periods and hyphens only, starting with a letter.
+        // Catches a stray digit/symbol here instead of a raw DB error.
+        if (!CLIENT_NAME_RE.test(formData.full_name)) {
+            errorBox.textContent = 'Full Name can only contain letters, spaces, apostrophes, periods and hyphens (no numbers or other symbols).';
+            errorBox.style.display = 'block';
+            return;
+        }
         if (formData.customer_type === 'NHIMA' && !formData.nhima_number) {
             errorBox.textContent = 'NHIMA Number is required for NHIMA clients.';
             errorBox.style.display = 'block';
             return;
+        }
+        // 🔥 ADDED: `customers.phone` is NOT NULL, so leaving it blank used
+        // to crash the insert with a raw "null value in column phone
+        // violates not-null constraint" error. A phone that IS entered
+        // must match customers_phone_format (+260XXXXXXXXX); a blank one
+        // now gets a synthetic CUST- placeholder, same convention already
+        // used by Retail POS / CRM quick-add for walk-in customers with
+        // no phone on file.
+        if (formData.phone && !CLIENT_PHONE_RE.test(formData.phone)) {
+            errorBox.textContent = 'Phone must be in the format +260XXXXXXXXX (9 digits after +260).';
+            errorBox.style.display = 'block';
+            return;
+        }
+        if (!formData.phone) {
+            formData.phone = `CUST-${Date.now()}-${Math.floor(Math.random() * 10000)}`;
         }
 
         submitBtn.disabled = true;
@@ -201,16 +265,16 @@ window.showAdminSection = showAdminSection;
 
         try {
             if (isEditing) {
-                const { error } = await supabaseClient
+                const { error } = await withAuthRetry(() => supabaseClient
                     .from('customers')
                     .update(formData)
-                    .eq('id', hiddenId.value);
+                    .eq('id', hiddenId.value));
                 if (error) throw error;
                 showToast('Client updated successfully!', 'success');
             } else {
-                const { error } = await supabaseClient
+                const { error } = await withAuthRetry(() => supabaseClient
                     .from('customers')
-                    .insert([formData]);
+                    .insert([formData]));
                 if (error) throw error;
                 showToast('Client added successfully!', 'success');
             }

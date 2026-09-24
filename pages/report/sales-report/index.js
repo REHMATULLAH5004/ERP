@@ -93,20 +93,49 @@
     // FETCH + FILTER
     // ============================================
 
+    // 🔥 FIX: THE actual cause of the report's totals being far below the
+    // real numbers (confirmed directly against the database -- this
+    // month's real NHIMA total is K3,410,390.96, but the report was
+    // showing K1,603,116.64, less than half) -- this was a plain
+    // .select() with no .range()/.limit(), same root cause already found
+    // and fixed elsewhere in this codebase for the NHIMA-member and
+    // phone dropdowns (see fetchAllRows() in retail/index.js): PostgREST
+    // silently caps an unpaginated request at 1000 rows. This month alone
+    // has 1,939 matching sales, almost double that cap, so more than
+    // half of them -- whichever landed past row 1000 in whatever order
+    // Postgres happened to return them in -- were dropped from every
+    // total on this page without any error or warning. Fixed the same
+    // way as retail.js: page through with .range() in a loop until a
+    // page comes back short. An explicit .order('id') is required here
+    // (it wasn't strictly needed for the single-column NHIMA/phone
+    // lookups) -- .range() pagination is only guaranteed not to skip or
+    // repeat rows across pages when the query has a stable sort order;
+    // without one Postgres is free to return rows in a different order
+    // on each page's request.
     async function fetchSales(fromDate, toDate) {
         const rangeStart = `${fromDate}T00:00:00`;
         const rangeEnd = `${toDate}T23:59:59`;
+        const pageSize = 1000;
 
-        const { data: sales, error } = await supabaseClient
-            .from('sales')
-            .select('id, sale_id, client_type, client_sub_type, payment, grand_total, items, customer_data, customer_id, created_at')
-            .in('client_type', ['RETAIL', 'WHOLESALE', 'DONATION', 'WRITEOFF'])
-            .neq('is_quotation', true)
-            .gte('created_at', rangeStart)
-            .lte('created_at', rangeEnd);
+        let all = [];
+        let from = 0;
+        while (true) {
+            const { data, error } = await supabaseClient
+                .from('sales')
+                .select('id, sale_id, client_type, client_sub_type, payment, grand_total, items, customer_data, customer_id, created_at')
+                .in('client_type', ['RETAIL', 'WHOLESALE', 'DONATION', 'WRITEOFF'])
+                .neq('is_quotation', true)
+                .gte('created_at', rangeStart)
+                .lte('created_at', rangeEnd)
+                .order('id')
+                .range(from, from + pageSize - 1);
 
-        if (error) throw error;
-        return sales || [];
+            if (error) throw error;
+            all = all.concat(data || []);
+            if (!data || data.length < pageSize) break;
+            from += pageSize;
+        }
+        return all;
     }
 
     // ============================================

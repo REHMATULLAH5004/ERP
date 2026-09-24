@@ -114,7 +114,7 @@
 
             const productIds = products.map(p => p.id);
             let stockMap = {};
-            
+
             if (productIds.length > 0) {
                 const { data: batches, error: batchError } = await supabaseClient
                     .from('batches')
@@ -147,9 +147,9 @@
     // ============================================
     function renderProducts(products) {
         const tbody = document.getElementById('productTableBody');
-        
+
         if (!tbody) return;
-        
+
         if (products.length === 0) {
             tbody.innerHTML = `<tr><td colspan="7" style="text-align: center; padding: 30px; color: #94a3b8;">No products found. Click "Add Product" to get started!</td></tr>`;
             return;
@@ -791,7 +791,7 @@
     // ============================================
     document.getElementById('csvUploadForm')?.addEventListener('submit', async (e) => {
         e.preventDefault();
-        
+
         const file = csvFileInput.files[0];
         if (!file) {
             showToast('Please select a CSV file', 'error');
@@ -814,7 +814,7 @@
 
             const text = await file.text();
             const lines = text.split('\n').filter(line => line.trim());
-            
+
             if (lines.length < 2) {
                 showToast('CSV file is empty or has no data rows', 'error');
                 csvProgressContainer.style.display = 'none';
@@ -823,7 +823,7 @@
 
             // Parse headers
             const headers = parseCSVLine(lines[0]).map(h => h.trim().toLowerCase());
-            
+
             // Validate required columns
             const requiredColumns = ['product_name', 'cost_price'];
             const missingColumns = requiredColumns.filter(col => !headers.includes(col));
@@ -836,10 +836,10 @@
             // Parse data rows
             const products = [];
             const errors = [];
-            
+
             for (let i = 1; i < lines.length; i++) {
                 const values = parseCSVLine(lines[i]).map(v => v.trim());
-                
+
                 if (values.length < headers.length) {
                     errors.push(`Row ${i}: Missing columns`);
                     continue;
@@ -878,7 +878,7 @@
                 product.opening_qty = parseInt(product.opening_qty) || 0;
                 product.cost_price = parseFloat(product.cost_price) || 0;
                 product.currency = product.currency || 'ZMW';
-                
+
                 products.push(product);
             }
 
@@ -900,7 +900,7 @@
             for (let i = 0; i < products.length; i++) {
                 try {
                     const p = products[i];
-                    
+
                     // Look up or create related records
                     const genericId = await findOrCreate('generic_names', p.generic_name);
                     const categoryId = await findOrCreate('categories', p.category);
@@ -1007,7 +1007,7 @@
                     }
 
                     successCount++;
-                    
+
                     // Update progress
                     const progress = 30 + ((i + 1) / products.length) * 60;
                     csvProgressBar.style.width = `${progress}%`;
@@ -1268,7 +1268,7 @@ ${errorMessages.length > 8 ? `\n... and ${errorMessages.length - 8} more` : ''}
 
         const { data: created, error: createError } = await supabaseClient
             .from('sub_categories')
-            .insert([{ 
+            .insert([{
                 name: name.trim(),
                 category_id: categoryId
             }])
@@ -1289,13 +1289,13 @@ ${errorMessages.length > 8 ? `\n... and ${errorMessages.length - 8} more` : ''}
                 .from('chart_of_accounts')
                 .select('*', { count: 'exact', head: true })
                 .eq('code', inventoryAccount);
-            
+
             if (invCount === 0) {
-                await supabaseClient.from('chart_of_accounts').insert([{ 
-                    code: inventoryAccount, 
-                    name: 'Inventory', 
-                    type: 'Asset', 
-                    normal_balance: 'Debit' 
+                await supabaseClient.from('chart_of_accounts').insert([{
+                    code: inventoryAccount,
+                    name: 'Inventory',
+                    type: 'Asset',
+                    normal_balance: 'Debit'
                 }]);
             }
 
@@ -1305,11 +1305,11 @@ ${errorMessages.length > 8 ? `\n... and ${errorMessages.length - 8} more` : ''}
                 .eq('code', equityAccount);
 
             if (eqCount === 0) {
-                await supabaseClient.from('chart_of_accounts').insert([{ 
-                    code: equityAccount, 
-                    name: 'Opening Balance Equity', 
-                    type: 'Equity', 
-                    normal_balance: 'Credit' 
+                await supabaseClient.from('chart_of_accounts').insert([{
+                    code: equityAccount,
+                    name: 'Opening Balance Equity',
+                    type: 'Equity',
+                    normal_balance: 'Credit'
                 }]);
             }
 
@@ -1377,7 +1377,19 @@ ${errorMessages.length > 8 ? `\n... and ${errorMessages.length - 8} more` : ''}
         if (form) form.reset();
 
         hiddenId.value = '';
-        document.getElementById('sku').value = 'PRD-' + Math.floor(Math.random() * 10000).toString().padStart(4, '0');
+        // 🔥 FIX: the old suggestion was 'PRD-' + a random 4-digit number --
+        // only 10,000 possible values. With 143 products already using this
+        // exact pattern (checked live in the database), a fresh random pick
+        // collides with an EXISTING product's SKU roughly 1 in 70 times,
+        // producing a genuine "duplicate key value violates unique
+        // constraint products_sku_key" error on Save -- a real failed
+        // insert, not a saved-but-still-erroring product (that confusion
+        // is what a user sees when this collides: the product they're
+        // LOOKING AT in the list is the pre-existing one with that SKU,
+        // not the one they just tried to add). Matches the CSV import
+        // path's own SKU generator style (see createAccountingEntry()
+        // above) which is time-based and effectively collision-free.
+        document.getElementById('sku').value = `PRD-${Date.now().toString(36).toUpperCase()}`;
         document.getElementById('productName').value = '';
         document.getElementById('genericName').value = '';
         document.getElementById('category').value = '';
@@ -1468,13 +1480,76 @@ ${errorMessages.length > 8 ? `\n... and ${errorMessages.length - 8} more` : ''}
     }
 
     // ============================================
+    // DUPLICATE PRODUCT NAME CONFIRM
+    // ============================================
+    // 🔥 ADDED: shown when Save Product finds an existing product with
+    // the same name (see the duplicate-name check in the SUBMIT FORM
+    // handler below). This mirrors the existing-product-by-name lookup
+    // CSV Bulk Import already does (its .ilike('product_name', ...)
+    // check, which reuses the match automatically) -- but this is the
+    // interactive single-product form, with a person present in real
+    // time, so instead of silently reusing or silently creating a
+    // duplicate, it surfaces the match and lets them choose. This
+    // closes the gap that let a duplicate "Elocom" product get created
+    // with no warning at all.
+    function showDuplicateProductConfirm(existingName, onChoice) {
+        const existing = document.getElementById('duplicateProductConfirmModal');
+        if (existing) existing.remove();
+
+        const overlay = document.createElement('div');
+        overlay.id = 'duplicateProductConfirmModal';
+        overlay.style.cssText = `
+            position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(15, 23, 42, 0.6); backdrop-filter: blur(4px);
+            z-index: 9999; display: flex; justify-content: center; align-items: center;
+            animation: modalFadeIn 0.25s ease;
+        `;
+
+        overlay.innerHTML = `
+            <div style="background: white; padding: 30px; border-radius: 12px; width: 90%; max-width: 440px; box-shadow: 0 20px 50px rgba(0,0,0,0.5); text-align: center;">
+                <div style="margin-bottom: 16px;">
+                    <i class="fa-solid fa-triangle-exclamation" style="font-size: 3rem; color: #f59e0b;"></i>
+                </div>
+                <h3 style="margin: 0 0 8px 0; color: #0f172a; font-size: 1.2rem;">Product Already Exists</h3>
+                <p style="color: #64748b; margin-bottom: 20px;">A product named "<strong>${existingName}</strong>" is already in the system. What would you like to do?</p>
+                <div style="display: flex; flex-direction: column; gap: 10px;">
+                    <button id="dupEditBtn" style="background: #2563eb; color: white; border: none; padding: 10px 24px; border-radius: 6px; cursor: pointer; font-size: 0.9rem;">
+                        <i class="fa-solid fa-pen-to-square"></i> Edit the Existing Product Instead
+                    </button>
+                    <button id="dupAnywayBtn" style="background: #f1f5f9; border: 1px solid #e2e8f0; padding: 10px 24px; border-radius: 6px; cursor: pointer; font-size: 0.9rem; color: #475569;">
+                        Save Anyway (create a separate product)
+                    </button>
+                    <button id="dupCancelBtn" style="background: none; border: none; padding: 6px; cursor: pointer; font-size: 0.85rem; color: #94a3b8; text-decoration: underline;">
+                        Cancel and rename
+                    </button>
+                </div>
+            </div>
+        `;
+
+        document.body.appendChild(overlay);
+
+        const cleanup = (result) => {
+            overlay.remove();
+            onChoice(result);
+        };
+
+        document.getElementById('dupEditBtn').addEventListener('click', () => cleanup('edit'));
+        document.getElementById('dupAnywayBtn').addEventListener('click', () => cleanup('anyway'));
+        document.getElementById('dupCancelBtn').addEventListener('click', () => cleanup('cancel'));
+
+        overlay.addEventListener('click', (e) => {
+            if (e.target === overlay) cleanup('cancel');
+        });
+    }
+
+    // ============================================
     // MODAL LOGIC
     // ============================================
     const openModal = (iconHtml, titleText, btnText, showBatchSection) => {
         modal.style.display = 'flex';
         modalTitle.innerHTML = `${iconHtml} ${titleText}`;
         submitBtn.innerHTML = `<i class="fa-solid fa-floppy-disk"></i> ${btnText}`;
-        
+
         if (showBatchSection) {
             batchSectionContainer.style.display = 'block';
         } else {
@@ -1510,10 +1585,10 @@ ${errorMessages.length > 8 ? `\n... and ${errorMessages.length - 8} more` : ''}
     // BATCH DETAILS LOGIC
     // ============================================
     const openingQty = document.getElementById('openingQty');
-    
+
     const checkBatchFields = () => {
         const qty = parseInt(openingQty.value) || 0;
-        
+
         if (qty > 0) {
             batchDetailsSection.style.display = 'block';
             document.getElementById('openingCostPrice').setAttribute('required', '');
@@ -1541,7 +1616,7 @@ ${errorMessages.length > 8 ? `\n... and ${errorMessages.length - 8} more` : ''}
     const updateBatchCost = () => {
         const currency = batchCurrency.value;
         const cost = parseFloat(openingCostPrice.value) || 0;
-        
+
         if (currency === 'ZMW') {
             batchExchangeRate.style.display = 'none';
             batchExchangeRate.value = '';
@@ -1576,7 +1651,7 @@ ${errorMessages.length > 8 ? `\n... and ${errorMessages.length - 8} more` : ''}
     window.editProduct = async function(productId) {
         try {
             console.log("Editing product:", productId);
-            
+
             const { data: product, error } = await supabaseClient
                 .from('products')
                 .select('*')
@@ -1584,23 +1659,23 @@ ${errorMessages.length > 8 ? `\n... and ${errorMessages.length - 8} more` : ''}
                 .single();
 
             if (error) throw error;
-            
+
             console.log("Product data loaded:", product);
 
             resetFormFields();
-            
+
             setTimeout(() => {
                 openModal('<i class="fa-solid fa-pen-to-square" style="color: #2563eb;"></i>', 'Edit Product', 'Update Product', false);
             }, 100);
-            
+
             hiddenId.value = product.id;
-            
+
             document.getElementById('sku').value = product.sku || '';
             document.getElementById('productName').value = product.product_name || '';
             document.getElementById('tax').value = product.tax_percent || 0;
             document.getElementById('packSize').value = product.conversion_rate || 1;
             document.getElementById('nhimaPrice').value = product.nhima_price_fixed || 0;
-            
+
             await loadDropdowns();
 
             // 🔥 CHANGED: these are now searchable text fields, not
@@ -1619,7 +1694,7 @@ ${errorMessages.length > 8 ? `\n... and ${errorMessages.length - 8} more` : ''}
                 if (dosageRequiredCb) dosageRequiredCb.checked = (product.dosage_required !== false);
                 if (typeof updateDosageRequiredUI === 'function') updateDosageRequiredUI();
             }, 300);
-            
+
         } catch (error) {
             console.error("Error loading product data:", error);
             showToast('Error loading product data: ' + error.message, 'error');
@@ -1676,6 +1751,51 @@ ${errorMessages.length > 8 ? `\n... and ${errorMessages.length - 8} more` : ''}
                 expiry: document.getElementById('openingExpiry').value || null,
                 batch_cost: parseFloat(document.getElementById('openingCostPriceFinal').value) || 0,
             };
+
+            // ==========================================
+            // DUPLICATE PRODUCT NAME CHECK
+            // ==========================================
+            // 🔥 ADDED: only when creating a NEW product (editing an
+            // existing one obviously matches itself by name). Mirrors
+            // the CSV Bulk Import path's existing-product-by-name
+            // lookup (see the .ilike('product_name', ...) check
+            // earlier in this file) so a duplicate can no longer be
+            // created here silently -- this is what let a second
+            // "Elocom" product get created with no warning. Since a
+            // person is present on this form (unlike the bulk CSV
+            // path), the match is surfaced instead of auto-reused, and
+            // they choose: edit the existing product, save anyway
+            // (two different products can legitimately share a name),
+            // or cancel and rename.
+            if (!isEditing) {
+                const { data: dupRows, error: dupError } = await supabaseClient
+                    .from('products')
+                    .select('id, product_name')
+                    .ilike('product_name', formData.product_name.trim())
+                    .limit(1);
+
+                if (dupError) throw dupError;
+
+                if (dupRows && dupRows.length > 0) {
+                    const existingProduct = dupRows[0];
+                    const choice = await new Promise((resolve) => {
+                        showDuplicateProductConfirm(existingProduct.product_name, resolve);
+                    });
+
+                    if (choice === 'edit') {
+                        submitBtn.disabled = false;
+                        submitBtn.innerHTML = '<i class="fa-solid fa-floppy-disk"></i> Save Product';
+                        window.editProduct(existingProduct.id);
+                        return;
+                    }
+                    if (choice === 'cancel') {
+                        submitBtn.disabled = false;
+                        submitBtn.innerHTML = '<i class="fa-solid fa-floppy-disk"></i> Save Product';
+                        return;
+                    }
+                    // choice === 'anyway' -> fall through and create as normal
+                }
+            }
 
             let result;
             if (isEditing) {
@@ -1778,16 +1898,16 @@ ${errorMessages.length > 8 ? `\n... and ${errorMessages.length - 8} more` : ''}
                         .from('chart_of_accounts')
                         .select('*', { count: 'exact', head: true })
                         .eq('code', inventoryAccount);
-                    
+
                     if (invCount === 0) {
                         console.log(`⚠️ Account ${inventoryAccount} not found. Creating it...`);
                         const { error: invCreateErr } = await supabaseClient
                             .from('chart_of_accounts')
-                            .insert([{ 
-                                code: inventoryAccount, 
-                                name: 'Inventory', 
-                                type: 'Asset', 
-                                normal_balance: 'Debit' 
+                            .insert([{
+                                code: inventoryAccount,
+                                name: 'Inventory',
+                                type: 'Asset',
+                                normal_balance: 'Debit'
                             }]);
                         if (invCreateErr) console.warn("Could not auto-create Inventory account:", invCreateErr);
                     }
@@ -1801,17 +1921,17 @@ ${errorMessages.length > 8 ? `\n... and ${errorMessages.length - 8} more` : ''}
                         console.log(`⚠️ Account ${equityAccount} not found. Creating it...`);
                         const { error: eqCreateErr } = await supabaseClient
                             .from('chart_of_accounts')
-                            .insert([{ 
-                                code: equityAccount, 
-                                name: 'Opening Balance Equity', 
-                                type: 'Equity', 
-                                normal_balance: 'Credit' 
+                            .insert([{
+                                code: equityAccount,
+                                name: 'Opening Balance Equity',
+                                type: 'Equity',
+                                normal_balance: 'Credit'
                             }]);
                         if (eqCreateErr) console.warn("Could not auto-create Equity account:", eqCreateErr);
                     }
 
                     await loadAccountCodes();
-                    
+
                     // ==========================================
                     // 3. Create the Opening Balance Journal Entry
                     // ==========================================
@@ -1908,7 +2028,24 @@ ${errorMessages.length > 8 ? `\n... and ${errorMessages.length - 8} more` : ''}
 
         } catch (error) {
             console.error("Error saving product:", error);
-            showToast('Error saving product: ' + error.message, 'error');
+            // 🔥 ADDED: friendlier handling for a SKU collision specifically
+            // (Postgres code 23505 on the products_sku_key constraint).
+            // This IS a genuine failed insert -- nothing new was saved --
+            // but the raw Postgres message ("duplicate key value violates
+            // unique constraint...") reads like a confusing/contradictory
+            // error to a non-technical user, especially since a product
+            // with a similar name may already be sitting right there in
+            // the list (that pre-existing one, not this attempt, is what
+            // they're seeing). Give a plain-language explanation and a
+            // fresh, collision-resistant SKU suggestion so they can just
+            // hit Save again instead of guessing a new one by hand.
+            if (error && error.code === '23505' && /sku/i.test(error.message || '')) {
+                const freshSku = `PRD-${Date.now().toString(36).toUpperCase()}`;
+                document.getElementById('sku').value = freshSku;
+                showToast(`That SKU is already used by another product -- nothing was saved. A new SKU (${freshSku}) has been filled in, please Save again.`, 'error');
+            } else {
+                showToast('Error saving product: ' + error.message, 'error');
+            }
             submitBtn.disabled = false;
             submitBtn.innerHTML = `<i class="fa-solid fa-floppy-disk"></i> Save Product`;
         }
@@ -1928,11 +2065,11 @@ ${errorMessages.length > 8 ? `\n... and ${errorMessages.length - 8} more` : ''}
             background: rgba(0,0,0,0.5); display: flex; justify-content: center;
             align-items: center; z-index: 2000;
         `;
-        
+
         let extraField = '';
         let placeholder = `Enter ${type} name`;
         let title = `Add New ${type.charAt(0).toUpperCase() + type.slice(1)}`;
-        
+
         if (type === 'category') {
             extraField = `
                 <div style="margin-top: 10px;">
@@ -1941,7 +2078,7 @@ ${errorMessages.length > 8 ? `\n... and ${errorMessages.length - 8} more` : ''}
                 </div>
             `;
         }
-        
+
         if (type === 'subcategory') {
             title = 'Add New Sub-Category';
             placeholder = 'Enter Sub-Category name';
@@ -2042,7 +2179,7 @@ ${errorMessages.length > 8 ? `\n... and ${errorMessages.length - 8} more` : ''}
             </div>
         `;
         document.body.appendChild(overlay);
-        
+
         setTimeout(() => {
             const input = document.getElementById('quickAddInput');
             if (input) input.focus();
@@ -2237,7 +2374,7 @@ ${errorMessages.length > 8 ? `\n... and ${errorMessages.length - 8} more` : ''}
                 };
                 const selectId = selectMap[type];
                 const selectEl = document.getElementById(selectId);
-                
+
                 if (selectEl) {
                     selectEl.value = data[0].id;
                     // Setting .value directly never fires a native 'change'
@@ -2295,8 +2432,8 @@ ${errorMessages.length > 8 ? `\n... and ${errorMessages.length - 8} more` : ''}
         const toast = document.createElement('div');
         toast.id = 'customToast';
         toast.style.cssText = `
-            position: fixed; top: 20px; right: 20px; 
-            padding: 16px 24px; border-radius: 8px; 
+            position: fixed; top: 20px; right: 20px;
+            padding: 16px 24px; border-radius: 8px;
             color: white; font-weight: 500; z-index: 9999;
             box-shadow: 0 4px 12px rgba(0,0,0,0.15);
             animation: slideIn 0.3s ease;
@@ -2353,7 +2490,7 @@ ${errorMessages.length > 8 ? `\n... and ${errorMessages.length - 8} more` : ''}
         let csv = headers.join(',') + '\n';
         csv += sampleRow.join(',') + '\n';
 
-        const blob = new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8;' });
+        const blob = new Blob(['﻿' + csv], { type: 'text/csv;charset=utf-8;' });
         const link = document.createElement('a');
         link.href = URL.createObjectURL(blob);
         link.download = 'product_import_template.csv';
@@ -2380,7 +2517,7 @@ ${errorMessages.length > 8 ? `\n... and ${errorMessages.length - 8} more` : ''}
         style.id = 'customToastStyles';
         style.textContent = `
             @keyframes slideIn { from { transform: translateX(100%); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
-            @keyframes slideOut { from { transform: translateX(0); opacity: 1; } to { transform: translateX(100%); opacity: 0; } }
+            @keyframes slideOut { from { transform: translateX(0); opacity: 1; } to { transform: translateX(0); opacity: 0; } }
         `;
         document.head.appendChild(style);
     }

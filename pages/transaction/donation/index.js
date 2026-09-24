@@ -845,9 +845,21 @@
             let savedData;
             try {
                 if (editingDonationDbId) {
+                    // 🔥 FIX: same bug fixed in retail/index.js and
+                    // wholesale/index.js's equivalent save functions --
+                    // dbRecord (built above) always carries `created_at: new
+                    // Date().toISOString()`, correct for a brand-new
+                    // donation, but this same object was also being sent
+                    // as-is to `.update()` when editing an EXISTING
+                    // donation -- silently overwriting its original
+                    // created_at with "right now" on every edit. Strip it
+                    // from the update payload so the original date/time is
+                    // preserved; `updated_at` (still in dbRecord) correctly
+                    // continues to reflect when the edit itself happened.
+                    const { created_at, ...updateRecord } = dbRecord;
                     const { data, error } = await supabaseClient
                         .from('sales')
-                        .update(dbRecord)
+                        .update(updateRecord)
                         .eq('id', editingDonationDbId)
                         .select();
 

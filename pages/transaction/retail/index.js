@@ -1265,6 +1265,26 @@
         }
     }
 
+    // 🔥 FIX: the `customers` table has CHECK constraints on full_name /
+    // nhima_number / nrc / phone format (added elsewhere to keep that
+    // table clean -- customers_full_name_format, customers_nhima_number_
+    // format, customers_nrc_format, customers_phone_format). This sync
+    // writes straight from nhima_members, whose data comes from NHIMA's
+    // own exports and isn't guaranteed to match those formats (checked
+    // live: 61 existing customer rows and counting hit this). Any one bad
+    // field used to fail the WHOLE update/insert with a raw 400 -- and
+    // since this runs on every single Retail POS load (see the
+    // fire-and-forget call at module init below), that was 60+ failed
+    // requests every time, for every user, forever. Each field is now
+    // only written if it actually passes the same format the database
+    // enforces; a bad source value is left out (so the customer's
+    // existing good value survives) instead of blocking the sync of the
+    // other, valid fields.
+    const NHIMA_SYNC_NAME_RE = /^[A-Za-z][A-Za-z '.-]*$/;
+    const NHIMA_SYNC_NUMBER_RE = /^(?:\d{14}\/\d{2}|NHA\d{13}\/\d{2})$/;
+    const NHIMA_SYNC_NRC_RE = /^\d{6}\/\d{2}\/\d$/;
+    const NHIMA_SYNC_PHONE_RE = /^\+260\d{9}$/;
+
     async function syncNhimaMemberToCustomers() {
         try {
             const { data: nhimaMembers, error } = await supabaseClient
@@ -1276,23 +1296,44 @@
             let synced = 0;
             for (const member of nhimaMembers) {
                 let customerExists = false;
+                // Only trust member.phone for lookup/insert if it's
+                // actually in the format customers.phone requires --
+                // otherwise fall back to the same NHIMA- placeholder
+                // ensureCustomerExists() uses, so this stays consistent
+                // with how a customer created at sale time would look.
+                const rawPhone = member.phone && String(member.phone).trim();
+                const validPhone = rawPhone && NHIMA_SYNC_PHONE_RE.test(rawPhone) ? rawPhone : null;
+                const phone = validPhone || (member.nhima_number ? `NHIMA-${member.nhima_number}` : null);
 
-                if (member.phone) {
+                if (phone) {
                     const { data: existing } = await supabaseClient
                         .from('customers')
                         .select('id')
-                        .eq('phone', member.phone)
+                        .eq('phone', phone)
                         .maybeSingle();
 
                     if (existing) {
-                        await supabaseClient
-                            .from('customers')
-                            .update({
-                                nhima_number: member.nhima_number,
-                                nrc: member.nrc || '',
-                                full_name: member.full_name
-                            })
-                            .eq('id', existing.id);
+                        const updatePayload = {};
+                        if (member.full_name && NHIMA_SYNC_NAME_RE.test(member.full_name)) {
+                            updatePayload.full_name = member.full_name;
+                        }
+                        if (!member.nhima_number || member.nhima_number === '' || NHIMA_SYNC_NUMBER_RE.test(member.nhima_number)) {
+                            updatePayload.nhima_number = member.nhima_number || null;
+                        }
+                        const nrcValue = member.nrc || '';
+                        if (nrcValue === '' || NHIMA_SYNC_NRC_RE.test(nrcValue)) {
+                            updatePayload.nrc = nrcValue;
+                        }
+
+                        if (Object.keys(updatePayload).length > 0) {
+                            const { error: updateError } = await supabaseClient
+                                .from('customers')
+                                .update(updatePayload)
+                                .eq('id', existing.id);
+                            if (updateError) {
+                                console.warn(`⚠️ Could not sync customer ${existing.id} from NHIMA member ${member.nhima_number}:`, updateError);
+                            }
+                        }
                         customerExists = true;
                     }
                 }
@@ -1309,22 +1350,43 @@
                     }
                 }
 
-                if (!customerExists) {
-                    const phone = member.phone || `NHIMA-${member.nhima_number}`;
+                if (!customerExists && phone) {
+                    const insertName = member.full_name && NHIMA_SYNC_NAME_RE.test(member.full_name)
+                        ? member.full_name
+                        : toProperCaseIfAllCaps(member.full_name);
+
+                    if (!insertName || !NHIMA_SYNC_NAME_RE.test(insertName)) {
+                        // Source name still doesn't pass the format check
+                        // (digits/symbols in it) -- skip creating a row
+                        // here rather than fail the insert outright.
+                        // ensureCustomerExists() will handle this member
+                        // properly (with its own validation) the moment
+                        // they actually make a purchase.
+                        console.warn(`⚠️ Skipping NHIMA pre-sync for nhima_number ${member.nhima_number} -- name "${member.full_name}" doesn't pass the customers table's format check.`);
+                        continue;
+                    }
+
+                    const insertNhimaNumber = (!member.nhima_number || member.nhima_number === '' || NHIMA_SYNC_NUMBER_RE.test(member.nhima_number))
+                        ? (member.nhima_number || null)
+                        : null;
+                    const insertNrc = (member.nrc && NHIMA_SYNC_NRC_RE.test(member.nrc)) ? member.nrc : '';
+
                     const { error: insertError } = await supabaseClient
                         .from('customers')
                         .insert([{
-                            full_name: member.full_name || 'Unknown',
+                            full_name: insertName,
                             phone: phone,
                             address: member.address || '',
                             customer_type: 'NHIMA',
-                            nhima_number: member.nhima_number,
-                            nrc: member.nrc || '',
+                            nhima_number: insertNhimaNumber,
+                            nrc: insertNrc,
                             created_at: new Date().toISOString()
                         }]);
 
                     if (!insertError) {
                         synced++;
+                    } else {
+                        console.warn(`⚠️ Could not pre-sync NHIMA member ${member.nhima_number} to customers:`, insertError);
                     }
                 }
             }
@@ -4739,9 +4801,28 @@
             let savedData;
             try {
                 if (editingSaleDbId) {
+                    // 🔥 FIX: dbRecord (built above) always carries
+                    // `created_at: new Date().toISOString()` because that's
+                    // correct for a brand-new sale -- but this same object
+                    // was also being sent as-is to `.update()` when editing
+                    // an EXISTING invoice, which silently overwrote the
+                    // original invoice's created_at with "right now". That
+                    // moved the invoice's date on every screen and report
+                    // that reads created_at (the invoice list, receivables,
+                    // any date-based report) to the day it was last edited,
+                    // not the day the patient actually collected the
+                    // medicine -- e.g. editing a Bypass -> Claim change on
+                    // Sep 17 made a Sep 3 collection look like it happened
+                    // on Sep 17. Fix: strip created_at from the payload for
+                    // an edit, so the original collection date/time is left
+                    // exactly as it was. `updated_at` is intentionally still
+                    // refreshed below (via dbRecord) -- that one SHOULD
+                    // reflect when the edit happened, it's a separate field
+                    // from created_at.
+                    const { created_at, ...updateRecord } = dbRecord;
                     const { data, error } = await supabaseClient
                         .from('sales')
-                        .update(dbRecord)
+                        .update(updateRecord)
                         .eq('id', editingSaleDbId)
                         .select();
 

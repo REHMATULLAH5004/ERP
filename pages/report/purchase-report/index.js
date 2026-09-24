@@ -89,27 +89,63 @@
     // ============================================
     // FETCH
     // ============================================
+    //
+    // 🔥 PREVENTIVE FIX: PostgREST silently caps any .select() at 1000
+    // rows unless you page through it with .range() -- this is the exact
+    // same bug class that caused the Sales Report to badly under-report
+    // (see fetchSales() in pages/report/sales-report/index.js). Purchase
+    // Report currently has only ~67 GRNs total so it isn't triggering
+    // today, but goods_receipt_lines (multiple lines per GRN) and
+    // supplier_payables can each individually cross 1000 rows well
+    // before GRNs do, and GRN count itself will only keep growing. Every
+    // query below is paginated the same way, with an explicit
+    // .order('id') on each -- required because .range() is not
+    // guaranteed a stable/deterministic order without one.
+
+    const PAGE_SIZE = 1000;
+
+    // Runs `queryBuilder(from, to)` in a loop, paging with .range() until
+    // a page comes back shorter than PAGE_SIZE. `queryBuilder` must
+    // return a fresh Supabase query (with .order('id') already applied)
+    // for the given range each time it's called.
+    async function fetchAllPaginated(queryBuilder) {
+        let all = [];
+        let from = 0;
+        while (true) {
+            const { data, error } = await queryBuilder(from, from + PAGE_SIZE - 1);
+            if (error) throw error;
+            all = all.concat(data || []);
+            if (!data || data.length < PAGE_SIZE) break;
+            from += PAGE_SIZE;
+        }
+        return all;
+    }
 
     async function fetchGRNs(fromDate, toDate) {
-        const { data: grns, error } = await supabaseClient
-            .from('goods_receipt_notes')
-            .select('id, grn_number, entry_date, currency, invoice_total, supplier_id, suppliers ( name )')
-            .gte('entry_date', fromDate)
-            .lte('entry_date', toDate);
+        const grns = await fetchAllPaginated((from, to) =>
+            supabaseClient
+                .from('goods_receipt_notes')
+                .select('id, grn_number, entry_date, currency, invoice_total, supplier_id, suppliers ( name )')
+                .gte('entry_date', fromDate)
+                .lte('entry_date', toDate)
+                .order('id')
+                .range(from, to)
+        );
 
-        if (error) throw error;
-        if (!grns || grns.length === 0) return [];
+        if (grns.length === 0) return [];
 
         const grnIds = grns.map(g => g.id);
-        const { data: payables, error: payableError } = await supabaseClient
-            .from('supplier_payables')
-            .select('grn_id, currency, total_amount')
-            .in('grn_id', grnIds);
-
-        if (payableError) throw payableError;
+        const payables = await fetchAllPaginated((from, to) =>
+            supabaseClient
+                .from('supplier_payables')
+                .select('grn_id, currency, total_amount')
+                .in('grn_id', grnIds)
+                .order('grn_id')
+                .range(from, to)
+        );
 
         const payableByGrnId = {};
-        (payables || []).forEach(p => { payableByGrnId[p.grn_id] = p; });
+        payables.forEach(p => { payableByGrnId[p.grn_id] = p; });
 
         return grns.map(grn => {
             const payable = payableByGrnId[grn.id];
@@ -131,13 +167,14 @@
 
     async function fetchLines(grnIds) {
         if (grnIds.length === 0) return [];
-        const { data, error } = await supabaseClient
-            .from('goods_receipt_lines')
-            .select('grn_id, product_id, product_name, received_quantity, purchase_rate, batch_number, total_amount')
-            .in('grn_id', grnIds);
-
-        if (error) throw error;
-        return data || [];
+        return await fetchAllPaginated((from, to) =>
+            supabaseClient
+                .from('goods_receipt_lines')
+                .select('grn_id, product_id, product_name, received_quantity, purchase_rate, batch_number, total_amount')
+                .in('grn_id', grnIds)
+                .order('grn_id')
+                .range(from, to)
+        );
     }
 
     // ============================================

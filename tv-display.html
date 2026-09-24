@@ -390,8 +390,16 @@
         // directly for real announcements (speak() below decides which to
         // use). Returns true/false so callers can tell whether it actually
         // managed to start talking.
+        // 🔥 CHANGED: now returns { started, done } instead of a plain
+        // true/false. `started` keeps the old synchronous meaning ("did
+        // speech begin") for the one caller that still needs that
+        // (the sound-gate's on-screen warning, further down). `done` is
+        // new -- a Promise that resolves once the utterance actually
+        // finishes (or errors) -- so speak() and the announcement queue
+        // below can tell "still talking" apart from "finished", instead
+        // of firing the next announcement blind.
         function speakBrowser(text) {
-            if (!('speechSynthesis' in window)) return false;
+            if (!('speechSynthesis' in window)) return { started: false, done: Promise.resolve() };
             try {
                 // 🔥 FIX: if a PREVIOUS utterance got stuck (the same
                 // idle-timeout bug above can also leave one utterance
@@ -412,11 +420,15 @@
                 const voice = pickVoice();
                 if (voice) utterance.voice = voice;
                 utterance.rate = 0.95;
+                const done = new Promise(resolve => {
+                    utterance.onend = () => resolve();
+                    utterance.onerror = () => resolve();
+                });
                 speechSynthesis.speak(utterance);
-                return true;
+                return { started: true, done };
             } catch (e) {
                 console.warn('Browser voice announcement failed (non-fatal):', e);
-                return false;
+                return { started: false, done: Promise.resolve() };
             }
         }
 
@@ -425,12 +437,74 @@
         // voice automatically and silently (the gate handler below has
         // its own copy of this logic that reports failures on-screen,
         // since that's the one moment staff are actually watching).
+        // 🔥 CHANGED: now returns a Promise that resolves once the
+        // announcement has actually finished playing (cloud or browser,
+        // whichever path was used) -- see the announcement queue below
+        // for why that matters. Never rejects: any failure is already
+        // handled/logged internally, same as before.
         function speak(text) {
-            if (!voiceEnabled) return;
-            speakCloud(text).catch(err => {
+            if (!voiceEnabled) return Promise.resolve();
+            return speakCloud(text).catch(err => {
                 console.warn('Cloud voice (Polly) failed, falling back to browser voice:', err);
-                speakBrowser(text);
+                return speakBrowser(text).done;
             });
+        }
+
+        // ============================================
+        // 🔥 FIX: GLOBAL ANNOUNCEMENT QUEUE -- root cause of "two sounds
+        // together" / "it jumps to the next name before finishing the
+        // first one"
+        // ============================================
+        // Every cloud-voice announcement plays through the SAME shared
+        // <audio> element (ttsAudioEl). Before this fix, each counter's
+        // announcement was fired off independently (billing and
+        // dispensing render separately in loadAll(), and each only
+        // staggered *its own* changed counters by 2.5s -- it had no idea
+        // what the other stage, or a different loadAll() tick moments
+        // later, was about to do). So two announcements starting close
+        // together -- Counter 1 and Counter 2 called within a few
+        // seconds of each other, or a billing call and a dispensing call
+        // landing in the same update -- both ended up setting `.src` on
+        // that ONE shared <audio> element. The second one setting `.src`
+        // aborts whatever was still playing, and silently overwrites the
+        // first announcement's onended/onerror handlers (they get
+        // replaced, never called) -- so the first name just vanishes
+        // mid-sentence with no error, while the two audio streams
+        // briefly overlap on the way in. That is exactly what was being
+        // reported: "two sounds together" and "it left the first one and
+        // jumped to the second".
+        //
+        // Fix: every announcement, from either stage, now goes through
+        // ONE shared queue and only starts once the previous one has
+        // genuinely finished (or has clearly hung and hit the safety
+        // timeout below) -- so at most one voice is ever talking at a
+        // time, always in the order the counters were actually called.
+        // A stuck item can't jam the display forever: ANNOUNCE_TIMEOUT_MS
+        // force-advances the queue if a single announcement never
+        // resolves (e.g. a flaky network mid-playback).
+        let announceQueue = Promise.resolve();
+        const ANNOUNCE_TIMEOUT_MS = 9000;
+
+        function withTimeout(promise, ms) {
+            return new Promise(resolve => {
+                const timer = setTimeout(resolve, ms);
+                promise.then(
+                    () => { clearTimeout(timer); resolve(); },
+                    () => { clearTimeout(timer); resolve(); }
+                );
+            });
+        }
+
+        function enqueueAnnouncement(text) {
+            announceQueue = announceQueue.then(() => withTimeout((async () => {
+                try {
+                    chime();
+                    await new Promise(r => setTimeout(r, 500)); // let the chime finish before speaking
+                    await speak(text);
+                } catch (e) {
+                    console.warn('Announcement failed (non-fatal):', e);
+                }
+            })(), ANNOUNCE_TIMEOUT_MS)).catch(e => console.warn('Announcement queue error (non-fatal, recovering):', e));
         }
 
         function updateVoiceToggleIcon() {
@@ -448,7 +522,11 @@
             localStorage.setItem('tvVoiceEnabled', voiceEnabled ? 'true' : 'false');
             updateVoiceToggleIcon();
             if (voiceEnabled) {
-                speak('Voice announcements on.');
+                // 🔥 CHANGED: routed through the queue (not a direct
+                // speak() call) so a manual toggle-on can't collide with
+                // an announcement that's already mid-playback -- same
+                // reasoning as the queue itself.
+                enqueueAnnouncement('Voice announcements on.');
             } else {
                 if ('speechSynthesis' in window) speechSynthesis.cancel();
                 ttsAudioEl.pause();
@@ -522,8 +600,8 @@
             if (voiceEnabled) {
                 speakCloud('Queue display ready.').catch(err => {
                     console.warn('Cloud voice failed on startup, falling back to browser voice:', err);
-                    const ok = speakBrowser('Queue display ready.');
-                    if (!ok) showVoiceWarning('⚠ Voice could not start on this device/browser.');
+                    const { started } = speakBrowser('Queue display ready.');
+                    if (!started) showVoiceWarning('⚠ Voice could not start on this device/browser.');
                 });
             }
         });
@@ -610,16 +688,20 @@
                 </tr>`;
             }).join('');
 
-            // Chime once, then read out each changed counter a beat
-            // apart so simultaneous calls don't talk over each other.
-            if (changedCounters.length) {
-                chime();
-                changedCounters.forEach((c, i) => {
-                    setTimeout(() => {
-                        speak(`Token number ${c.ticket.token_number}. ${c.ticket.patient_name}. Please proceed to ${c.counterName}.`);
-                    }, 700 + i * 2500);
-                });
-            }
+            // 🔥 CHANGED: each changed counter is now handed to the
+            // global announcement queue (declared above, near speak())
+            // instead of being scheduled with its own local setTimeout.
+            // The old per-call `chime(); ...forEach(i => setTimeout(...,
+            // 700 + i*2500))` only staggered counters changed within
+            // THIS SAME renderStage() call -- it had no way to know
+            // about the other stage (billing vs dispensing) changing at
+            // the same moment, or a previous announcement from an
+            // earlier tick still playing. The queue fixes both: every
+            // announcement, from either stage, now plays strictly one
+            // after another.
+            changedCounters.forEach(c => {
+                enqueueAnnouncement(`Token number ${c.ticket.token_number}. ${c.ticket.patient_name}. Please proceed to ${c.counterName}.`);
+            });
 
             countEl.textContent = waitingRows.length;
 
