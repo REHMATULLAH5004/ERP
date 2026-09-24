@@ -1,6059 +1,6094 @@
-// ============================================
-// PURCHASE MODULE - MAIN CONTROLLER (UPDATED)
-// ============================================
-
-(async function initPurchasePage() {
-    console.log("🛒 Purchase module initializing...");
-
-    if (typeof supabaseClient === 'undefined') {
-        console.error("❌ supabaseClient is not defined.");
-        return;
-    }
-
-    // 🔥 CHANGED: the shared window-level getCompanySettings() helper
-    // (assets/js/shared-company-settings.js) no longer exists on the site,
-    // so calling it here threw "getCompanySettings is not defined" and
-    // aborted this entire module's init. Self-contained now: reads the
-    // same single `company_settings` row directly, with a hardcoded
-    // fallback if that fails for any reason.
-    const companySettings = await (async function loadCompanySettingsInline() {
-        const fallback = {
-            company_name: 'GRIFFINS MEDICALS LIMITED',
-            address: 'Plot 3534, Freedomway, Lusaka',
-            phone: '+260 97 000 0000',
-            zamra_number: 'ZAMRA-123456',
-            purchase_order_prefix: 'PO'
-        };
-        try {
-            const { data, error } = await supabaseClient
-                .from('company_settings')
-                .select('company_name, address, phone, zamra_number, purchase_order_prefix')
-                .eq('id', 1)
-                .maybeSingle();
-            if (error || !data) return fallback;
-            return {
-                company_name: data.company_name || fallback.company_name,
-                address: data.address || fallback.address,
-                phone: data.phone || fallback.phone,
-                zamra_number: data.zamra_number || fallback.zamra_number,
-                purchase_order_prefix: data.purchase_order_prefix || fallback.purchase_order_prefix
-            };
-        } catch (e) {
-            console.warn('Could not load company_settings, using defaults:', e);
-            return fallback;
-        }
-    })();
-
-    // ============================================
-    // GLOBAL STATE
-    // ============================================
-    // 🔥 ADDED: today's shared exchange rate (assets/js/shared-exchange-rate.js),
-    // fetched once at init below and reused as the default everywhere this
-    // file needs a rate -- instead of a hardcoded 1.00/25.00 that had to be
-    // corrected by hand on every new PO / new supplier. Deliberately a
-    // plain variable read synchronously by resetPOForm() etc., NOT fetched
-    // on-demand at the moment those forms open -- some callers (e.g.
-    // addSelectedToPO()) populate form fields immediately after opening
-    // the PO modal without awaiting it, and an on-demand fetch there would
-    // race with -- and could clobber -- those fields.
-    let sharedZmwPerUsd = DEFAULT_EXCHANGE_RATE;
-
-    const state = {
-        orders: [],
-        suppliers: [],
-        poLines: [],
-        grnLines: [],
-        currentGRNOrderId: null,
-        currentGRNOrderData: null,
-        currentGRNCurrency: 'USD',
-        currentGRNExchangeRate: 1,
-        // 🔥 ADDED: which order is currently open in the "View PO Details"
-        // modal, and whether goods have actually been received against it
-        // (i.e. it has become a GRN) -- drives whether the modal's Print
-        // button prints the Purchase Order or the Goods Receipt Note.
-        currentViewOrderId: null,
-        currentViewHasGRN: false,
-        // 🔥 ADDED: Credit Note feature.
-        currentViewGRNData: null,
-        creditNoteLines: [],
-        creditNoteSupplierPayable: null,
-        lastSavedCreditNoteId: null,
-        isEditing: false,
-        reorderItems: [],
-        // 🔥 ADDED: products sharing a generic_name_id with something
-        // that IS due for reorder, but aren't themselves below min level
-        // yet -- surfaced as optional "you might consider this too"
-        // suggestions in the Reorder Report (see generateReorderReport()).
-        reorderSuggestedItems: [],
-        selectedReorderItems: [],
-        pendingCancelIndex: null,
-        // 🔥 ADDED (issue #2): existing batches per product, keyed by
-        // product_id -- loaded once per GRN so the batch number field can
-        // offer them as a dropdown.
-        existingBatchesByProduct: {}
-    };
-
-    // ============================================
-    // 🔥 CHART OF ACCOUNTS - AUTO CREATE MISSING ACCOUNTS
-    // ============================================
-    // This module had NO accounting/GL integration at all before this --
-    // GRNs were posted and payables created, but nothing ever touched
-    // journal_entries/journal_lines/chart_of_accounts. Account
-    // codes/names here match retail.js/wholesale.js/donation.js/writeoff.js
-    // exactly, so this never creates duplicates of shared accounts (Cash,
-    // Bank, Inventory, Opening Balance Equity) across the whole system --
-    // it just adds the one new account this module needs: Accounts Payable.
-    const REQUIRED_ACCOUNTS = [
-        { code: '1111', name: 'Cash in Hand (ZMW)', type: 'Asset', category: 'Current Asset', normal_balance: 'Debit' },
-        { code: '1121', name: 'Bank - ZMW', type: 'Asset', category: 'Current Asset', normal_balance: 'Debit' },
-        { code: '1400', name: 'Inventory', type: 'Asset', category: 'Current Asset', normal_balance: 'Debit' },
-        { code: '2001', name: 'Accounts Payable', type: 'Liability', category: 'Current Liability', normal_balance: 'Credit' },
-        { code: '3000', name: 'Opening Balance Equity', type: 'Equity', category: 'Equity', normal_balance: 'Credit' },
-        // 🔥 ADDED: Credit Note feature -- the ZMW balance a supplier owes
-        // back to us when goods are returned against a Cash-paid GRN (no
-        // supplier_payables row exists to reduce, so the credit is tracked
-        // here instead, and drawn down against future purchases).
-        { code: '1205', name: 'Advances to Suppliers', type: 'Asset', category: 'Current Asset', normal_balance: 'Debit' }
-    ];
-
-    async function ensureChartOfAccounts() {
-        try {
-            let created = 0, existing = 0;
-            for (const account of REQUIRED_ACCOUNTS) {
-                const { data: existingAccount, error: findError } = await supabaseClient
-                    .from('chart_of_accounts')
-                    .select('code, name')
-                    .eq('code', account.code)
-                    .maybeSingle();
-
-                if (findError && findError.code !== 'PGRST116') {
-                    console.error(`Error checking account ${account.code}:`, findError);
-                    continue;
-                }
-                if (existingAccount) { existing++; continue; }
-
-                const { error: insertError } = await supabaseClient
-                    .from('chart_of_accounts')
-                    .insert([{
-                        code: account.code,
-                        name: account.name,
-                        type: account.type,
-                        category: account.category,
-                        normal_balance: account.normal_balance,
-                        created_at: new Date().toISOString(),
-                        updated_at: new Date().toISOString()
-                    }]);
-
-                if (insertError) {
-                    console.error(`Error creating account ${account.code}:`, insertError);
-                } else {
-                    created++;
-                    console.log(`✅ Created account: ${account.code} - ${account.name}`);
-                }
-            }
-            console.log(`✅ Chart of Accounts sync complete: ${created} created, ${existing} existing`);
-            return { created, existing };
-        } catch (error) {
-            console.error('Error ensuring chart of accounts:', error);
-            return { created: 0, existing: 0, error };
-        }
-    }
-
-    async function getAccountCodesFromChartOfAccounts() {
-        try {
-            await ensureChartOfAccounts();
-            const accountNames = REQUIRED_ACCOUNTS.map(a => a.name);
-            const { data: accounts, error } = await supabaseClient
-                .from('chart_of_accounts')
-                .select('code, name')
-                .in('name', accountNames);
-
-            if (error) throw error;
-
-            const accountMap = {};
-            accounts.forEach(acc => {
-                const key = acc.name.toLowerCase().replace(/[^a-z0-9]/g, '_');
-                accountMap[key] = acc.code;
-            });
-
-            return {
-                cash_zmw: accountMap['cash_in_hand_zmw'] || '1111',
-                bank_zmw: accountMap['bank_zmw'] || '1121',
-                inventory: accountMap['inventory'] || '1400',
-                accounts_payable: accountMap['accounts_payable'] || '2001',
-                opening_balance_equity: accountMap['opening_balance_equity'] || '3000',
-                advances_to_suppliers: accountMap['advances_to_suppliers'] || '1205'
-            };
-        } catch (error) {
-            console.error('Error fetching account codes:', error);
-            return {
-                cash_zmw: '1111',
-                bank_zmw: '1121',
-                inventory: '1400',
-                accounts_payable: '2001',
-                opening_balance_equity: '3000',
-                advances_to_suppliers: '1205'
-            };
-        }
-    }
-
-    async function createGRNAccountingEntries(grnNumber, grnTotal, currency, exchangeRate, paymentType) {
-        try {
-            await ensureChartOfAccounts();
-            const accountCodes = await getAccountCodesFromChartOfAccounts();
-
-            // Ledger is ZMW-based -- convert if the PO/GRN was raised in USD.
-            const zmwAmount = currency === 'USD' ? grnTotal * (exchangeRate || 1) : grnTotal;
-
-            const creditAccount = paymentType === 'Credit' ? accountCodes.accounts_payable : accountCodes.cash_zmw;
-            const creditDescription = paymentType === 'Credit'
-                ? `Credit purchase via ${grnNumber}`
-                : `Cash purchase via ${grnNumber}`;
-
-            const journal = {
-                entry_date: new Date().toISOString().split('T')[0],
-                reference: grnNumber,
-                description: `Goods received - ${grnNumber}` + (currency === 'USD' ? ` (USD ${formatNumber(grnTotal)} @ ${exchangeRate})` : ''),
-                journal_number: `GRN-${new Date().getFullYear()}-${String(Math.floor(Math.random() * 10000)).padStart(4, '0')}`,
-                status: 'Posted',
-                created_at: new Date().toISOString()
-            };
-
-            // 🔥 CHANGED: both writes now go through withAuthRetry(). This
-            // function does ~10 background round trips first (ensureChartOfAccounts
-            // + getAccountCodesFromChartOfAccounts), so by the time it gets here
-            // a near-expiry session token can look stale and get a 403 -- that's
-            // exactly what silently dropped GRN-2026-00017's journal entry while
-            // everything else about that GRN (line items, stock, payable) saved
-            // fine. withAuthRetry refreshes the session and retries once instead
-            // of just failing.
-            const { data: journalData, error: jError } = await withAuthRetry(() => supabaseClient
-                .from('journal_entries')
-                .insert([journal])
-                .select());
-            if (jError) throw jError;
-
-            const { error: jlError } = await withAuthRetry(() => supabaseClient.from('journal_lines').insert([
-                { journal_entry_id: journalData[0].id, account_code: accountCodes.inventory, description: `Inventory received - ${grnNumber}`, debit: zmwAmount, credit: 0 },
-                { journal_entry_id: journalData[0].id, account_code: creditAccount, description: creditDescription, debit: 0, credit: zmwAmount }
-            ]));
-            if (jlError) throw jlError;
-
-            console.log(`✅ GRN accounting entries created for ${grnNumber} (${paymentType}, ZK${zmwAmount.toFixed(2)})`);
-        } catch (error) {
-            console.error('Error creating GRN accounting entries:', error);
-            showToast('GRN posted, but the accounting entry failed -- please check manually.', 'warning');
-        }
-    }
-
-    async function createOpeningPayableGLEntry(supplierId, supplierName, zmwAmount, note) {
-        try {
-            const accountCodes = await getAccountCodesFromChartOfAccounts();
-            const journal = {
-                entry_date: new Date().toISOString().split('T')[0],
-                reference: `OPEN-PAYABLE-${String(supplierId).slice(0, 8)}`,
-                description: `Opening payable for supplier: ${supplierName} (${note})`,
-                journal_number: `OPN-${new Date().getFullYear()}-${String(Math.floor(Math.random() * 10000)).padStart(4, '0')}`,
-                status: 'Posted',
-                created_at: new Date().toISOString()
-            };
-            const { data: journalData, error: jError } = await supabaseClient.from('journal_entries').insert([journal]).select();
-            if (jError) throw jError;
-
-            await supabaseClient.from('journal_lines').insert([
-                { journal_entry_id: journalData[0].id, account_code: accountCodes.opening_balance_equity, description: `Opening equity for payable - ${supplierName}`, debit: zmwAmount, credit: 0 },
-                { journal_entry_id: journalData[0].id, account_code: accountCodes.accounts_payable, description: `Opening payable - ${supplierName}`, debit: 0, credit: zmwAmount }
-            ]);
-            console.log(`✅ Opening payable GL entry created for ${supplierName}: ZK${zmwAmount}`);
-        } catch (error) {
-            console.error('Error creating opening payable GL entry:', error);
-        }
-    }
-
-    // ============================================
-    // LOAD DATA
-    // ============================================
-    
-    async function loadSuppliers() {
-        try {
-            // 🔥 CHANGED: added `phone` -- needed for the WhatsApp PO
-            // notification in createNewPO() below.
-            const { data, error } = await supabaseClient
-                .from('suppliers')
-                .select('id, name, phone')
-                .order('name', { ascending: true });
-
-            if (error) throw error;
-            state.suppliers = data || [];
-            console.log(`✅ Loaded ${state.suppliers.length} suppliers`);
-            populateSupplierSelects();
-        } catch (error) {
-            console.error('Error loading suppliers:', error);
-            state.suppliers = [];
-            populateSupplierSelects();
-        }
-    }
-
-    async function loadPurchaseOrders() {
-        try {
-            const { data, error } = await supabaseClient
-                .from('purchase_orders')
-                .select(`
-                    *,
-                    suppliers:supplier_id (name)
-                `)
-                .order('created_at', { ascending: false });
-
-            if (error) throw error;
-            state.orders = data || [];
-            console.log(`✅ Loaded ${state.orders.length} purchase orders`);
-            renderPurchaseOrders();
-            updateStats(state.orders);
-            checkOverduePOs(state.orders);
-        } catch (error) {
-            console.error('Error loading purchase orders:', error);
-            state.orders = [];
-            renderPurchaseOrders();
-            updateStats([]);
-        }
-    }
-
-    // ============================================
-    // SEARCH PRODUCTS
-    // ============================================
-
-    // 🔥 FIX (issue #1): previously this required typing at least 2
-    // characters before showing ANY results at all -- there was no way
-    // to just open a dropdown and browse. Now: empty search shows the
-    // first 20 products (alphabetical) so it behaves like a normal
-    // dropdown you can click straight into; typing still filters as
-    // before.
-    async function searchProducts() {
-        const searchInput = document.getElementById('poProductSearch');
-        const searchTerm = searchInput ? searchInput.value.trim() : '';
-        const resultsDiv = document.getElementById('poSearchResults');
-
-        if (!resultsDiv) return;
-
-        try {
-            let query = supabaseClient
-                .from('products')
-                .select('id, product_name, conversion_rate, generic_name_id')
-                .order('product_name', { ascending: true })
-                .limit(searchTerm ? 30 : 20);
-
-            if (searchTerm) {
-                // 🔥 CHANGED: match on generic name too, not just product
-                // name -- staff often know a drug by its generic name
-                // rather than the brand name it's stocked under. Finds any
-                // generic_names rows matching the term first, then ORs
-                // their ids into the same products query alongside the
-                // existing product_name match.
-                const escapedTerm = searchTerm.replace(/[%_]/g, '\\$&').replace(/[,()]/g, ' ');
-                const { data: matchingGenerics } = await supabaseClient
-                    .from('generic_names')
-                    .select('id')
-                    .ilike('name', `%${escapedTerm}%`);
-                const genericIds = (matchingGenerics || []).map(g => g.id);
-
-                const orClauses = [`product_name.ilike.%${escapedTerm}%`];
-                if (genericIds.length > 0) {
-                    orClauses.push(`generic_name_id.in.(${genericIds.join(',')})`);
-                }
-                query = query.or(orClauses.join(','));
-            }
-
-            const { data: products, error } = await query;
-
-            if (error) throw error;
-
-            let allProducts = [];
-            
-            if (products && products.length > 0) {
-                const genericIds = products.map(p => p.generic_name_id).filter(id => id);
-                let genericMap = {};
-                
-                if (genericIds.length > 0) {
-                    const { data: generics, error: genError } = await supabaseClient
-                        .from('generic_names')
-                        .select('id, name')
-                        .in('id', genericIds);
-                        
-                    if (!genError && generics) {
-                        generics.forEach(g => {
-                            genericMap[g.id] = g.name;
-                        });
-                    }
-                }
-                
-                allProducts = products.map(p => ({
-                    id: p.id,
-                    product_name: p.product_name,
-                    generic_name: genericMap[p.generic_name_id] || '',
-                    conversion_rate: p.conversion_rate || 1
-                }));
-
-                // 🔥 ADDED: last purchase cost, shown in the dropdown so
-                // you can eyeball pricing before deciding what to add.
-                const lastPurchaseMap = await fetchLastPurchaseCosts(allProducts.map(p => p.id));
-                allProducts = allProducts.map(p => ({ ...p, last_purchase: lastPurchaseMap[p.id] || null }));
-            }
-
-            displaySearchResults(allProducts);
-        } catch (error) {
-            console.error('Error searching products:', error);
-            displaySearchResults([]);
-        }
-    }
-
-    // 🔥 ADDED: keyboard state for the product search dropdown -- ArrowUp/
-    // ArrowDown move productSearchHighlightIndex, Enter/Tab add whichever
-    // result it's currently pointing at. Mirrors the same highlight
-    // pattern initSearchableSelect() already uses for Supplier search.
-    let productSearchResults = [];
-    let productSearchHighlightIndex = -1;
-
-    function displaySearchResults(products) {
-        productSearchResults = products || [];
-        productSearchHighlightIndex = productSearchResults.length ? 0 : -1;
-        renderSearchResultsList();
-        const resultsDiv = document.getElementById('poSearchResults');
-        if (resultsDiv) resultsDiv.style.display = 'block';
-    }
-
-    // Separate render step so arrow-key navigation can just redraw the
-    // highlight without re-querying the database on every keypress.
-    function renderSearchResultsList() {
-        const resultsDiv = document.getElementById('poSearchResults');
-        if (!resultsDiv) return;
-
-        if (!productSearchResults || productSearchResults.length === 0) {
-            resultsDiv.innerHTML = `<div class="result-item" style="color: #94a3b8; justify-content: center;">No products found</div>`;
-            return;
-        }
-
-        resultsDiv.innerHTML = productSearchResults.map((p, i) => `
-            <div class="result-item" data-index="${i}" onclick="addProductToPO('${p.id}')" style="${i === productSearchHighlightIndex ? 'background:#eff6ff;' : ''}">
-                <div>
-                    <strong>${p.product_name}</strong>
-                    <div style="font-size: 0.75rem; color: #94a3b8;">${p.generic_name || 'No generic'}</div>
-                    ${p.last_purchase ? `<div style="font-size: 0.7rem; color: #059669;">Last paid: ${p.last_purchase.currency === 'ZMW' ? 'ZK' : '$'}${Number(p.last_purchase.rate).toFixed(2)} &middot; ${formatDate(p.last_purchase.date)}</div>` : ''}
-                </div>
-                <span style="color: #94a3b8; font-size: 0.8rem; background: #f1f5f9; padding: 2px 8px; border-radius: 4px;">Pack: ${p.conversion_rate || 1}</span>
-            </div>
-        `).join('');
-    }
-
-    function scrollProductHighlightIntoView() {
-        const resultsDiv = document.getElementById('poSearchResults');
-        const el = resultsDiv?.querySelector(`.result-item[data-index="${productSearchHighlightIndex}"]`);
-        if (el) el.scrollIntoView({ block: 'nearest' });
-    }
-
-    // ============================================
-    // ADD PRODUCT TO PO
-    // ============================================
-
-    async function addProductToPO(productId) {
-        try {
-            const { data: product, error } = await supabaseClient
-                .from('products')
-                .select('id, product_name, conversion_rate, generic_name_id')
-                .eq('id', productId)
-                .single();
-
-            if (error) throw error;
-
-            let genericName = '';
-            if (product.generic_name_id) {
-                const { data: generic, error: genError } = await supabaseClient
-                    .from('generic_names')
-                    .select('name')
-                    .eq('id', product.generic_name_id)
-                    .single();
-                    
-                if (!genError && generic) {
-                    genericName = generic.name;
-                }
-            }
-
-            // 🔥 ADDED: last purchase cost for this specific product, so
-            // it's available to show right next to the Purchase Rate
-            // input once the line is on the PO, not just in the search
-            // dropdown.
-            const lastPurchaseMap = await fetchLastPurchaseCosts([productId]);
-            const lastPurchase = lastPurchaseMap[productId] || null;
-
-            const existing = state.poLines.find(l => l.product_id === productId);
-            if (existing) {
-                existing.order_quantity = (existing.order_quantity || 0) + 1;
-                existing.total_amount = (existing.order_quantity || 0) * (existing.purchase_rate || 0);
-                if (!existing.last_purchase && lastPurchase) existing.last_purchase = lastPurchase;
-                renderPOLines();
-                updatePOTotal();
-                clearSearchResults();
-                return;
-            }
-
-            state.poLines.push({
-                product_id: product.id,
-                product_name: product.product_name,
-                generic_name: genericName,
-                pack_size: product.conversion_rate || 1,
-                order_quantity: 1,
-                purchase_rate: 0,
-                total_amount: 0,
-                last_purchase: lastPurchase
-            });
-
-            renderPOLines();
-            updatePOTotal();
-            clearSearchResults();
-        } catch (error) {
-            console.error('Error adding product:', error);
-            showToast('Error adding product: ' + error.message, 'error');
-        }
-    }
-
-    function clearSearchResults() {
-        const results = document.getElementById('poSearchResults');
-        const search = document.getElementById('poProductSearch');
-        if (results) results.style.display = 'none';
-        if (search) search.value = '';
-        productSearchResults = [];
-        productSearchHighlightIndex = -1;
-    }
-
-    // ============================================
-    // REORDER REPORT
-    // ============================================
-
-    async function openReorderReport() {
-        console.log('📋 Opening reorder report...');
-        const modal = document.getElementById('reorderModal');
-        if (modal) modal.classList.add('show');
-        
-        await populateReorderFilters();
-        await generateReorderReport();
-    }
-
-    async function populateReorderFilters() {
-        const suppliers = state.suppliers || [];
-        
-        const supplierSelect = document.getElementById('reorderSupplier');
-        if (supplierSelect) {
-            const currentVal = supplierSelect.value;
-            supplierSelect.innerHTML = `<option value="">All Suppliers</option>` + 
-                suppliers.map(s => `<option value="${s.id}">${s.name}</option>`).join('');
-            if (currentVal) supplierSelect.value = currentVal;
-        }
-
-        try {
-            const { data: categories, error } = await supabaseClient
-                .from('categories')
-                .select('id, name')
-                .order('name');
-                
-            if (!error && categories) {
-                const catSelect = document.getElementById('reorderCategory');
-                if (catSelect) {
-                    catSelect.innerHTML = `<option value="">All Categories</option>` +
-                        categories.map(c => `<option value="${c.id}">${c.name}</option>`).join('');
-                    // 🔥 ADDED: .innerHTML above doesn't fire 'change', so the
-                    // injected searchable dropdown's visible text needs an
-                    // explicit nudge to stay in sync (same fix as
-                    // populateSupplierSelects()).
-                    if (typeof catSelect.__syncSearchLabel === 'function') catSelect.__syncSearchLabel();
-                }
-            }
-        } catch (e) {
-            console.log('Could not load categories');
-        }
-    }
-
-    async function generateReorderReport() {
-        try {
-            const supplierId = document.getElementById('reorderSupplier')?.value || '';
-            const categoryId = document.getElementById('reorderCategory')?.value || '';
-            
-            let query = supabaseClient
-                .from('products')
-                .select('id, product_name, conversion_rate, generic_name_id, supplier_id, category_id');
-
-            if (supplierId) {
-                query = query.eq('supplier_id', supplierId);
-            }
-            if (categoryId) {
-                query = query.eq('category_id', categoryId);
-            }
-
-            const { data: products, error } = await query;
-            if (error) throw error;
-
-            const genericMap = await fetchGenericNames(products);
-            const supplierMap = await fetchSupplierNames(products);
-            const categoryMap = await fetchCategoryNames(products);
-            const stockMap = await fetchStockLevels(products);
-
-            // 🔥 ADDED: last purchase cost + 3-month sales for every
-            // product in the current filter (not just the ones already
-            // known to be due) -- needed up front now because the "due"
-            // decision itself depends on combined generic-level sales,
-            // computed below.
-            const allIds = products.map(p => p.id);
-            const lastPurchaseMap = await fetchLastPurchaseCosts(allIds);
-
-            // 🔥 CHANGED (Minimum Order Qty removed entirely): reorder_qty
-            // tops current stock back up to the generic's own trailing
-            // 3-month demand, so one order lasts a full reorder cycle
-            // instead of landing right back below the trigger.
-            const salesMap = await fetchLast3MonthSales(allIds);
-
-            // 🔥 CHANGED: reorder decisions happen at the GENERIC NAME
-            // level, not per individual brand/product. Two brands of the
-            // same generic (e.g. Panadol and a generic Paracetamol) are
-            // the same medicine to a patient -- 40 units of Panadol plus
-            // 30 of the generic is 70 units of "Paracetamol" on the
-            // shelf, not two separate low-stock situations that happen to
-            // both be half-empty. Stock and 3-month sales are SUMMED
-            // across every brand sharing a generic_name_id. Only products
-            // with no generic name set (surgicals/instruments, per the
-            // earlier "some categories can't have a generic name"
-            // conversation) are judged on their own.
-            const genericGroups = {}; // generic_name_id -> { stock, sales, hasSales, brandCount }
-            products.forEach(p => {
-                if (!p.generic_name_id) return;
-                const g = genericGroups[p.generic_name_id] || {
-                    stock: 0,
-                    sales: 0,
-                    hasSales: false,
-                    brandCount: 0
-                };
-                g.stock += stockMap[p.id] || 0;
-                if (salesMap[p.id] !== undefined) { g.sales += salesMap[p.id]; g.hasSales = true; }
-                g.brandCount += 1;
-                genericGroups[p.generic_name_id] = g;
-            });
-
-            // 🔥 CHANGED (Minimum Order Qty removed entirely, per explicit
-            // request): the reorder trigger is now PURELY "stock below what
-            // this generic actually sold in the last 3 months". There's no
-            // stored minimum left to fall back on -- and deliberately no
-            // fallback of any kind -- for a generic/product with zero sales
-            // in that window: if it hasn't moved in 3 months, there's no
-            // case for reordering it regardless of how little is on the
-            // shelf, so it's simply left off this report until it has some
-            // sales history to judge it by.
-            const reorderItems = products.filter(p => {
-                const group = p.generic_name_id ? genericGroups[p.generic_name_id] : null;
-                if (group) return group.hasSales && group.stock < group.sales;
-                const ownSales = salesMap[p.id];
-                if (ownSales === undefined) return false;
-                const stock = stockMap[p.id] || 0;
-                return stock < ownSales;
-            });
-
-            const mapReorderItem = (p) => {
-                const ownStock = stockMap[p.id] || 0;
-                const ownSales = salesMap[p.id];
-                const group = p.generic_name_id ? genericGroups[p.generic_name_id] : null;
-                // groupStock/groupSales are the combined-across-brands
-                // figures actually used for the reorder math; ownStock
-                // stays available for display ("brand just for viewing").
-                // Every item reaching this point already has sales history
-                // (the filter above guarantees it), so groupSales is always
-                // defined here.
-                const groupStock = group ? group.stock : ownStock;
-                const groupSales = group ? group.sales : ownSales;
-
-                return {
-                    ...p,
-                    generic_name: genericMap[p.generic_name_id]?.name || '',
-                    supplier_name: supplierMap[p.supplier_id] || '',
-                    category_name: categoryMap[p.category_id] || '',
-                    current_stock: ownStock,
-                    is_grouped: !!group && group.brandCount > 1,
-                    group_stock: groupStock,
-                    three_month_sales: groupSales,
-                    // 🔥 Same total suggested-order figure is shown on
-                    // EVERY brand row that shares the due generic --
-                    // deliberately not auto-split between brands, since
-                    // which specific brand(s) to actually order from is a
-                    // purchasing decision for staff to make (via the
-                    // checkboxes + editable qty already on this table),
-                    // not something to guess at automatically.
-                    reorder_qty: Math.max(1, groupSales - groupStock),
-                    last_purchase: lastPurchaseMap[p.id] || null
-                };
-            };
-
-            state.reorderItems = reorderItems.map(mapReorderItem);
-            // Superseded by the generic-grouped logic above: every brand
-            // that shares a due generic is now itself listed as due
-            // (they're evaluated together), so there's nothing left that
-            // needs a separate "not due yet, but related" section.
-            state.reorderSuggestedItems = [];
-
-            console.log(`✅ Found ${state.reorderItems.length} items below reorder level (generic-combined)`);
-            renderReorderReport();
-        } catch (error) {
-            console.error('Error generating reorder report:', error);
-            const tbody = document.getElementById('reorderTableBody');
-            if (tbody) {
-                tbody.innerHTML = `<tr><td colspan="7" style="text-align: center; padding: 40px; color: #dc2626;">
-                    Error loading reorder report: ${error.message}
-                </td></tr>`;
-            }
-        }
-    }
-
-    async function fetchGenericNames(products) {
-        const genericIds = [...new Set(products.map(p => p.generic_name_id).filter(id => id))];
-        let genericMap = {};
-        if (genericIds.length > 0) {
-            const { data: generics, error: genError } = await supabaseClient
-                .from('generic_names')
-                .select('id, name')
-                .in('id', genericIds);
-
-            if (!genError && generics) {
-                generics.forEach(g => {
-                    genericMap[g.id] = { name: g.name };
-                });
-            }
-        }
-        return genericMap;
-    }
-
-    async function fetchSupplierNames(products) {
-        const supplierIds = products.map(p => p.supplier_id).filter(id => id);
-        let supplierMap = {};
-        if (supplierIds.length > 0) {
-            const { data: suppliers, error: supError } = await supabaseClient
-                .from('suppliers')
-                .select('id, name')
-                .in('id', supplierIds);
-                
-            if (!supError && suppliers) {
-                suppliers.forEach(s => {
-                    supplierMap[s.id] = s.name;
-                });
-            }
-        }
-        return supplierMap;
-    }
-
-    async function fetchCategoryNames(products) {
-        const categoryIds = products.map(p => p.category_id).filter(id => id);
-        let categoryMap = {};
-        if (categoryIds.length > 0) {
-            const { data: categories, error: catError } = await supabaseClient
-                .from('categories')
-                .select('id, name')
-                .in('id', categoryIds);
-                
-            if (!catError && categories) {
-                categories.forEach(c => {
-                    categoryMap[c.id] = c.name;
-                });
-            }
-        }
-        return categoryMap;
-    }
-
-    // 🔥 ADDED: PostgREST silently caps any single query at 1000 rows
-    // unless you page through it yourself with .range() -- with ~2,000
-    // qualifying sale_items rows in just the last 3 months (and growing
-    // every day), the old unpaged query in fetchLast3MonthSales() below
-    // was quietly dropping close to half of them. WHICH products got
-    // dropped was arbitrary -- whatever didn't make it into that first
-    // 1000 -- and that's exactly why Oxa 100mg showed "No sales history"
-    // despite having real sales as recently as today: its rows just
-    // weren't in the returned page. Not a one-off glitch, a genuine bug
-    // that gets worse as sales history grows. Every "fetch everything
-    // for these product IDs" query in this report gets the same
-    // treatment now, not just the one that happened to get caught.
-    async function fetchAllPages(buildQuery, pageSize = 1000) {
-        let allRows = [];
-        let from = 0;
-        while (true) {
-            const { data, error } = await buildQuery(from, from + pageSize - 1);
-            if (error) throw error;
-            allRows = allRows.concat(data || []);
-            if (!data || data.length < pageSize) break;
-            from += pageSize;
-        }
-        return allRows;
-    }
-
-    async function fetchStockLevels(products) {
-        const productIds = products.map(p => p.id);
-        let stockMap = {};
-
-        if (productIds.length > 0) {
-            try {
-                const batches = await fetchAllPages((from, to) =>
-                    supabaseClient
-                        .from('batches')
-                        .select('product_id, total_qty')
-                        .in('product_id', productIds)
-                        .range(from, to)
-                );
-
-                batches.forEach(b => {
-                    if (!stockMap[b.product_id]) stockMap[b.product_id] = 0;
-                    stockMap[b.product_id] += b.total_qty || 0;
-                });
-            } catch (batchError) {
-                console.warn('Could not load stock levels:', batchError);
-            }
-        }
-        return stockMap;
-    }
-
-    // ============================================
-    // 🔥 ADDED: LAST 3-MONTH SALES (for reorder qty)
-    // ============================================
-    // Returns { [product_id]: totalQtySold } summed over completed
-    // RETAIL/WHOLESALE sales in the trailing 3 months. Quotations,
-    // donations, and write-offs are deliberately excluded -- this is
-    // meant to reflect real customer demand, not every movement that
-    // touched stock. A product with no matching rows simply won't have a
-    // key in the returned map (see reorder_qty fallback below), rather
-    // than showing as a misleading 0.
-    async function fetchLast3MonthSales(productIds) {
-        const salesMap = {};
-        if (!productIds || productIds.length === 0) return salesMap;
-
-        try {
-            const threeMonthsAgo = new Date();
-            threeMonthsAgo.setMonth(threeMonthsAgo.getMonth() - 3);
-
-            // 🔥 FIX: was a single unpaged query -- see fetchAllPages()
-            // above for why that silently lost real sales history (this
-            // is the exact query that was dropping Oxa 100mg and others).
-            const data = await fetchAllPages((from, to) =>
-                supabaseClient
-                    .from('sale_items')
-                    .select('product_id, quantity, sales!inner(client_type, is_quotation, created_at)')
-                    .in('product_id', productIds)
-                    .in('sales.client_type', ['RETAIL', 'WHOLESALE'])
-                    .neq('sales.is_quotation', true)
-                    .gte('sales.created_at', threeMonthsAgo.toISOString())
-                    .range(from, to)
-            );
-
-            data.forEach(row => {
-                salesMap[row.product_id] = (salesMap[row.product_id] || 0) + (row.quantity || 0);
-            });
-        } catch (error) {
-            console.warn('Could not load last 3-month sales:', error);
-        }
-
-        return salesMap;
-    }
-
-    // ============================================
-    // 🔥 ADDED: LAST PURCHASE COST
-    // ============================================
-    // "Generic name" was already tracked on products but never actually
-    // used for anything -- this, and the reorder-suggestion logic below,
-    // are the first real uses of it.
-    //
-    // Returns { [product_id]: { rate, currency, date } } for whichever
-    // product IDs are passed in, based on actual goods received (not
-    // just ordered) -- goods_receipt_lines is what was really paid for,
-    // joined to its parent GRN for currency/date, since GRN lines don't
-    // carry their own currency column. Ordered most-recent-first and we
-    // only keep the first row seen per product, so this always reflects
-    // the LAST purchase, not an average or a random one.
-    //
-    // Deliberately does not fall back to purchase_order_lines (the
-    // ordered rate) when there's no GRN history -- an order that hasn't
-    // actually been received yet isn't a "last cost paid", and showing
-    // it as one would be misleading.
-    async function fetchLastPurchaseCosts(productIds) {
-        const lastPurchaseMap = {};
-        if (!productIds || productIds.length === 0) return lastPurchaseMap;
-
-        try {
-            // 🔥 FIX: paginated for the same reason as fetchLast3MonthSales()
-            // above -- small today (22 rows total), but the same silent-
-            // truncation trap as the store's purchase history grows.
-            const data = await fetchAllPages((from, to) =>
-                supabaseClient
-                    .from('goods_receipt_lines')
-                    .select('product_id, purchase_rate, created_at, goods_receipt_notes(currency, exchange_rate, received_date, entry_date)')
-                    .in('product_id', productIds)
-                    .order('created_at', { ascending: false })
-                    .range(from, to)
-            );
-
-            data.forEach(line => {
-                if (lastPurchaseMap[line.product_id]) return; // already have a more recent row
-                const grn = line.goods_receipt_notes || {};
-                lastPurchaseMap[line.product_id] = {
-                    rate: line.purchase_rate || 0,
-                    currency: grn.currency || 'USD',
-                    date: grn.received_date || grn.entry_date || line.created_at
-                };
-            });
-        } catch (error) {
-            console.warn('Could not load last purchase costs:', error);
-        }
-
-        return lastPurchaseMap;
-    }
-
-    function renderReorderReport() {
-        const tbody = document.getElementById('reorderTableBody');
-        if (!tbody) return;
-
-        if (state.reorderItems.length === 0 && state.reorderSuggestedItems.length === 0) {
-            tbody.innerHTML = `<tr><td colspan="7" style="text-align: center; padding: 40px; color: #22c55e;">
-                <i class="fa-regular fa-circle-check" style="font-size: 2rem; display: block; margin-bottom: 10px;"></i>
-                All products are above reorder level
-            </td></tr>`;
-            state.selectedReorderItems = [];
-            return;
-        }
-
-        // 🔥 CHANGED: due items are now grouped by generic before
-        // rendering. A generic with more than one brand due (item.is_grouped)
-        // collapses into ONE clickable header row -- expand it to see
-        // exactly which brands make up the combined total and how much
-        // stock each one holds. A single-brand generic, or a product with
-        // no generic at all, still renders as one plain row exactly as
-        // before -- there's nothing to collapse.
-        const byGeneric = {};
-        const standaloneItems = [];
-        state.reorderItems.forEach(item => {
-            if (item.is_grouped && item.generic_name_id) {
-                if (!byGeneric[item.generic_name_id]) byGeneric[item.generic_name_id] = [];
-                byGeneric[item.generic_name_id].push(item);
-            } else {
-                standaloneItems.push(item);
-            }
-        });
-
-        let rowsHtml = Object.keys(byGeneric)
-            .map(genericId => renderGenericGroupRow(genericId, byGeneric[genericId]))
-            .join('');
-        rowsHtml += standaloneItems.map((item) => renderReorderRow(item, false)).join('');
-
-        if (rowsHtml === '') {
-            rowsHtml = `<tr><td colspan="7" style="text-align: center; padding: 20px; color: #22c55e;">
-                   No items below reorder level right now
-               </td></tr>`;
-        }
-
-        // 🔥 ADDED: "same generic name" suggestions -- rendered as a
-        // visually distinct group below the items actually due, so it
-        // reads as optional rather than as more of the same list.
-        if (state.reorderSuggestedItems.length > 0) {
-            rowsHtml += `<tr><td colspan="7" style="padding: 10px 12px; background: #f8fafc; color: #64748b; font-size: 0.75rem; font-weight: 600; border-top: 2px dashed #e2e8f0;">
-                <i class="fa-solid fa-link"></i> Same generic name as an item above -- not yet due, but worth considering while you're ordering
-            </td></tr>`;
-            rowsHtml += state.reorderSuggestedItems.map((item) => renderReorderRow(item, true)).join('');
-        }
-
-        tbody.innerHTML = rowsHtml;
-
-        state.selectedReorderItems = [];
-        const selectAll = document.getElementById('selectAllReorder');
-        if (selectAll) selectAll.checked = false;
-    }
-
-    // 🔥 CHANGED (dynamic-threshold pivot): one collapsed, clickable row
-    // per generic that has more than one brand due -- combined stock, a
-    // suggested total reorder figure, and every contributing brand
-    // available underneath (collapsed by default) via the chevron. The
-    // "Min Level" column is no longer a manual number to maintain: when
-    // there's 3-month sales history it shows that computed demand
-    // figure (read-only -- it's not something staff type in, it's
-    // whatever the generic actually sold), and only falls back to the
-    // old editable Minimum Order Qty input for the no-sales-history case,
-    // where there's nothing dynamic to show yet.
-    function renderGenericGroupRow(genericId, brands) {
-        const first = brands[0];
-        const groupId = `reorder-generic-${genericId}`;
-        const hasSales = first.three_month_sales !== undefined;
-        // Every generic reaching this row already has sales history --
-        // that's now the only way onto the report at all (see
-        // generateReorderReport()'s due-decision) -- so this is always the
-        // sales label, no fallback branch left to handle.
-        const salesLabel = `3-mo sales (all brands): ${first.three_month_sales}`;
-        const allSameSupplier = brands.every(b => b.supplier_id === first.supplier_id);
-        const supplierLabel = allSameSupplier ? (first.supplier_name || '-') : 'Multiple suppliers';
-
-        const headerRow = `
-            <tr class="reorder-generic-header" style="background:#eff6ff; cursor:pointer;" onclick="toggleReorderGenericGroup('${groupId}')">
-                <td></td>
-                <td colspan="2">
-                    <i class="fa-solid fa-chevron-right reorder-generic-chevron" id="chevron-${groupId}" style="margin-right:8px; transition: transform 0.15s; display:inline-block;"></i>
-                    <strong>${first.generic_name || 'Unnamed generic'}</strong>
-                    <span style="margin-left:6px; background:#dbeafe; color:#1d4ed8; padding:1px 7px; border-radius:8px; font-size:0.65rem; font-weight:600;">${brands.length} brands</span>
-                </td>
-                <td style="color:#dc2626; font-weight:600;">${first.group_stock}</td>
-                <td>
-                    <span style="font-weight:600;">${first.three_month_sales}</span>
-                    <br><span style="font-size:0.62rem; color:#64748b;">3-mo demand</span>
-                </td>
-                <td>${supplierLabel}</td>
-                <td>
-                    <span style="font-weight:600;">Suggested total: ${first.reorder_qty || 1}</span>
-                    <br><span style="font-size:0.68rem; color:#64748b;">${salesLabel}</span>
-                </td>
-            </tr>
-        `;
-
-        const childRows = brands.map(item => renderReorderRow(item, false, groupId)).join('');
-        return headerRow + childRows;
-    }
-
-    // 🔥 ADDED: expand/collapse the brands nested under a generic header
-    // row -- exposed on window since it's wired up via onclick in the
-    // generated HTML above, which runs in global scope, not this file's
-    // module closure.
-    function toggleReorderGenericGroup(groupId) {
-        const isHidden = document.querySelector(`tr.reorder-generic-child[data-group="${groupId}"]`)?.style.display === 'none';
-        document.querySelectorAll(`tr.reorder-generic-child[data-group="${groupId}"]`).forEach(row => {
-            row.style.display = isHidden ? 'table-row' : 'none';
-        });
-        const chevron = document.getElementById(`chevron-${groupId}`);
-        if (chevron) chevron.style.transform = isHidden ? 'rotate(90deg)' : 'rotate(0deg)';
-    }
-
-    // 🔥 ADDED: shared row renderer for the "due" list (grouped or
-    // standalone), its nested brand rows under a generic header, and the
-    // "same generic name" suggestions below it -- isSuggested only
-    // changes the visual treatment (badge + muted stock color); groupId,
-    // when passed, marks this row as a child of a collapsed generic
-    // header (hidden by default, indented, and the now-redundant
-    // "combined with other brands" badge/subline are skipped since the
-    // header row above already shows that). All variants use the same
-    // checkbox/qty mechanism so they flow through updateReorderSelection()
-    // identically.
-    function renderReorderRow(item, isSuggested, groupId) {
-        const lastPurchaseHtml = item.last_purchase
-            ? `<br><span style="font-size: 0.68rem; color: #059669;">Last: ${item.last_purchase.currency === 'ZMW' ? 'ZK' : '$'}${Number(item.last_purchase.rate).toFixed(2)} &middot; ${formatDate(item.last_purchase.date)}</span>`
-            : '';
-        // Badge/subline only make sense on a row rendered OUTSIDE a
-        // generic group header (there's currently no such case left where
-        // is_grouped is true but groupId is absent, but keeping this
-        // guard is what makes that safe if it ever comes up again).
-        const groupedBadge = (item.is_grouped && !groupId)
-            ? `<span style="margin-left: 6px; background: #dbeafe; color: #1d4ed8; padding: 1px 7px; border-radius: 8px; font-size: 0.65rem; font-weight: 600;" title="Reorder decision uses the combined stock of every brand sharing this generic name">Combined w/ other brands</span>`
-            : '';
-        const stockStyle = 'color: #dc2626; font-weight: 600;';
-        const groupStockHtml = (item.is_grouped && !groupId)
-            ? `<br><span style="font-size: 0.65rem; color: #64748b;">Generic total: ${item.group_stock} / 3-mo demand ${item.three_month_sales}</span>`
-            : '';
-
-        // 🔥 CHANGED (Minimum Order Qty removed entirely): every item on
-        // this report now has 3-month sales history by definition -- that's
-        // the only way onto it (see generateReorderReport()'s due-decision)
-        // -- so this column is always the dynamic demand figure, never a
-        // stored minimum.
-        const minQtyDisplay = `${item.three_month_sales} <span style="font-size:0.62rem; color:#64748b;">(3-mo demand)</span>`;
-
-        const childRowAttrs = groupId
-            ? `class="reorder-generic-child" data-group="${groupId}" style="display:none; background:#f8fafc;"`
-            : '';
-        const productCellPadding = groupId ? 'padding-left: 34px;' : '';
-
-        return `
-            <tr ${childRowAttrs}>
-                <td><input type="checkbox" class="reorder-checkbox" data-id="${item.id}" onchange="updateReorderSelection()"></td>
-                <td style="${productCellPadding}">
-                    <strong>${item.product_name}</strong>${groupedBadge}
-                    ${lastPurchaseHtml}
-                </td>
-                <td>${item.generic_name || '-'}</td>
-                <td style="${stockStyle}">${item.current_stock}${groupStockHtml}</td>
-                <td>${minQtyDisplay}</td>
-                <td>${item.supplier_name || '-'}</td>
-                <td>
-                    <input type="number" class="form-control reorder-qty-input"
-                        data-id="${item.id}" value="${item.reorder_qty || 1}"
-                        style="width: 80px; padding: 4px 8px;" min="1"
-                        onchange="updateReorderSelection()">
-                    <br><span style="font-size: 0.68rem; color: #64748b;">3-mo sales${item.is_grouped ? ' (all brands)' : ''}: ${item.three_month_sales}</span>
-                </td>
-            </tr>
-        `;
-    }
-
-    function toggleAllReorderItems() {
-        const checked = document.getElementById('selectAllReorder')?.checked || false;
-        document.querySelectorAll('.reorder-checkbox').forEach(cb => cb.checked = checked);
-        updateReorderSelection();
-    }
-
-    function updateReorderSelection() {
-        state.selectedReorderItems = [];
-        document.querySelectorAll('.reorder-checkbox:checked').forEach(cb => {
-            const id = cb.dataset.id;
-            // 🔥 CHANGED: a checked row can now come from either the
-            // "due" list or the "same generic name" suggestions -- look
-            // in both.
-            const item = state.reorderItems.find(p => p.id === id)
-                || state.reorderSuggestedItems.find(p => p.id === id);
-            if (item) {
-                const qtyInput = document.querySelector(`.reorder-qty-input[data-id="${id}"]`);
-                const qty = parseInt(qtyInput?.value) || item.reorder_qty || 1;
-                state.selectedReorderItems.push({
-                    ...item,
-                    reorder_qty: qty
-                });
-            }
-        });
-    }
-
-    function addSelectedToPO() {
-        if (state.selectedReorderItems.length === 0) {
-            showToast('Please select at least one item', 'error');
-            return;
-        }
-
-        closeModal('reorderModal');
-
-        const poModal = document.getElementById('poModal');
-        if (!poModal || !poModal.classList.contains('show')) {
-            openNewPurchaseOrder();
-        }
-
-        const firstItem = state.selectedReorderItems[0];
-        if (firstItem && firstItem.supplier_id) {
-            const supplierSelect = document.getElementById('poSupplier');
-            if (supplierSelect) {
-                supplierSelect.value = firstItem.supplier_id;
-            }
-        }
-
-        const allSameSupplier = state.selectedReorderItems.every(item => 
-            item.supplier_id === firstItem?.supplier_id
-        );
-
-        if (!allSameSupplier && state.selectedReorderItems.length > 1) {
-            showToast('Selected items have different suppliers. Please add them separately.', 'warning');
-            return;
-        }
-
-        state.selectedReorderItems.forEach(item => {
-            const existing = state.poLines.find(l => l.product_id === item.id);
-            if (existing) {
-                existing.order_quantity += item.reorder_qty || 1;
-                existing.total_amount = (existing.order_quantity || 0) * (existing.purchase_rate || 0);
-            } else {
-                state.poLines.push({
-                    product_id: item.id,
-                    product_name: item.product_name,
-                    generic_name: item.generic_name || '',
-                    pack_size: item.conversion_rate || 1,
-                    order_quantity: item.reorder_qty || 1,
-                    purchase_rate: 0,
-                    total_amount: 0,
-                    last_purchase: item.last_purchase || null // 🔥 ADDED -- carried over from the reorder report, already fetched
-                });
-            }
-        });
-
-        renderPOLines();
-        updatePOTotal();
-        showToast(`Added ${state.selectedReorderItems.length} items to purchase order`, 'success');
-    }
-
-    // ============================================
-    // RENDER FUNCTIONS
-    // ============================================
-
-    function renderPurchaseOrders(orders = null) {
-        const list = orders || state.orders;
-        const tbody = document.getElementById('purchaseTableBody');
-        if (!tbody) return;
-        
-        const filtered = applyFilters(list);
-        
-        if (filtered.length === 0) {
-            tbody.innerHTML = `<tr><td colspan="6" style="text-align: center; padding: 40px; color: #94a3b8;">
-                <i class="fa-regular fa-file-lines" style="font-size: 2rem; display: block; margin-bottom: 10px;"></i>
-                No purchase orders found
-            </td></tr>`;
-            updateOrderCount(0);
-            return;
-        }
-
-        tbody.innerHTML = filtered.map(order => renderOrderRow(order)).join('');
-        updateOrderCount(filtered.length);
-    }
-
-    function applyFilters(list) {
-        const overdueFilter = document.getElementById('overdueFilter')?.value || 'all';
-        let filtered = list;
-        
-        // First, exclude all completed/cancelled orders
-        const completedStatuses = ['Cancelled', 'Closed', 'Goods Received', 'Received', 'Completed', 'Fully Received'];
-        
-        if (overdueFilter === 'overdue') {
-            const today = new Date();
-            today.setHours(0, 0, 0, 0);
-            filtered = filtered.filter(o => {
-                // Exclude completed/cancelled orders
-                if (completedStatuses.includes(o.status)) return false;
-                if (o.fully_received === true) return false;
-                if (!o.expected_delivery_date) return false;
-                const expectedDate = new Date(o.expected_delivery_date);
-                expectedDate.setHours(0, 0, 0, 0);
-                return expectedDate < today;
-            });
-        } else if (overdueFilter === 'upcoming') {
-            const today = new Date();
-            today.setHours(0, 0, 0, 0);
-            const future = new Date(today);
-            future.setDate(future.getDate() + 7);
-            filtered = filtered.filter(o => {
-                // Exclude completed/cancelled orders
-                if (completedStatuses.includes(o.status)) return false;
-                if (o.fully_received === true) return false;
-                if (!o.expected_delivery_date) return false;
-                const expectedDate = new Date(o.expected_delivery_date);
-                expectedDate.setHours(0, 0, 0, 0);
-                return expectedDate >= today && expectedDate <= future;
-            });
-        }
-        
-        return filtered;
-    }
-
-    function renderOrderRow(order) {
-        const statusClass = (order.status || 'Draft').toLowerCase().replace(/ /g, '-');
-        const supplierName = order.suppliers?.name || 'Unknown';
-        const symbol = order.currency === 'ZMW' ? 'ZK' : '$';
-        const isOverdue = checkIfOverdue(order);
-        
-        const totalReceivedQty = order.total_received_quantity || 0;
-        const totalCancelledQty = order.total_cancelled_quantity || 0;
-        const totalOrderQty = order.total_quantity || 0;
-        // Remaining = Ordered - Received - Cancelled (calculated)
-        const remainingQty = totalOrderQty - totalReceivedQty - totalCancelledQty;
-        
-        return `
-        <tr style="${isOverdue && !['Cancelled', 'Closed', 'Goods Received'].includes(order.status) ? 'background: #fef2f2;' : ''}">
-            <td style="padding-left: 20px; font-weight: 500;">
-                ${order.po_number || 'N/A'}
-                ${isOverdue && !['Cancelled', 'Closed', 'Goods Received'].includes(order.status) ? 
-                    `<span style="font-size: 0.6rem; color: #dc2626; display: block;">⚠️ OVERDUE</span>` : ''}
-            </td>
-            <td>${supplierName}</td>
-            <td>
-                ${formatDate(order.expected_delivery_date)}
-                ${isOverdue && !['Cancelled', 'Closed', 'Goods Received'].includes(order.status) ? 
-                    `<span style="font-size: 0.6rem; color: #dc2626; display: block;">${getDaysOverdue(order)} days overdue</span>` : ''}
-            </td>
-            <td>
-                <span class="status-badge status-${statusClass}">${order.status || 'Draft'}</span>
-                ${renderOrderStatusDetails(order, remainingQty, totalReceivedQty, totalCancelledQty)}
-            </td>
-            <td style="text-align: right; padding-right: 20px;">
-                ${symbol} ${formatNumber(order.total_amount || 0)}
-                ${renderOrderTotals(order, symbol)}
-            </td>
-            <td style="text-align: center;">
-                <div class="action-buttons">
-                    ${renderOrderActions(order)}
-                </div>
-            </td>
-        </tr>
-        `;
-    }
-
-    function renderOrderStatusDetails(order, remainingQty, totalReceivedQty, totalCancelledQty) {
-        let html = '';
-        
-        if (totalReceivedQty > 0 && totalCancelledQty > 0) {
-            html += `<span style="font-size: 0.6rem; color: #f59e0b; display: block;">📦 Received: ${totalReceivedQty} | ❌ Cancelled: ${totalCancelledQty}</span>`;
-        } else if (totalReceivedQty > 0 && remainingQty > 0) {
-            html += `<span style="font-size: 0.6rem; color: #f59e0b; display: block;">Remaining: ${remainingQty}</span>`;
-        } else if (totalCancelledQty > 0 && order.status !== 'Cancelled') {
-            html += `<span style="font-size: 0.6rem; color: #dc2626; display: block;">Cancelled: ${totalCancelledQty}</span>`;
-        }
-        
-        if (totalReceivedQty > 0 && order.status !== 'Goods Received') {
-            html += `<span style="font-size: 0.6rem; color: #10b981; display: block;">Received: ${totalReceivedQty}</span>`;
-        }
-        
-        return html;
-    }
-
-    function renderOrderTotals(order, symbol) {
-        let html = '';
-        if (order.total_received_amount > 0) {
-            html += `<br><span style="font-size: 0.65rem; color: #10b981;">Received: ${symbol} ${formatNumber(order.total_received_amount)}</span>`;
-        }
-        if (order.total_cancelled_amount > 0) {
-            html += `<br><span style="font-size: 0.65rem; color: #dc2626;">Cancelled: ${symbol} ${formatNumber(order.total_cancelled_amount)}</span>`;
-        }
-        if (order.remaining_amount > 0 && order.status !== 'Draft' && order.status !== 'Cancelled') {
-            html += `<br><span style="font-size: 0.65rem; color: #f59e0b;">Remaining: ${symbol} ${formatNumber(order.remaining_amount)}</span>`;
-        }
-        return html;
-    }
-
-    // ============================================
-    // RENDER ORDER ACTIONS - UPDATED WITH CANCEL REMAINING
-    // ============================================
-
-    function renderOrderActions(order) {
-        const remainingQty = (order.total_quantity || 0) - (order.total_received_quantity || 0) - (order.total_cancelled_quantity || 0);
-        
-        let html = `
-            <button class="action-btn" onclick="viewPO('${order.id}')" title="View Details">
-                <i class="fa-regular fa-eye"></i>
-            </button>
-        `;
-        
-        // GRN button - only for Approved or Partially Received with remaining items
-        if ((order.status === 'Approved' || order.status === 'Partially Received') && 
-            order.status !== 'Cancelled' && 
-            remainingQty > 0) {
-            html += `
-                <button class="action-btn grn" onclick="openGRN('${order.id}')" title="Receive Goods">
-                    <i class="fa-solid fa-boxes"></i>
-                </button>
-            `;
-        }
-        
-        // Edit/Delete - only for Draft or Pending Approval
-        if (order.status === 'Draft' || order.status === 'Pending Approval') {
-            html += `
-                <button class="action-btn" onclick="editPO('${order.id}')" title="Edit">
-                    <i class="fa-regular fa-pen-to-square"></i>
-                </button>
-                <button class="action-btn" onclick="deletePO('${order.id}')" title="Delete" style="color: #ef4444;">
-                    <i class="fa-regular fa-trash-can"></i>
-                </button>
-            `;
-        }
-        
-        // Cancel Remaining - show when there are remaining items to cancel
-        // Only show for Approved or Partially Received with remaining > 0
-        if (remainingQty > 0 && 
-            (order.status === 'Approved' || order.status === 'Partially Received') &&
-            order.status !== 'Cancelled' && 
-            order.status !== 'Closed' && 
-            order.status !== 'Goods Received') {
-            html += `
-                <button class="action-btn cancel-remaining" onclick="openCancelRemainingPO('${order.id}')" title="Cancel Remaining Items" style="color: #f59e0b;">
-                    <i class="fa-solid fa-ban"></i> Cancel Remaining
-                </button>
-            `;
-        }
-        
-        // Cancel Full PO - only for Approved with nothing received
-        if (order.status === 'Approved' && order.total_received_quantity === 0 && order.total_cancelled_quantity === 0) {
-            html += `
-                <button class="action-btn" onclick="openCancelPO('${order.id}')" title="Cancel Full PO" style="color: #ef4444;">
-                    <i class="fa-solid fa-ban"></i> Cancel PO
-                </button>
-            `;
-        }
-        
-        // View GRN - for Goods Received or Closed
-        if (order.status === 'Goods Received' || order.status === 'Closed') {
-            html += `
-                <button class="action-btn" onclick="viewGRN('${order.id}')" title="View GRN" style="color: #22c55e;">
-                    <i class="fa-regular fa-receipt"></i>
-                </button>
-            `;
-        }
-        
-        if (order.status === 'Pending Approval') {
-            html += `
-                <span style="font-size: 0.7rem; color: #f59e0b; padding: 2px 8px; background: #fef3c7; border-radius: 12px;">
-                    <i class="fa-regular fa-clock"></i> Awaiting Approval
-                </span>
-            `;
-        }
-        
-        if (order.status === 'Cancelled') {
-            html += `
-                <span style="font-size: 0.7rem; color: #64748b; padding: 2px 8px; background: #e2e8f0; border-radius: 12px;">
-                    <i class="fa-solid fa-ban"></i> Cancelled
-                </span>
-            `;
-        }
-        
-        return html;
-    }
-
-    function checkIfOverdue(order) {
-        if (!order.expected_delivery_date) return false;
-        // Overdue is a flag, not a status - exclude completed/cancelled
-        if (['Cancelled', 'Closed', 'Goods Received'].includes(order.status)) return false;
-        if (order.fully_received === true) return false;
-        const today = new Date();
-        today.setHours(0, 0, 0, 0);
-        const expectedDate = new Date(order.expected_delivery_date);
-        expectedDate.setHours(0, 0, 0, 0);
-        // Only overdue if remaining > 0
-        const remaining = (order.total_quantity || 0) - (order.total_received_quantity || 0) - (order.total_cancelled_quantity || 0);
-        if (remaining <= 0) return false;
-        return expectedDate < today;
-    }
-
-    function getDaysOverdue(order) {
-        if (!order.expected_delivery_date) return 0;
-        const today = new Date();
-        today.setHours(0, 0, 0, 0);
-        const expectedDate = new Date(order.expected_delivery_date);
-        expectedDate.setHours(0, 0, 0, 0);
-        return Math.floor((today - expectedDate) / (1000 * 60 * 60 * 24));
-    }
-
-    function updateOrderCount(count) {
-        const countSpan = document.getElementById('poCount');
-        const countDisplay = document.getElementById('poCountDisplay');
-        if (countSpan) countSpan.textContent = `${count} orders`;
-        if (countDisplay) countDisplay.textContent = `${count} orders`;
-    }
-
-    // ============================================
-    // 🔥 ADDED: SEARCHABLE SUPPLIER DROPDOWN
-    // ============================================
-    // Same type-to-filter dropdown pattern as the NHIMA Number / Phone
-    // Number search boxes in Retail POS (initSearchableSelect() there) --
-    // generalized here with getLabel(), since a plain <select> matches on
-    // its option VALUE, but here the value needs to stay the supplier's
-    // database id (what actually gets saved) while the search/display
-    // text is the supplier's NAME. The real <select> stays in the DOM,
-    // hidden -- every place that reads e.g. document.getElementById
-    // ('poSupplier').value keeps working unchanged.
-    function initSearchableSelect({ searchInputId, selectId, panelId, normalize, matchMode, getLabel }) {
-        const searchInput = document.getElementById(searchInputId);
-        const select = document.getElementById(selectId);
-        if (!searchInput || !select) return;
-        const normalizeFn = normalize || (v => (v || '').toLowerCase());
-        const mode = matchMode || 'prefix';
-        const labelFn = getLabel || (opt => opt.value);
-
-        let panel = document.getElementById(panelId);
-        if (!panel) {
-            panel = document.createElement('div');
-            panel.id = panelId;
-            panel.style.cssText = 'display:none; position:fixed; z-index:2000; background:white; border:1px solid #e2e8f0; border-radius:8px; box-shadow:0 12px 28px rgba(15,23,42,0.18); max-height:260px; overflow-y:auto; font-size:0.82rem;';
-            document.body.appendChild(panel);
-        }
-
-        let matches = [];
-        let highlightIndex = -1;
-
-        function liveOptions() {
-            return Array.from(select.options).filter(o => o.value !== '');
-        }
-
-        function position() {
-            const rect = searchInput.getBoundingClientRect();
-            panel.style.left = `${Math.round(rect.left)}px`;
-            panel.style.top = `${Math.round(rect.bottom + 4)}px`;
-            panel.style.width = `${Math.max(180, Math.round(rect.width))}px`;
-        }
-
-        function render() {
-            if (matches.length === 0) {
-                panel.innerHTML = `<div style="padding:10px 12px; color:#94a3b8;">No matches.</div>`;
-                return;
-            }
-            panel.innerHTML = matches.map((opt, i) => `
-                <div class="searchable-select-result" data-index="${i}" style="padding:8px 12px; cursor:pointer; border-bottom:1px solid #f1f5f9; ${i === highlightIndex ? 'background:#eff6ff;' : ''}">${labelFn(opt)}</div>
-            `).join('');
-        }
-
-        function scrollHighlightIntoView() {
-            const el = panel.querySelector(`.searchable-select-result[data-index="${highlightIndex}"]`);
-            if (el) el.scrollIntoView({ block: 'nearest' });
-        }
-
-        function hide() {
-            panel.style.display = 'none';
-            matches = [];
-            highlightIndex = -1;
-        }
-
-        function show(query) {
-            const term = normalizeFn(query.trim());
-            const all = liveOptions();
-            matches = (term
-                ? all.filter(opt => {
-                    const nv = normalizeFn(labelFn(opt));
-                    return mode === 'contains' ? nv.includes(term) : nv.startsWith(term);
-                })
-                : all
-            ).slice(0, 30);
-            highlightIndex = matches.length ? 0 : -1;
-            render();
-            position();
-            panel.style.display = 'block';
-        }
-
-        function commit(opt) {
-            select.value = opt ? opt.value : '';
-            searchInput.value = opt ? labelFn(opt) : '';
-            select.dispatchEvent(new Event('change', { bubbles: true }));
-            hide();
-        }
-
-        function selectHighlighted() {
-            if (highlightIndex < 0 || !matches[highlightIndex]) return false;
-            commit(matches[highlightIndex]);
-            return true;
-        }
-
-        searchInput.addEventListener('focus', () => {
-            searchInput.select();
-            show(searchInput.value);
-        });
-        searchInput.addEventListener('input', () => show(searchInput.value));
-        searchInput.addEventListener('keydown', (e) => {
-            if (panel.style.display === 'none') return;
-            if (e.key === 'ArrowDown') {
-                e.preventDefault();
-                if (!matches.length) return;
-                highlightIndex = Math.min(highlightIndex + 1, matches.length - 1);
-                render();
-                scrollHighlightIntoView();
-            } else if (e.key === 'ArrowUp') {
-                e.preventDefault();
-                if (!matches.length) return;
-                highlightIndex = Math.max(highlightIndex - 1, 0);
-                render();
-                scrollHighlightIntoView();
-            } else if (e.key === 'Enter') {
-                if (selectHighlighted()) e.preventDefault();
-            } else if (e.key === 'Tab') {
-                selectHighlighted();
-            } else if (e.key === 'Escape') {
-                hide();
-            }
-        });
-
-        // mousedown (not click) + preventDefault so the search input never
-        // blurs before the pick registers.
-        document.addEventListener('mousedown', (e) => {
-            if (panel.style.display === 'none') return;
-            const resultEl = e.target.closest(`#${panelId} .searchable-select-result`);
-            if (resultEl) {
-                e.preventDefault();
-                const idx = parseInt(resultEl.dataset.index, 10);
-                commit(matches[idx]);
-                return;
-            }
-            if (!e.target.closest(`#${panelId}`) && e.target !== searchInput) {
-                hide();
-            }
-        });
-
-        // 🔥 FIX: "sometimes it can be selected, sometimes not" -- 'scroll'
-        // events don't bubble, but a capturing-phase listener on window
-        // still sees them fire for ANY scrollable descendant, including
-        // this dropdown's OWN results list (max-height + overflow-y:auto
-        // above). With more than a handful of suppliers, scrolling down
-        // inside the list itself to reach one further down immediately
-        // fired this handler and closed the whole dropdown out from under
-        // the click -- looked exactly like "the dropdown opens but you
-        // can't always pick something", and reopening/retyping (or a full
-        // page refresh, which resets everything back to a short list that
-        // doesn't need scrolling) was the only way around it. Only hide on
-        // a scroll that happens OUTSIDE the panel -- e.g. the modal body
-        // scrolling underneath it -- which is what this was meant to catch
-        // in the first place.
-        window.addEventListener('scroll', (e) => {
-            if (panel.contains(e.target)) return;
-            hide();
-        }, true);
-        window.addEventListener('resize', () => hide());
-
-        function currentLabel() {
-            const opt = select.options[select.selectedIndex];
-            return (opt && opt.value) ? labelFn(opt) : '';
-        }
-
-        // Same "don't stomp what's being typed" fix as Retail POS's
-        // version of this: only auto-sync the visible text from a
-        // programmatic change (populateSupplierSelects() re-running,
-        // loadPO() setting a value, etc), never while the cashier/staff
-        // member is actively typing in this box themselves.
-        select.addEventListener('change', () => {
-            if (document.activeElement === searchInput) return;
-            searchInput.value = currentLabel();
-        });
-
-        // Reflect whatever the select already holds right now, and expose
-        // a manual re-sync for populateSupplierSelects() -- that function
-        // replaces select.innerHTML directly (no 'change' event fires on
-        // its own from that), so without this the search box would keep
-        // showing stale/blank text after suppliers reload.
-        searchInput.value = currentLabel();
-        select.__syncSearchLabel = () => { searchInput.value = currentLabel(); };
-    }
-
-    // ============================================
-    // 🔥 ADDED: AUTO-INJECTING SEARCHABLE DROPDOWN
-    // ============================================
-    // initSearchableSelect() above needs a matching search <input> and
-    // panel <div> already sitting in the HTML (that's how poSupplier /
-    // supplierFilter / reorderSupplier are wired, just above). Most
-    // other dropdowns in this module don't have that companion markup
-    // yet, and this file has no matching index.html to add it to.
-    // makeSelectSearchable() builds that companion input itself at
-    // runtime -- inserted right next to the real <select>, copying its
-    // classes/size so it drops in without needing any HTML change --
-    // then wires it up with the exact same initSearchableSelect()
-    // logic (arrow keys navigate, Enter picks, Tab picks and moves on,
-    // Escape closes, mousedown-not-click on results) used everywhere
-    // else, including in Retail POS.
-    //
-    // Only worth doing for a dropdown backed by a real, growing list
-    // (Category, Generic, etc.) -- a 2-3 option toggle like Currency or
-    // Payment Type already gets working arrow-key/Tab navigation for
-    // free from the native <select>, so turning those into a type-to-
-    // search box would just make a two-click choice slower. Call this
-    // for any additional long-list dropdown that needs it.
-    function makeSelectSearchable(selectId, { matchMode, getLabel, normalize } = {}) {
-        const select = document.getElementById(selectId);
-        if (!select || select.dataset.searchableInjected === '1') return;
-
-        const searchInputId = `${selectId}__searchInput`;
-        const panelId = `${selectId}__searchPanel`;
-
-        const input = document.createElement('input');
-        input.type = 'text';
-        input.id = searchInputId;
-        input.className = select.className;
-        input.autocomplete = 'off';
-        input.placeholder = select.options.length ? select.options[0].textContent : 'Search...';
-
-        const computed = window.getComputedStyle(select);
-        input.style.cssText = select.getAttribute('style') || '';
-        input.style.width = computed.width;
-
-        select.insertAdjacentElement('afterend', input);
-
-        // Keep the real <select> in the DOM (everything that reads its
-        // .value or listens for its 'change' event keeps working
-        // unchanged) but hand its visible spot in the layout to the new
-        // search input.
-        select.style.position = 'absolute';
-        select.style.opacity = '0';
-        select.style.width = '1px';
-        select.style.height = '1px';
-        select.style.pointerEvents = 'none';
-        select.tabIndex = -1;
-        select.dataset.searchableInjected = '1';
-
-        initSearchableSelect({ searchInputId, selectId, panelId, matchMode, getLabel, normalize });
-    }
-
-    function populateSupplierSelects() {
-        const selects = ['poSupplier', 'supplierFilter', 'reorderSupplier'];
-        const suppliers = state.suppliers || [];
-
-        selects.forEach(id => {
-            const select = document.getElementById(id);
-            if (!select) return;
-
-            const placeholder = id === 'poSupplier' ? 'Select Supplier' : 'All Suppliers';
-            const currentVal = select.value;
-
-            select.innerHTML = `<option value="">${placeholder}</option>` +
-                suppliers.map(s => `<option value="${s.id}">${s.name}</option>`).join('');
-
-            if (currentVal && Array.from(select.options).some(opt => opt.value === currentVal)) {
-                select.value = currentVal;
-            }
-            // 🔥 ADDED: .innerHTML above doesn't fire 'change', so the
-            // searchable dropdown's visible text (if wired up for this
-            // select) needs an explicit nudge to stay in sync.
-            if (typeof select.__syncSearchLabel === 'function') select.__syncSearchLabel();
-        });
-    }
-
-    // ============================================
-    // 🔥 ADD SUPPLIER MODAL (Name/TPIN/ZAMRA/Contact/Mobile/Email/Address
-    // + Opening Payable in USD/ZMW/both) -- injected once, reusable from
-    // any [data-open-add-supplier] trigger on the page via
-    // data-target-select pointing at the dropdown to auto-select after save.
-    // ============================================
-    function ensureAddSupplierModal() {
-        if (document.getElementById('purchaseAddSupplierModal')) return;
-        const html = `
-        <div id="purchaseAddSupplierModal" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(15,23,42,0.6);backdrop-filter:blur(4px);z-index:1100;justify-content:center;align-items:center;">
-            <div class="modal-content-box" style="background:white;padding:30px;border-radius:12px;width:90%;max-width:520px;max-height:90vh;overflow-y:auto;box-shadow:0 20px 50px rgba(0,0,0,0.5);">
-                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:20px;border-bottom:1px solid #e2e8f0;padding-bottom:15px;">
-                    <h3 style="margin:0;"><i class="fa-solid fa-truck-field" style="color:#2563eb;"></i> Add Supplier</h3>
-                    <button id="purchaseCloseSupplierModalBtn" type="button" style="background:none;border:none;font-size:1.5rem;cursor:pointer;color:#64748b;">&times;</button>
-                </div>
-                <form id="purchaseAddSupplierForm">
-                    <div style="margin-bottom:12px;"><label style="display:block;font-weight:500;color:#475569;margin-bottom:3px;font-size:0.85rem;">Supplier Name *</label>
-                        <input type="text" id="newSupplierName" required style="width:100%;padding:6px 10px;border:1px solid #e2e8f0;border-radius:4px;"></div>
-                    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px;">
-                        <div><label style="display:block;font-weight:500;color:#475569;margin-bottom:3px;font-size:0.85rem;">TPIN Number</label>
-                            <input type="text" id="newSupplierTpin" style="width:100%;padding:6px 10px;border:1px solid #e2e8f0;border-radius:4px;"></div>
-                        <div><label style="display:block;font-weight:500;color:#475569;margin-bottom:3px;font-size:0.85rem;">ZAMRA Number</label>
-                            <input type="text" id="newSupplierZamra" style="width:100%;padding:6px 10px;border:1px solid #e2e8f0;border-radius:4px;"></div>
-                    </div>
-                    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px;">
-                        <div><label style="display:block;font-weight:500;color:#475569;margin-bottom:3px;font-size:0.85rem;">Contact Person</label>
-                            <input type="text" id="newSupplierContact" style="width:100%;padding:6px 10px;border:1px solid #e2e8f0;border-radius:4px;"></div>
-                        <div><label style="display:block;font-weight:500;color:#475569;margin-bottom:3px;font-size:0.85rem;">Mobile Number *</label>
-                            <input type="text" id="newSupplierPhone" required style="width:100%;padding:6px 10px;border:1px solid #e2e8f0;border-radius:4px;"></div>
-                    </div>
-                    <div style="margin-bottom:12px;"><label style="display:block;font-weight:500;color:#475569;margin-bottom:3px;font-size:0.85rem;">Email Address</label>
-                        <input type="email" id="newSupplierEmail" style="width:100%;padding:6px 10px;border:1px solid #e2e8f0;border-radius:4px;"></div>
-                    <div style="margin-bottom:12px;"><label style="display:block;font-weight:500;color:#475569;margin-bottom:3px;font-size:0.85rem;">Address</label>
-                        <input type="text" id="newSupplierAddress" style="width:100%;padding:6px 10px;border:1px solid #e2e8f0;border-radius:4px;"></div>
-
-                    <div style="background:#fff7ed;border-left:4px solid #f97316;padding:10px 12px;border-radius:6px;margin:16px 0 12px;">
-                        <strong style="font-size:0.85rem;color:#9a3412;">Opening Payable (optional -- either or both)</strong>
-                    </div>
-                    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px;">
-                        <div><label style="display:block;font-weight:500;color:#475569;margin-bottom:3px;font-size:0.85rem;">Opening Payable (USD)</label>
-                            <input type="number" step="0.01" min="0" id="newSupplierOpeningUsd" value="0" style="width:100%;padding:6px 10px;border:1px solid #e2e8f0;border-radius:4px;"></div>
-                        <div><label style="display:block;font-weight:500;color:#475569;margin-bottom:3px;font-size:0.85rem;">Opening Payable (ZMW)</label>
-                            <input type="number" step="0.01" min="0" id="newSupplierOpeningZmw" value="0" style="width:100%;padding:6px 10px;border:1px solid #e2e8f0;border-radius:4px;"></div>
-                    </div>
-                    <div id="newSupplierOpeningRateGroup" style="display:none;margin-bottom:12px;">
-                        <label style="display:block;font-weight:500;color:#475569;margin-bottom:3px;font-size:0.85rem;">Exchange Rate (USD → ZMW, for posting the USD opening balance to the ledger)</label>
-                        <input type="number" step="0.0001" min="0" id="newSupplierOpeningRate" value="25.00" style="width:100%;padding:6px 10px;border:1px solid #e2e8f0;border-radius:4px;">
-                    </div>
-
-                    <div style="margin-top:20px;display:flex;gap:10px;justify-content:flex-end;border-top:1px solid #e2e8f0;padding-top:20px;">
-                        <button type="button" id="purchaseCancelSupplierModalBtn" style="background:white;border:1px solid #e2e8f0;padding:10px 25px;border-radius:6px;cursor:pointer;">Cancel</button>
-                        <button type="submit" id="purchaseSaveSupplierBtn" style="background:#2563eb;color:white;border:none;padding:10px 25px;border-radius:6px;cursor:pointer;">
-                            <i class="fa-solid fa-floppy-disk"></i> Save Supplier
-                        </button>
-                    </div>
-                </form>
-            </div>
-        </div>`;
-        document.body.insertAdjacentHTML('beforeend', html);
-
-        const modal = document.getElementById('purchaseAddSupplierModal');
-        modal.querySelector('.modal-content-box').addEventListener('click', e => e.stopPropagation());
-        document.getElementById('purchaseCloseSupplierModalBtn').addEventListener('click', () => modal.style.display = 'none');
-        document.getElementById('purchaseCancelSupplierModalBtn').addEventListener('click', () => modal.style.display = 'none');
-        modal.addEventListener('click', e => { if (e.target === modal) modal.style.display = 'none'; });
-
-        document.getElementById('newSupplierOpeningUsd').addEventListener('input', function () {
-            document.getElementById('newSupplierOpeningRateGroup').style.display = parseFloat(this.value) > 0 ? 'block' : 'none';
-        });
-
-        document.getElementById('purchaseAddSupplierForm').addEventListener('submit', handleSaveSupplier);
-    }
-
-    document.addEventListener('click', function (e) {
-        const trigger = e.target.closest('[data-open-add-supplier]');
-        if (!trigger) return;
-        e.preventDefault();
-        ensureAddSupplierModal();
-        const modal = document.getElementById('purchaseAddSupplierModal');
-        document.getElementById('purchaseAddSupplierForm').reset();
-        document.getElementById('newSupplierOpeningRateGroup').style.display = 'none';
-        // 🔥 FIX: form.reset() puts the rate field back to its static HTML
-        // default (25.00) -- override with today's shared exchange rate
-        // instead, same as resetPOForm().
-        const openingRateInput = document.getElementById('newSupplierOpeningRate');
-        if (openingRateInput) openingRateInput.value = sharedZmwPerUsd;
-        modal.style.display = 'flex';
-        modal.dataset.targetSelectId = trigger.dataset.targetSelect || '';
-    });
-
-    // 🔥 ADDED: safeguard against a repeat of the ALL-CAPS-vs-Proper-Case
-    // mess found and cleaned up across products/customers/suppliers/etc.
-    // Only touches a value that is ENTIRELY caps -- anything already
-    // mixed-case, including deliberately-preserved acronyms like "(UK)",
-    // is left exactly as typed.
-    function toProperCaseIfAllCaps(str) {
-        if (!str) return str;
-        const trimmed = str.trim();
-        if (trimmed.length > 2 && trimmed === trimmed.toUpperCase() && trimmed !== trimmed.toLowerCase()) {
-            return trimmed.replace(/\w\S*/g, w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase());
-        }
-        return str;
-    }
-
-    async function handleSaveSupplier(e) {
-        e.preventDefault();
-        const name = toProperCaseIfAllCaps(document.getElementById('newSupplierName').value.trim());
-        const phoneVal = document.getElementById('newSupplierPhone').value.trim();
-        if (!name) { alert('Supplier Name is required'); return; }
-        if (!phoneVal) { alert('Mobile Number is required'); return; }
-
-        const openingUsd = parseFloat(document.getElementById('newSupplierOpeningUsd').value) || 0;
-        const openingZmw = parseFloat(document.getElementById('newSupplierOpeningZmw').value) || 0;
-        const openingRate = parseFloat(document.getElementById('newSupplierOpeningRate').value) || 25.00;
-
-        const btn = document.getElementById('purchaseSaveSupplierBtn');
-        btn.disabled = true;
-        btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Saving...';
-
-        try {
-            const record = {
-                name,
-                tpin_number: document.getElementById('newSupplierTpin').value.trim() || null,
-                zamra_number: document.getElementById('newSupplierZamra').value.trim() || null,
-                contact_person: document.getElementById('newSupplierContact').value.trim() || null,
-                phone: phoneVal,
-                email: document.getElementById('newSupplierEmail').value.trim() || null,
-                address: document.getElementById('newSupplierAddress').value.trim() || null,
-                opening_balance_usd: openingUsd,
-                opening_balance_zmw: openingZmw,
-                created_at: new Date().toISOString()
-            };
-
-            const { data, error } = await supabaseClient.from('suppliers').insert([record]).select();
-            if (error) throw error;
-
-            const newSupplier = data[0];
-
-            // Opening payable GL posting -- Debit Opening Balance Equity,
-            // Credit Accounts Payable (this is a LIABILITY, the reverse of
-            // wholesale.js's opening-receivable pattern). Posted separately
-            // per currency since the ledger tracks Accounts Payable in ZMW.
-            if (openingUsd > 0) {
-                await createOpeningPayableGLEntry(newSupplier.id, name, openingUsd * openingRate, `USD ${formatNumber(openingUsd)} @ ${openingRate}`);
-            }
-            if (openingZmw > 0) {
-                await createOpeningPayableGLEntry(newSupplier.id, name, openingZmw, `ZMW ${formatNumber(openingZmw)}`);
-            }
-
-            await loadSuppliers();
-
-            const modal = document.getElementById('purchaseAddSupplierModal');
-            const targetSelectId = modal.dataset.targetSelectId;
-            if (targetSelectId) {
-                const targetSelect = document.getElementById(targetSelectId);
-                if (targetSelect) {
-                    targetSelect.value = newSupplier.id;
-                    targetSelect.dispatchEvent(new Event('change'));
-                }
-            }
-            modal.style.display = 'none';
-
-            showToast(`Supplier "${name}" added` + (openingUsd > 0 || openingZmw > 0 ? ' with opening payable' : ''), 'success');
-        } catch (error) {
-            console.error('Error saving supplier:', error);
-            alert('❌ Error saving supplier: ' + error.message);
-        } finally {
-            btn.disabled = false;
-            btn.innerHTML = '<i class="fa-solid fa-floppy-disk"></i> Save Supplier';
-        }
-    }
-
-    // ============================================
-    // 🔥 LOOKUP TABLE QUICK-ADD (Category, Generic -- Brand and
-    // Subcategory are NOT wired up here: nothing in this file's existing
-    // code references a brand_id or subcategory_id column on products, so
-    // rather than guess at column/table names that might not exist, this
-    // only covers the two lookup tables already confirmed in use:
-    // categories and generic_names)
-    // ============================================
-    const LOOKUP_TABLE_CONFIG = {
-        categories: { label: 'Category', nameColumn: 'name' },
-        generic_names: { label: 'Generic', nameColumn: 'name' }
-    };
-
-    document.addEventListener('click', async function (e) {
-        const trigger = e.target.closest('[data-quick-add-lookup]');
-        if (!trigger) return;
-        e.preventDefault();
-        const table = trigger.dataset.quickAddLookup;
-        const config = LOOKUP_TABLE_CONFIG[table] || { label: table, nameColumn: 'name' };
-        const name = prompt(`New ${config.label} name:`);
-        if (!name || !name.trim()) return;
-
-        try {
-            const { data, error } = await supabaseClient.from(table).insert([{ [config.nameColumn]: name.trim() }]).select();
-            if (error) throw error;
-
-            if (table === 'categories') await populateReorderFilters();
-
-            const targetId = trigger.dataset.quickAddTarget;
-            if (targetId) {
-                const targetSelect = document.getElementById(targetId);
-                if (targetSelect && data && data[0]) targetSelect.value = data[0].id;
-            }
-            showToast(`${config.label} "${name.trim()}" added`, 'success');
-        } catch (error) {
-            console.error(`Error adding ${table}:`, error);
-            alert(`❌ Error adding ${config.label}: ` + error.message);
-        }
-    });
-
-    // ============================================
-    // RENDER PO LINES
-    // ============================================
-
-    function renderPOLines() {
-        const tbody = document.getElementById('poLinesBody');
-        if (!tbody) return;
-        
-        if (state.poLines.length === 0) {
-            tbody.innerHTML = `<tr><td colspan="8" class="text-center text-muted" style="padding: 30px;">
-                <i class="fa-regular fa-plus" style="display: block; margin-bottom: 8px;"></i>
-                Add products using the search above or from Reorder Report
-            </td></tr>`;
-            updatePOLineCounts();
-            return;
-        }
-
-        const currency = document.getElementById('poCurrency')?.value || 'USD';
-        const symbol = currency === 'ZMW' ? 'ZK' : '$';
-        
-        tbody.innerHTML = state.poLines.map((line, index) => {
-            const totalQty = (line.pack_size || 1) * (line.order_quantity || 0);
-            return `
-            <tr>
-                <td>${index + 1}</td>
-                <td>
-                    <strong>${line.product_name || 'Unknown'}</strong>
-                    <br><span style="font-size: 0.7rem; color: #94a3b8;">${line.generic_name || ''}</span>
-                </td>
-                <td>${line.pack_size || 1}</td>
-                <td>
-                    <input type="number" class="form-control" value="${line.order_quantity || 0}" 
-                        style="width: 70px; padding: 4px 8px;" 
-                        onchange="updatePOLine(${index}, 'order_quantity', this.value)" min="1">
-                </td>
-                <td><strong>${totalQty}</strong></td>
-                <td>
-                    <input type="number" class="form-control" value="${line.purchase_rate || 0}"
-                        style="width: 100px; padding: 4px 8px;"
-                        onchange="updatePOLine(${index}, 'purchase_rate', this.value)" step="0.01" min="0">
-                    <span style="font-size: 0.65rem; color: #94a3b8;">(per pack)</span>
-                    ${(() => {
-                        // 🔥 ADDED: same live per-unit cost preview as the GRN screen,
-                        // shown as early as the PO stage so a mistyped rate can be
-                        // caught before it's ever received into stock.
-                        const packSize = line.pack_size || 1;
-                        const ratePerPack = line.purchase_rate || 0;
-                        if (!ratePerPack) return '';
-                        const exchangeRate = parseFloat(document.getElementById('poExchangeRate')?.value) || 1;
-                        const ratePerUnit = packSize > 0 ? ratePerPack / packSize : ratePerPack;
-                        const costPriceZmw = currency === 'USD' ? ratePerUnit * exchangeRate : ratePerUnit;
-                        return `<br><span style="font-size: 0.65rem; color: #64748b;">≈ ZK ${formatNumber(costPriceZmw)} / unit${packSize > 1 ? ` (pack of ${packSize})` : ''}</span>`;
-                    })()}
-                    ${line.last_purchase
-                        ? `<br><span style="font-size: 0.65rem; color: #059669;">Last: ${line.last_purchase.currency === 'ZMW' ? 'ZK' : '$'}${Number(line.last_purchase.rate).toFixed(2)} &middot; ${formatDate(line.last_purchase.date)}</span>`
-                        : ''}
-                </td>
-                <td style="text-align: right;">${symbol} ${formatNumber(line.total_amount || 0)}</td>
-                <td style="text-align: center;">
-                    <button class="action-btn" onclick="removePOLine(${index})" style="color: #ef4444;">
-                        <i class="fa-regular fa-trash-can"></i>
-                    </button>
-                </td>
-            </tr>
-            `;
-        }).join('');
-        
-        updatePOLineCounts();
-    }
-
-    function updatePOLineCounts() {
-        const totalItems = state.poLines.reduce((sum, l) => sum + (l.order_quantity || 0), 0);
-        document.getElementById('poLineCount').textContent = `${state.poLines.length} items`;
-        document.getElementById('poTotalItems').textContent = totalItems;
-    }
-
-    // ============================================
-    // RENDER GRN LINES - NO CANCELLATION COLUMN
-    // ============================================
-
-    function renderGRNLines(readonly = false) {
-        const tbody = document.getElementById('grnLinesBody');
-        if (!tbody) return;
-        
-        if (state.grnLines.length === 0) {
-            tbody.innerHTML = `<tr><td colspan="10" class="text-center text-muted" style="padding: 30px;">
-                <i class="fa-regular fa-box" style="display: block; margin-bottom: 8px;"></i>
-                No items to receive
-            </td></tr>`;
-            document.getElementById('grnLineCount').textContent = '0 items';
-            return;
-        }
-
-        const currency = state.currentGRNCurrency || 'USD';
-        const symbol = currency === 'ZMW' ? 'ZK' : '$';
-
-        tbody.innerHTML = state.grnLines.map((line, index) => {
-            const totalOrderedQty = (line.pack_size || 1) * (line.order_quantity || 0);
-            const remainingQty = (line.order_quantity || 0) - (line.received_quantity || 0) - (line.cancelled_quantity || 0);
-            const isFullyReceived = remainingQty <= 0 && (line.received_quantity || 0) > 0;
-            const isFullyCancelled = remainingQty <= 0 && (line.received_quantity || 0) === 0 && (line.cancelled_quantity || 0) > 0;
-            const isPartiallyProcessed = (line.received_quantity || 0) > 0 && (line.cancelled_quantity || 0) > 0;
-            const isCancelled = line.cancel_remaining || false;
-            
-            const isReceiving = (line.received_quantity || 0) > 0;
-            const isDisabled = readonly || isCancelled;
-            const expiryStyle = getExpiryUrgencyStyle(line.expiry_date);
-            
-            let rowClass = '';
-            if (isFullyReceived) rowClass = 'grn-row-received';
-            else if (isFullyCancelled) rowClass = 'grn-row-cancelled';
-            else if (isPartiallyProcessed) rowClass = 'grn-row-partial';
-            else if (isCancelled) rowClass = 'grn-row-cancelled';
-            
-            return `
-            <tr class="${rowClass}">
-                <td>${index + 1}</td>
-                <td>
-                    <strong>${line.product_name || 'Unknown'}</strong>
-                    <br><span style="font-size: 0.7rem; color: #94a3b8;">${line.generic_name || ''}</span>
-                    ${renderGRNStatusBadges(line, isCancelled, isFullyReceived, isFullyCancelled, isPartiallyProcessed)}
-                </td>
-                <td>${line.pack_size || 1}</td>
-                <td><strong>${totalOrderedQty}</strong></td>
-                <td>
-                    <input type="number" class="form-control" value="${line.received_quantity || 0}"
-                        style="width: 70px; padding: 4px 8px; ${isCancelled ? 'background: #fef2f2;' : ''}"
-                        onchange="updateGRNLine(${index}, 'received_quantity', this.value)"
-                        ${readonly || isCancelled ? 'disabled' : ''}
-                        min="0">
-                    ${line.received_quantity > 0 ? `<span style="font-size: 0.6rem; color: #059669;">${line.received_quantity} received</span>` : ''}
-                </td>
-                <td>
-                    <span style="font-weight: 600; color: ${remainingQty > 0 ? '#f59e0b' : (remainingQty < 0 ? '#2563eb' : '#059669')};">
-                        ${remainingQty > 0 ? remainingQty : (remainingQty < 0 ? `+${Math.abs(remainingQty)} over` : '✅')}
-                    </span>
-                    ${line.cancelled_quantity > 0 ? `<span style="font-size: 0.6rem; color: #dc2626; display: block;">${line.cancelled_quantity} cancelled</span>` : ''}
-                </td>
-                <td>
-                    <input type="number" class="form-control" value="${line.purchase_rate || 0}"
-                        style="width: 100px; padding: 4px 8px;"
-                        onchange="updateGRNLine(${index}, 'purchase_rate', this.value)"
-                        ${readonly ? 'disabled' : ''}
-                        step="0.01" min="0">
-                    ${(() => {
-                        // 🔥 ADDED: live per-UNIT cost preview, computed with the exact
-                        // same formula updateInventory() uses to set batches.cost_price
-                        // (rate / pack size, then converted to ZMW). Whoever is typing
-                        // the purchase rate sees immediately what that implies per
-                        // tablet/capsule/etc, so a mistyped rate (extra digit, wrong
-                        // decimal place, or entering a per-unit price into this
-                        // per-pack field) is obvious before the GRN is posted, instead
-                        // of silently becoming a wrong batches.cost_price later.
-                        const packSize = line.pack_size || 1;
-                        const ratePerPack = line.purchase_rate || 0;
-                        const ratePerUnit = packSize > 0 ? ratePerPack / packSize : ratePerPack;
-                        const costPriceZmw = currency === 'USD' ? ratePerUnit * (state.currentGRNExchangeRate || 1) : ratePerUnit;
-                        if (!ratePerPack) return '';
-                        return `<div style="font-size: 0.65rem; color: #64748b; margin-top: 2px;">≈ ZK ${formatNumber(costPriceZmw)} / unit${packSize > 1 ? ` (pack of ${packSize})` : ''}</div>`;
-                    })()}
-                </td>
-                <td>
-                    <input type="text" class="form-control" list="batchList-${index}" value="${line.batch_number || ''}" 
-                        style="width: 130px; padding: 4px 8px; ${isCancelled ? 'background: #fef2f2;' : ''}" 
-                        onchange="updateGRNLine(${index}, 'batch_number', this.value)"
-                        ${readonly || isCancelled ? 'disabled' : ''}
-                        placeholder="${isReceiving ? 'Batch # *' : 'Batch #'}" 
-                        ${isReceiving && !isCancelled ? 'required' : ''}>
-                    <datalist id="batchList-${index}">
-                        ${(state.existingBatchesByProduct[line.product_id] || []).map(b => `<option value="${b.batch_number}">`).join('')}
-                    </datalist>
-                </td>
-                <td>
-                    <input type="text" class="form-control" inputmode="numeric" value="${line.expiry_date || ''}" 
-                        style="width: 130px; padding: 4px 8px; border-color: ${expiryStyle.border}; background: ${isCancelled ? '#fef2f2' : expiryStyle.background};" 
-                        oninput="formatExpiryInput(this)"
-                        onchange="updateGRNLine(${index}, 'expiry_date', this.value)"
-                        ${readonly || isCancelled ? 'disabled' : ''}
-                        placeholder="YYYY-MM-DD"
-                        maxlength="10"
-                        ${isReceiving && !isCancelled ? 'required' : ''}>
-                </td>
-                <td style="text-align: center;">
-                    <input type="checkbox" ${(line.received_quantity || 0) > 0 ? 'checked' : ''} 
-                        onchange="toggleGRNLineReceive(${index}, this.checked)"
-                        ${readonly || isCancelled ? 'disabled' : ''}
-                        ${(line.cancelled_quantity || 0) > 0 ? 'disabled' : ''}
-                        title="Receive items">
-                </td>
-            </tr>
-            `;
-        }).join('');
-        
-        document.getElementById('grnLineCount').textContent = `${state.grnLines.length} items`;
-    }
-
-    function renderGRNStatusBadges(line, isCancelled, isFullyReceived, isFullyCancelled, isPartiallyProcessed) {
-        let html = '';
-        if (isCancelled) {
-            html += `<br><span style="font-size: 0.6rem; color: #dc2626;">⚠️ Cancelling: ${line.cancel_reason || 'No reason provided'}</span>`;
-        }
-        if (isFullyReceived && !isCancelled) {
-            html += `<br><span style="font-size: 0.6rem; color: #059669;">✅ Fully Received</span>`;
-        }
-        if (isFullyCancelled) {
-            html += `<br><span style="font-size: 0.6rem; color: #dc2626;">❌ Fully Cancelled</span>`;
-        }
-        if (isPartiallyProcessed) {
-            html += `<br><span style="font-size: 0.6rem; color: #f59e0b;">⚠️ Partially Received & Cancelled</span>`;
-        }
-        return html;
-    }
-
-    // ============================================
-    // MODAL FUNCTIONS
-    // ============================================
-
-    async function openNewPurchaseOrder() {
-        state.poLines = [];
-        state.isEditing = false;
-        // 🔥 FIX: "not taking the right rate from dashboard" -- sharedZmwPerUsd
-        // used to be fetched ONCE, when this whole module first loaded, and
-        // never again. If the shared exchange rate got corrected on the
-        // Dashboard afterwards (without a full page reload of Purchase),
-        // every "New Purchase Order" from then on kept quietly using the
-        // stale rate captured at page load. Re-fetching it here, every time
-        // this modal opens, means it's always current.
-        try {
-            sharedZmwPerUsd = await getSharedExchangeRate();
-        } catch (e) {
-            console.warn('Could not refresh shared exchange rate, using last known value:', e);
-        }
-        resetPOForm();
-        renderPOLines();
-        updatePOTotal();
-        enablePOFields(true);
-        showModal('poModal');
-    }
-
-    async function editPO(orderId) {
-        try {
-            const { data: order, error } = await supabaseClient
-                .from('purchase_orders')
-                .select(`
-                    *,
-                    purchase_order_lines (*)
-                `)
-                .eq('id', orderId)
-                .single();
-
-            if (error) throw error;
-
-            if (order.status === 'Cancelled' || order.status === 'Closed' || order.status === 'Goods Received') {
-                showToast('Completed orders cannot be edited', 'error');
-                return;
-            }
-
-            state.isEditing = true;
-            state.poLines = order.purchase_order_lines || [];
-            
-            populatePOForm(order);
-            renderPOLines();
-            updatePOTotal();
-            enablePOFields(true);
-            showModal('poModal');
-        } catch (error) {
-            console.error('Error loading PO for edit:', error);
-            showToast('Error loading PO: ' + error.message, 'error');
-        }
-    }
-
-    function resetPOForm() {
-        const editId = document.getElementById('editPOId');
-        const title = document.getElementById('poModalTitle');
-        const supplier = document.getElementById('poSupplier');
-        const currency = document.getElementById('poCurrency');
-        const rate = document.getElementById('poExchangeRate');
-        const delivery = document.getElementById('poDeliveryDate');
-        const notes = document.getElementById('poNotes');
-        const search = document.getElementById('poProductSearch');
-        const results = document.getElementById('poSearchResults');
-        
-        if (editId) editId.value = '';
-        if (title) title.innerHTML = '<i class="fa-solid fa-file-invoice"></i> New Purchase Order';
-        // 🔥 CHANGED: dispatch 'change' -- see the same fix's comment in
-        // populatePOForm() just above.
-        if (supplier) {
-            supplier.value = '';
-            supplier.dispatchEvent(new Event('change'));
-        }
-        if (currency) currency.value = 'USD';
-        // 🔒 LOCKED: always today's shared exchange rate -- the field is
-        // read-only now, so this is the only way it ever gets set for a
-        // new PO. Update the rate on the Dashboard if it needs changing.
-        if (rate) rate.value = sharedZmwPerUsd;
-        if (delivery) delivery.value = getFutureDate(14);
-        if (notes) notes.value = '';
-        if (search) search.value = '';
-        if (results) results.style.display = 'none';
-        
-        document.getElementById('cancelPOBtn').style.display = 'none';
-    }
-
-    function populatePOForm(order) {
-        const editId = document.getElementById('editPOId');
-        const title = document.getElementById('poModalTitle');
-        const supplier = document.getElementById('poSupplier');
-        const currency = document.getElementById('poCurrency');
-        const rate = document.getElementById('poExchangeRate');
-        const delivery = document.getElementById('poDeliveryDate');
-        const notes = document.getElementById('poNotes');
-        const cancelBtn = document.getElementById('cancelPOBtn');
-        
-        if (editId) editId.value = order.id;
-        if (title) title.innerHTML = `<i class="fa-solid fa-pen-to-square"></i> Edit PO: ${order.po_number}`;
-        // 🔥 CHANGED: dispatch 'change' after setting .value directly --
-        // that's what the searchable Supplier dropdown's sync listener
-        // (initSearchableSelect()) needs to update its visible search
-        // text to match; without this, editing a PO left the search box
-        // showing whatever it last had (or blank) instead of this PO's
-        // actual supplier.
-        if (supplier) {
-            supplier.value = order.supplier_id || '';
-            supplier.dispatchEvent(new Event('change'));
-        }
-        if (currency) currency.value = order.currency || 'USD';
-        // 🔒 LOCKED: shows the rate this PO was actually created with
-        // (read-only) -- editing other fields on an existing PO no longer
-        // re-prices it to today's rate.
-        if (rate) rate.value = order.exchange_rate || 1;
-        if (delivery) delivery.value = order.expected_delivery_date || '';
-        if (notes) notes.value = order.notes || '';
-        
-        // Only show cancel button if no items received and not cancelled
-        if (order.total_received_quantity === 0 && order.total_cancelled_quantity === 0 && 
-            order.status !== 'Cancelled' && order.status !== 'Closed' && order.status !== 'Goods Received') {
-            cancelBtn.style.display = 'inline-flex';
-        } else {
-            cancelBtn.style.display = 'none';
-        }
-    }
-
-    function showModal(modalId) {
-        const modal = document.getElementById(modalId);
-        if (modal) modal.classList.add('show');
-    }
-
-    function closeModal(modalId) {
-        const modal = document.getElementById(modalId);
-        if (modal) modal.classList.remove('show');
-    }
-
-    function enablePOFields(enabled) {
-        const fields = ['poSupplier', 'poCurrency', 'poExchangeRate', 'poDeliveryDate', 'poProductSearch', 'poNotes'];
-        fields.forEach(id => {
-            const el = document.getElementById(id);
-            if (el) el.disabled = !enabled;
-        });
-        const searchBtn = document.querySelector('.search-input-group .btn');
-        if (searchBtn) searchBtn.disabled = !enabled;
-    }
-
-    // ============================================
-    // UPDATE PO LINE
-    // ============================================
-
-    function updatePOLine(index, field, value) {
-        const line = state.poLines[index];
-        if (!line) return;
-        
-        if (field === 'order_quantity') {
-            line.order_quantity = parseInt(value) || 0;
-        } else if (field === 'purchase_rate') {
-            line.purchase_rate = parseFloat(value) || 0;
-        }
-        line.total_amount = (line.order_quantity || 0) * (line.purchase_rate || 0);
-        renderPOLines();
-        updatePOTotal();
-    }
-
-    function removePOLine(index) {
-        state.poLines.splice(index, 1);
-        renderPOLines();
-        updatePOTotal();
-    }
-
-    function updatePOTotal() {
-        const total = state.poLines.reduce((sum, line) => sum + (line.total_amount || 0), 0);
-        const currency = document.getElementById('poCurrency')?.value || 'USD';
-        const rate = parseFloat(document.getElementById('poExchangeRate')?.value) || 1;
-        const symbol = currency === 'ZMW' ? 'ZK' : '$';
-        
-        const grandTotal = document.getElementById('poGrandTotal');
-        if (grandTotal) grandTotal.textContent = `${symbol} ${formatNumber(total)}`;
-        
-        const zmwDisplay = document.getElementById('poZMWDisplay');
-        const zmwTotal = document.getElementById('poZMWTotal');
-        if (currency === 'USD' && rate > 0 && zmwDisplay && zmwTotal) {
-            zmwDisplay.style.display = 'flex';
-            zmwTotal.textContent = `ZK ${formatNumber(total * rate)}`;
-        } else if (zmwDisplay) {
-            zmwDisplay.style.display = 'none';
-        }
-    }
-
-    // ============================================
-    // PO ACTIONS
-    // ============================================
-
-    async function savePODraft() {
-        await savePO('Draft');
-    }
-
-    async function submitPOForApproval() {
-        await savePO('Pending Approval');
-    }
-
-    async function approvePO() {
-        await savePO('Approved');
-    }
-
-    // ============================================
-    // 🔥 ADDED: AUTH-RETRY ON WRITE
-    // ============================================
-    // Same pattern already used elsewhere in the app (Retail POS's label
-    // printing, the Dashboard's notice board, Payments' financial writes)
-    // for a stale/expired login session getting rejected by RLS on a
-    // write -- refresh the session once and retry the SAME write once
-    // before giving up, instead of failing outright and forcing a
-    // half-entered Purchase Order to be re-typed from scratch.
-    async function withAuthRetry(operationFn) {
-        let result = await operationFn();
-        const err = result?.error;
-        const looksLikeAuthRejection = err && (
-            err.code === '42501' ||
-            err.code === 'PGRST301' ||
-            /row-level security|jwt|permission denied/i.test(err.message || '')
-        );
-        if (looksLikeAuthRejection) {
-            console.warn('⚠️ Write rejected (looks like a stale session) -- refreshing session and retrying once:', err.message);
-            try { await supabaseClient.auth.refreshSession(); } catch (refreshError) { console.error('Session refresh failed:', refreshError); }
-            result = await operationFn();
-        }
-        return result;
-    }
-
-    async function savePO(status) {
-        if (!validatePO()) return;
-        
-        const poData = getPOData();
-        if (!poData) return;
-        
-        poData.status = status;
-        
-        try {
-            const isEditing = document.getElementById('editPOId')?.value !== '';
-            const poId = isEditing ? document.getElementById('editPOId').value : null;
-            
-            const totalQty = poData.lines.reduce((sum, l) => sum + (l.order_quantity || 0), 0);
-            
-            if (isEditing && poId) {
-                await updateExistingPO(poId, poData, totalQty);
-                showToast('Purchase order updated successfully!', 'success');
-            } else {
-                await createNewPO(poData, totalQty);
-                showToast(`Purchase order ${poData.po_number} created successfully!`, 'success');
-            }
-
-            closeModal('poModal');
-            await loadPurchaseOrders();
-        } catch (error) {
-            console.error('Error saving PO:', error);
-            showToast('Error saving PO: ' + error.message, 'error');
-        }
-    }
-
-    async function updateExistingPO(poId, poData, totalQty) {
-        // 🔥 ADDED: capture the PO's status before this update overwrites
-        // it, so we can tell whether this save is the moment it BECOMES
-        // Approved (e.g. Pending Approval -> Approved) vs. just re-saving
-        // an already-approved PO or any other transition -- see
-        // promptSendPOIfApproved() below.
-        const previousStatus = (state.orders || []).find(o => o.id === poId)?.status || null;
-
-        // Calculate remaining = total - received - cancelled
-        const { data: existingLines } = await supabaseClient
-            .from('purchase_order_lines')
-            .select('received_quantity, cancelled_quantity')
-            .eq('purchase_order_id', poId);
-        
-        let totalReceived = 0;
-        let totalCancelled = 0;
-        if (existingLines) {
-            totalReceived = existingLines.reduce((sum, l) => sum + (l.received_quantity || 0), 0);
-            totalCancelled = existingLines.reduce((sum, l) => sum + (l.cancelled_quantity || 0), 0);
-        }
-        
-        const remainingQty = totalQty - totalReceived - totalCancelled;
-
-        const { error } = await withAuthRetry(() => supabaseClient
-            .from('purchase_orders')
-            .update({
-                supplier_id: poData.supplier_id,
-                currency: poData.currency,
-                exchange_rate: poData.exchange_rate,
-                expected_delivery_date: poData.expected_delivery_date,
-                status: poData.status,
-                notes: poData.notes,
-                total_amount: poData.total_amount,
-                total_quantity: totalQty,
-                remaining_quantity: Math.max(0, remainingQty),
-                updated_at: new Date().toISOString()
-            })
-            .eq('id', poId));
-
-        if (error) throw error;
-
-        await withAuthRetry(() => supabaseClient
-            .from('purchase_order_lines')
-            .delete()
-            .eq('purchase_order_id', poId));
-
-        if (poData.lines.length > 0) {
-            await insertPOLines(poId, poData.lines, poData.currency);
-        }
-
-        // 🔥 ADDED: this is the actual "PO approved" moment for the normal
-        // workflow (Draft -> Pending Approval -> Approved) -- prompt to
-        // send the PO document only when this save is what pushed the
-        // status into Approved.
-        promptSendPOIfApproved(poData, previousStatus, poId);
-    }
-
-    // ============================================
-    // 🔥 CHANGED: WHATSAPP SUPPLIER PO DOCUMENT -- fires on APPROVAL, not on
-    // PO creation, and now sends the ACTUAL PO as a PDF (not just a text
-    // notification), after the approver confirms the PO number in a popup.
-    // ============================================
-    // Previously this fired the moment ANY new PO was saved, even a Draft
-    // or one only "Submitted for Approval" -- so a supplier could be
-    // notified about an order that wasn't actually confirmed yet, and an
-    // existing PO that later got approved (the normal Draft -> Pending
-    // Approval -> Approved flow) never notified the supplier at all. That
-    // was also just a plain text message using a placeholder template
-    // ('po_approved_supplier_notice') that was never actually approved in
-    // Meta, so it never really sent anything.
-    //
-    // Fixed + upgraded: promptSendPOIfApproved() below fires only at the
-    // moment a PO's status becomes 'Approved' -- whether that's a
-    // brand-new PO saved directly as Approved, or an existing PO
-    // transitioning into Approved from some other status -- and, instead
-    // of silently firing off a text message, opens a confirmation popup
-    // showing the PO number that's about to go out. The approver can edit
-    // it right there (fixing a typo before it reaches the supplier) or
-    // just confirm it, and only then is the PDF built and sent via the
-    // send-whatsapp-message Edge Function's 'send_document' action, using
-    // the APPROVED 'po_created_supplier_notice' Document-header template
-    // (confirmed Active in Meta WhatsApp Manager).
-    const WHATSAPP_TEMPLATES = {
-        // Document-header template, 4 body vars: supplier name / po_number /
-        // date / amount, fixed footer "PLEASE CONSIDER FREE QTY AS PER THE
-        // DISCUSSION". Confirmed APPROVED in Meta.
-        PO_DOCUMENT: 'po_created_supplier_notice'
-    };
-
-    async function ensureJsPDFLoaded() {
-        if (window.jspdf && window.jspdf.jsPDF) return;
-        await new Promise((resolve, reject) => {
-            const s = document.createElement('script');
-            s.src = 'https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.2/jspdf.umd.min.js';
-            s.onload = resolve;
-            s.onerror = () => reject(new Error('Could not load the PDF library (jsPDF) -- check your internet connection.'));
-            document.head.appendChild(s);
-        });
-        await new Promise((resolve, reject) => {
-            const s = document.createElement('script');
-            s.src = 'https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js';
-            s.onload = resolve;
-            s.onerror = () => reject(new Error('Could not load the PDF table library (jspdf-autotable) -- check your internet connection.'));
-            document.head.appendChild(s);
-        });
-    }
-
-    // Builds the same document generatePOPrint() shows on screen, as a real
-    // PDF, and returns it as base64 (no data: prefix) ready for the Edge
-    // Function to upload to WhatsApp. `order` must have `suppliers:(name,phone)`
-    // and `purchase_order_lines` embedded (see promptSendPOIfApproved below).
-    function generatePOPDFBase64(order) {
-        const { jsPDF } = window.jspdf;
-        const doc = new jsPDF();
-        const symbol = order.currency === 'ZMW' ? 'ZK' : '$';
-        const lines = order.purchase_order_lines || [];
-
-        doc.setFontSize(14);
-        doc.text(String(companySettings.company_name || 'Griffins Medicals Limited'), 14, 15);
-        doc.setFontSize(9);
-        doc.setTextColor(90);
-        doc.text(`${companySettings.address || ''}   Phone: ${companySettings.phone || ''}`, 14, 21);
-        doc.text(`ZAMRA #: ${companySettings.zamra_number || ''}`, 14, 26);
-        doc.setDrawColor(51);
-        doc.line(14, 30, 196, 30);
-
-        doc.setTextColor(15, 23, 42);
-        doc.setFontSize(13);
-        doc.text('PURCHASE ORDER', 105, 39, { align: 'center' });
-
-        doc.setFontSize(10);
-        let y = 47;
-        const infoRows = [
-            ['PO Number:', order.po_number || ''],
-            ['Supplier:', order.suppliers?.name || 'Unknown'],
-            ['Currency:', order.currency || 'USD'],
-            ['Exchange Rate:', String(order.exchange_rate || 1)],
-            ['Expected Delivery:', formatDate(order.expected_delivery_date) || 'TBC'],
-            ['Status:', order.status || 'Draft'],
-        ];
-        infoRows.forEach(([label, value]) => {
-            doc.setFont(undefined, 'bold');
-            doc.text(label, 14, y);
-            doc.setFont(undefined, 'normal');
-            doc.text(String(value), 55, y);
-            y += 6;
-        });
-
-        const tableRows = lines.map((line, idx) => [
-            String(idx + 1),
-            line.product_name || '',
-            String(line.pack_size || 1),
-            String(line.order_quantity || 0),
-            `${symbol} ${formatNumber(line.purchase_rate)}`,
-            `${symbol} ${formatNumber(line.total_amount)}`,
-        ]);
-
-        doc.autoTable({
-            startY: y + 4,
-            head: [['#', 'Product', 'Pack Size', 'Qty', 'Rate', 'Total']],
-            body: tableRows,
-            styles: { fontSize: 8, cellPadding: 2 },
-            headStyles: { fillColor: [30, 58, 95], textColor: 255 },
-            foot: [['', '', '', '', 'Grand Total:', `${symbol} ${formatNumber(order.total_amount || 0)}`]],
-            footStyles: { fontStyle: 'bold', fillColor: [248, 250, 252], textColor: [15, 23, 42] },
-        });
-
-        const footerY = (doc.lastAutoTable?.finalY || y + 20) + 14;
-        doc.setFontSize(8);
-        doc.setTextColor(100);
-        doc.text('This is a computer-generated purchase order.', 105, footerY, { align: 'center' });
-        doc.text(`Generated on: ${new Date().toLocaleString()}`, 105, footerY + 5, { align: 'center' });
-
-        // datauristring looks like "data:application/pdf;filename=...;base64,JVBERi0x..."
-        // -- only the part after the last comma is the actual base64 payload.
-        const dataUri = doc.output('datauristring');
-        return dataUri.substring(dataUri.indexOf(',') + 1);
-    }
-
-    // Low-level: given a full order row (with suppliers + lines embedded)
-    // and the exact po_number to print/send (may differ from order.po_number
-    // if the approver just edited it in the confirm popup), builds the PDF
-    // and sends it via the send-whatsapp-message Edge Function. Never
-    // throws -- returns { ok, message } so callers can toast the result.
-    async function sendPOPdfToSupplier(order, poNumberToSend) {
-        const phone = order.suppliers?.phone;
-        if (!phone) {
-            return { ok: false, message: 'This supplier has no phone number on file -- add one in Suppliers before sending.' };
-        }
-        try {
-            await ensureJsPDFLoaded();
-            const orderForPdf = { ...order, po_number: poNumberToSend };
-            const pdfBase64 = generatePOPDFBase64(orderForPdf);
-            const symbol = order.currency === 'ZMW' ? 'ZK' : '$';
-
-            const { data: sendResult, error: sendError } = await supabaseClient.functions.invoke('send-whatsapp-message', {
-                body: {
-                    action: 'send_document',
-                    to: phone,
-                    template_name: WHATSAPP_TEMPLATES.PO_DOCUMENT,
-                    filename: `${poNumberToSend || 'PurchaseOrder'}.pdf`,
-                    pdf_base64: pdfBase64,
-                    body_params: [
-                        order.suppliers?.name || '',
-                        poNumberToSend || '',
-                        formatDate(order.created_at) || new Date().toLocaleDateString(),
-                        `${symbol} ${formatNumber(order.total_amount || 0)}`
-                    ]
-                }
-            });
-
-            if (sendError || (sendResult && sendResult.success === false)) {
-                console.error('WhatsApp PO send failed:', sendError || sendResult);
-                return {
-                    ok: false,
-                    message: 'Could not send the PO on WhatsApp -- this usually means the "' + WHATSAPP_TEMPLATES.PO_DOCUMENT +
-                        '" template isn\'t approved/active in Meta right now. See console for the exact error.'
-                };
-            }
-            return { ok: true, message: `Purchase Order ${poNumberToSend} sent to ${order.suppliers?.name || 'the supplier'} on WhatsApp!` };
-        } catch (err) {
-            console.error('Error sending PO via WhatsApp:', err);
-            return { ok: false, message: 'Error sending PO via WhatsApp: ' + err.message };
-        }
-    }
-
-    // 🔥 ADDED: shared gate used by both createNewPO() and
-    // updateExistingPO() -- only prompts to send the PO document the moment
-    // a PO's status BECOMES 'Approved' (previousStatus is null/undefined
-    // for a brand-new PO, so saving one directly as Approved also counts).
-    // Opens the confirm-PO-number popup rather than sending immediately.
-    function promptSendPOIfApproved(poData, previousStatus, poId) {
-        if (poData.status !== 'Approved' || previousStatus === 'Approved') return;
-        if (!poId) return;
-        const supplierRecord = (state.suppliers || []).find(s => s.id === poData.supplier_id);
-        if (!supplierRecord) return;
-        if (!supplierRecord.phone) {
-            console.log('WhatsApp: this supplier has no phone number on file -- skipping PO document send.');
-            return;
-        }
-        showPOSendConfirmModal(poId, poData.po_number || '', supplierRecord.name || '');
-    }
-
-    // 🔥 ADDED: "ask for number to change or not, then send" -- popup shown
-    // the moment a PO becomes Approved, before anything goes out on
-    // WhatsApp. Lets the approver confirm the PO number that will be
-    // printed on the PDF and sent to the supplier, or correct it on the
-    // spot, before the send fires. Choosing "Don't Send" just closes the
-    // popup -- the PO stays Approved, nothing is sent.
-    function showPOSendConfirmModal(poId, currentPoNumber, supplierName) {
-        const existing = document.getElementById('poSendConfirmModal');
-        if (existing) existing.remove();
-
-        const overlay = document.createElement('div');
-        overlay.id = 'poSendConfirmModal';
-        overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(15,23,42,0.6);backdrop-filter:blur(4px);z-index:1300;display:flex;justify-content:center;align-items:center;';
-        overlay.innerHTML = `
-            <div class="modal-content-box" style="background:white;padding:28px;border-radius:12px;width:90%;max-width:440px;box-shadow:0 20px 50px rgba(0,0,0,0.5);">
-                <div style="text-align:center;margin-bottom:14px;"><i class="fa-brands fa-whatsapp" style="font-size:2.6rem;color:#25D366;"></i></div>
-                <h3 style="margin:0 0 8px 0;color:#0f172a;text-align:center;">Send Purchase Order to Supplier?</h3>
-                <p style="margin:0 0 16px 0;color:#64748b;font-size:0.88rem;text-align:center;">
-                    This PO has been approved. It will be sent to <strong>${supplierName || 'the supplier'}</strong> on WhatsApp as a PDF.
-                    Confirm the PO number below, or change it, before sending.
-                </p>
-                <label style="display:block;font-size:0.78rem;font-weight:600;color:#334155;margin-bottom:6px;">PO Number</label>
-                <input type="text" id="poSendConfirmNumberInput" value="${(currentPoNumber || '').replace(/"/g, '&quot;')}"
-                    style="width:100%;box-sizing:border-box;padding:9px 12px;border:1px solid #cbd5e1;border-radius:6px;font-size:0.95rem;margin-bottom:18px;">
-                <div style="display:flex;gap:10px;justify-content:flex-end;">
-                    <button id="poSendConfirmSkipBtn" style="background:#f1f5f9;color:#334155;border:none;padding:10px 18px;border-radius:6px;cursor:pointer;">
-                        Don't Send
-                    </button>
-                    <button id="poSendConfirmSendBtn" style="background:#25D366;color:white;border:none;padding:10px 18px;border-radius:6px;cursor:pointer;">
-                        <i class="fa-brands fa-whatsapp"></i> Send
-                    </button>
-                </div>
-            </div>
-        `;
-        document.body.appendChild(overlay);
-        overlay.querySelector('.modal-content-box').addEventListener('click', e => e.stopPropagation());
-        overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
-        document.getElementById('poSendConfirmSkipBtn').addEventListener('click', () => overlay.remove());
-
-        document.getElementById('poSendConfirmSendBtn').addEventListener('click', async () => {
-            const input = document.getElementById('poSendConfirmNumberInput');
-            const numberToSend = (input?.value || '').trim();
-            if (!numberToSend) {
-                showToast('PO number cannot be empty', 'error');
-                return;
-            }
-
-            const sendBtn = document.getElementById('poSendConfirmSendBtn');
-            const skipBtn = document.getElementById('poSendConfirmSkipBtn');
-            const originalHtml = sendBtn.innerHTML;
-            sendBtn.disabled = true;
-            skipBtn.disabled = true;
-            sendBtn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Sending...';
-
-            try {
-                // If the approver changed the number, save it on the PO
-                // record too, so what's stored matches what was sent.
-                if (numberToSend !== currentPoNumber) {
-                    const { error: updateError } = await withAuthRetry(() => supabaseClient
-                        .from('purchase_orders')
-                        .update({ po_number: numberToSend })
-                        .eq('id', poId));
-                    if (updateError) {
-                        console.error('Could not update PO number before sending:', updateError);
-                        showToast('Could not save the edited PO number -- sending with the original number instead.', 'warning');
-                    } else {
-                        const localOrder = (state.orders || []).find(o => o.id === poId);
-                        if (localOrder) localOrder.po_number = numberToSend;
-                    }
-                }
-
-                const { data: order, error: fetchError } = await supabaseClient
-                    .from('purchase_orders')
-                    .select(`*, suppliers:supplier_id (name, phone), purchase_order_lines (*)`)
-                    .eq('id', poId)
-                    .single();
-                if (fetchError) throw fetchError;
-
-                const result = await sendPOPdfToSupplier(order, numberToSend);
-                showToast(result.message, result.ok ? 'success' : 'error');
-                overlay.remove();
-            } catch (err) {
-                console.error('Error sending PO via WhatsApp:', err);
-                showToast('Error sending PO via WhatsApp: ' + err.message, 'error');
-                sendBtn.disabled = false;
-                skipBtn.disabled = false;
-                sendBtn.innerHTML = originalHtml;
-            }
-        });
-    }
-
-    async function createNewPO(poData, totalQty) {
-        const { data, error } = await withAuthRetry(() => supabaseClient
-            .from('purchase_orders')
-            .insert([{
-                po_number: poData.po_number,
-                supplier_id: poData.supplier_id,
-                currency: poData.currency,
-                exchange_rate: poData.exchange_rate,
-                expected_delivery_date: poData.expected_delivery_date,
-                status: poData.status,
-                notes: poData.notes,
-                total_amount: poData.total_amount,
-                total_quantity: totalQty,
-                remaining_quantity: totalQty,
-                total_received_quantity: 0,
-                total_received_amount: 0,
-                total_cancelled_quantity: 0,
-                total_cancelled_amount: 0,
-                remaining_amount: poData.total_amount,
-                fully_received: false
-            }])
-            .select());
-
-        if (error) throw error;
-
-        if (data && data.length > 0 && poData.lines.length > 0) {
-            await insertPOLines(data[0].id, poData.lines, poData.currency);
-        }
-
-        // 🔥 CHANGED: only prompt to send if this brand-new PO was saved
-        // directly as Approved (skipping Draft/Pending Approval) -- see
-        // promptSendPOIfApproved()'s comment above.
-        if (data && data.length > 0) {
-            promptSendPOIfApproved(poData, null, data[0].id);
-        }
-    }
-
-    async function insertPOLines(poId, lines, currency) {
-        const linesToInsert = lines.map(line => ({
-            purchase_order_id: poId,
-            product_id: line.product_id,
-            product_name: line.product_name,
-            generic_name: line.generic_name || '',
-            pack_size: line.pack_size || 1,
-            order_quantity: line.order_quantity,
-            purchase_rate: line.purchase_rate,
-            total_amount: line.total_amount,
-            currency: currency,
-            received_quantity: 0,
-            remaining_quantity: line.order_quantity,
-            fully_received: false,
-            cancelled_quantity: 0
-        }));
-
-        const { error: lineError } = await withAuthRetry(() => supabaseClient
-            .from('purchase_order_lines')
-            .insert(linesToInsert));
-
-        if (lineError) throw lineError;
-    }
-
-    function getPOData() {
-        const supplierId = document.getElementById('poSupplier')?.value;
-        if (!supplierId) {
-            showToast('Please select a supplier', 'error');
-            return null;
-        }
-
-        const currency = document.getElementById('poCurrency')?.value || 'USD';
-        const exchangeRate = parseFloat(document.getElementById('poExchangeRate')?.value) || 1;
-        const total = state.poLines.reduce((sum, line) => sum + (line.total_amount || 0), 0);
-        
-        const isEditing = document.getElementById('editPOId')?.value !== '';
-        const poNumber = isEditing ? 
-            (state.orders.find(o => o.id === document.getElementById('editPOId').value)?.po_number || generatePONumber()) :
-            generatePONumber();
-
-        return {
-            po_number: poNumber,
-            supplier_id: supplierId,
-            currency: currency,
-            exchange_rate: exchangeRate,
-            expected_delivery_date: document.getElementById('poDeliveryDate')?.value || null,
-            notes: document.getElementById('poNotes')?.value || '',
-            total_amount: total,
-            lines: state.poLines.map(l => ({
-                product_id: l.product_id,
-                product_name: l.product_name,
-                generic_name: l.generic_name || '',
-                pack_size: l.pack_size || 1,
-                order_quantity: l.order_quantity || 0,
-                purchase_rate: l.purchase_rate || 0,
-                total_amount: l.total_amount || 0
-            }))
-        };
-    }
-
-    function generatePONumber() {
-        return `${companySettings.purchase_order_prefix}-${new Date().getFullYear()}-${String(Math.floor(Math.random() * 10000)).padStart(4, '0')}`;
-    }
-
-    function validatePO() {
-        if (!document.getElementById('poSupplier')?.value) {
-            showToast('Please select a supplier', 'error');
-            return false;
-        }
-        if (state.poLines.length === 0) {
-            showToast('Please add at least one product', 'error');
-            return false;
-        }
-        const invalidLines = state.poLines.filter(l => (l.order_quantity || 0) <= 0 || (l.purchase_rate || 0) <= 0);
-        if (invalidLines.length > 0) {
-            showToast('Please ensure all line items have valid quantity and rate', 'error');
-            return false;
-        }
-        return true;
-    }
-
-    // ============================================
-    // CANCEL FULL PO FUNCTIONS
-    // ============================================
-
-    function openCancelPOFromModal() {
-        const poId = document.getElementById('editPOId').value;
-        if (!poId) {
-            showToast('No PO selected to cancel', 'error');
-            return;
-        }
-        closeModal('poModal');
-        setTimeout(() => {
-            openCancelPO(poId);
-        }, 300);
-    }
-
-    function openCancelPO(orderId) {
-        const order = state.orders.find(o => o.id === orderId);
-        if (!order) {
-            showToast('Order not found', 'error');
-            return;
-        }
-
-        if (order.status === 'Cancelled') {
-            showToast('PO is already cancelled', 'warning');
-            return;
-        }
-
-        if (order.status === 'Closed' || order.status === 'Goods Received') {
-            showToast('PO is already completed', 'warning');
-            return;
-        }
-
-        // Check if any items were received
-        const hasReceived = (order.total_received_quantity || 0) > 0;
-
-        let cancelReceivedEl = document.getElementById('cancelAlreadyReceived');
-        if (!cancelReceivedEl) {
-            const cancelPONumber = document.getElementById('cancelPONumber');
-            if (cancelPONumber) {
-                const parentDiv = cancelPONumber.closest('.modal-body');
-                if (parentDiv) {
-                    const infoDiv = parentDiv.querySelector('div[style*="background: #f8fafc"]');
-                    if (infoDiv) {
-                        const receivedP = document.createElement('p');
-                        receivedP.style.cssText = 'margin: 5px 0 0 0; font-size: 0.9rem;';
-                        receivedP.innerHTML = '<strong>Already Received:</strong> <span id="cancelAlreadyReceived">0</span>';
-                        infoDiv.appendChild(receivedP);
-                    }
-                }
-            }
-        }
-
-        document.getElementById('cancelPONumber').textContent = order.po_number || 'N/A';
-        document.getElementById('cancelPOSupplier').textContent = order.suppliers?.name || 'Unknown';
-        const receivedEl = document.getElementById('cancelAlreadyReceived');
-        if (receivedEl) receivedEl.textContent = order.total_received_quantity || 0;
-        
-        // Update cancel message based on scenario
-        const cancelMessage = document.getElementById('cancelPOModal').querySelector('p');
-        if (cancelMessage) {
-            if (hasReceived) {
-                cancelMessage.textContent = 'This will cancel the remaining quantity only. Received items will be kept and a payable will be created.';
-                cancelMessage.style.color = '#dc2626';
-            } else {
-                cancelMessage.textContent = 'This action cannot be undone. All items will be marked as cancelled.';
-                cancelMessage.style.color = '#64748b';
-            }
-        }
-        
-        document.getElementById('cancelPOModal').classList.add('show');
-        document.getElementById('cancelPOModal').dataset.orderId = orderId;
-    }
-
-    async function confirmCancelPO() {
-        const poId = document.getElementById('cancelPOModal').dataset.orderId;
-        let reason = document.getElementById('cancelReason').value;
-        const reasonOther = document.getElementById('cancelReasonOther').value.trim();
-
-        if (reason === 'Other' && !reasonOther) {
-            showToast('Please specify the cancellation reason', 'error');
-            return;
-        }
-
-        if (reason === 'Other') {
-            reason = reasonOther;
-        }
-
-        try {
-            const { data: order, error: orderError } = await supabaseClient
-                .from('purchase_orders')
-                .select('*')
-                .eq('id', poId)
-                .single();
-
-            if (orderError) throw orderError;
-
-            const hasReceived = (order.total_received_quantity || 0) > 0;
-
-            // Determine new status per workflow
-            let newStatus;
-            if (hasReceived) {
-                // Scenario 2: Partial receipt - mark as Closed
-                newStatus = 'Closed';
-            } else {
-                // Scenario 1: Nothing received - mark as Cancelled
-                newStatus = 'Cancelled';
-            }
-
-            // Update PO header
-            const { error: updateError } = await supabaseClient
-                .from('purchase_orders')
-                .update({
-                    status: newStatus,
-                    cancelled_at: new Date().toISOString(),
-                    cancellation_reason: reason,
-                    updated_at: new Date().toISOString(),
-                    fully_received: hasReceived ? true : false
-                })
-                .eq('id', poId);
-
-            if (updateError) throw updateError;
-
-            // Update PO lines - cancel remaining quantities only
-            const { data: lines, error: linesError } = await supabaseClient
-                .from('purchase_order_lines')
-                .select('id, order_quantity, received_quantity, cancelled_quantity')
-                .eq('purchase_order_id', poId);
-
-            if (linesError) throw linesError;
-
-            for (const line of lines) {
-                const currentReceived = line.received_quantity || 0;
-                const currentOrdered = line.order_quantity || 0;
-                const currentCancelled = line.cancelled_quantity || 0;
-                // Only cancel the remaining quantity
-                const remainingToCancel = Math.max(0, currentOrdered - currentReceived - currentCancelled);
-                
-                let newCancelled = currentCancelled + remainingToCancel;
-                let newRemaining = currentOrdered - currentReceived - newCancelled;
-
-                await supabaseClient
-                    .from('purchase_order_lines')
-                    .update({
-                        cancelled_quantity: newCancelled,
-                        remaining_quantity: Math.max(0, newRemaining),
-                        fully_received: newRemaining <= 0 && currentReceived > 0,
-                        cancellation_reason: reason,
-                        cancelled_at: new Date().toISOString()
-                    })
-                    .eq('id', line.id);
-            }
-
-            // If there were received items, create supplier payable
-            if (hasReceived && order.total_received_amount > 0) {
-                const { data: existingPayable } = await supabaseClient
-                    .from('supplier_payables')
-                    .select('id')
-                    .eq('po_id', poId)
-                    .maybeSingle();
-
-                if (!existingPayable) {
-                    const payableData = {
-                        supplier_id: order.supplier_id,
-                        po_id: poId,
-                        invoice_number: `CLOSED-${order.po_number}`,
-                        invoice_date: new Date().toISOString().split('T')[0],
-                        due_date: new Date(new Date().setDate(new Date().getDate() + 30)).toISOString().split('T')[0],
-                        total_amount: order.total_received_amount || 0,
-                        amount_paid: 0,
-                        amount_remaining: order.total_received_amount || 0,
-                        currency: order.currency || 'USD',
-                        exchange_rate: order.exchange_rate || 1,
-                        status: 'Pending',
-                        payment_terms: 'Net 30',
-                        notes: `PO cancelled. Received amount: ${order.total_received_amount}`
-                    };
-
-                    const { error: payableError } = await supabaseClient
-                        .from('supplier_payables')
-                        .insert([payableData]);
-
-                    if (payableError) {
-                        console.error('Error creating payable for received items:', payableError);
-                    } else {
-                        showToast(`✅ Payable created for received amount: ${order.currency} ${formatNumber(order.total_received_amount)}`, 'success');
-                    }
-                }
-            }
-
-            const statusMessage = hasReceived 
-                ? `PO closed with ${order.total_received_quantity} items received. Payable created for received amount.`
-                : 'PO cancelled successfully. No items received.';
-
-            showToast(statusMessage, 'success');
-            closeModal('cancelPOModal');
-            await loadPurchaseOrders();
-
-        } catch (error) {
-            console.error('Error cancelling PO:', error);
-            showToast('Error cancelling PO: ' + error.message, 'error');
-        }
-    }
-
-    // ============================================
-    // CANCEL REMAINING PO FUNCTIONS - NEW
-    // ============================================
-
-    function openCancelRemainingPO(orderId) {
-        const order = state.orders.find(o => o.id === orderId);
-        if (!order) {
-            showToast('Order not found', 'error');
-            return;
-        }
-
-        // Calculate remaining quantities
-        const remainingQty = (order.total_quantity || 0) - (order.total_received_quantity || 0) - (order.total_cancelled_quantity || 0);
-        
-        if (remainingQty <= 0) {
-            showToast('No remaining items to cancel', 'warning');
-            return;
-        }
-
-        // Close any open modals first
-        closeModal('poModal');
-        closeModal('grnModal');
-        
-        // Populate the cancel remaining modal
-        document.getElementById('cancelRemainingPONumber').textContent = order.po_number || 'N/A';
-        document.getElementById('cancelRemainingPOSupplier').textContent = order.suppliers?.name || 'Unknown';
-        document.getElementById('cancelRemainingTotalQty').textContent = order.total_quantity || 0;
-        document.getElementById('cancelRemainingReceivedQty').textContent = order.total_received_quantity || 0;
-        document.getElementById('cancelRemainingCancelledQty').textContent = order.total_cancelled_quantity || 0;
-        document.getElementById('cancelRemainingQty').textContent = remainingQty;
-        
-        // Reset reason fields
-        document.getElementById('cancelRemainingReason').value = '';
-        document.getElementById('cancelRemainingReasonOther').style.display = 'none';
-        document.getElementById('cancelRemainingReasonOther').value = '';
-        
-        // Store the order ID for confirmation
-        document.getElementById('cancelRemainingModal').dataset.orderId = orderId;
-        
-        // Show the modal
-        document.getElementById('cancelRemainingModal').classList.add('show');
-    }
-
-    async function confirmCancelRemainingPO() {
-        const poId = document.getElementById('cancelRemainingModal').dataset.orderId;
-        let reason = document.getElementById('cancelRemainingReason').value;
-        const reasonOther = document.getElementById('cancelRemainingReasonOther').value.trim();
-
-        if (!reason) {
-            showToast('Please select a cancellation reason', 'error');
-            return;
-        }
-
-        if (reason === 'Other' && !reasonOther) {
-            showToast('Please specify the cancellation reason', 'error');
-            return;
-        }
-
-        if (reason === 'Other') {
-            reason = reasonOther;
-        }
-
-        try {
-            // Get current order data
-            const { data: order, error: orderError } = await supabaseClient
-                .from('purchase_orders')
-                .select('*')
-                .eq('id', poId)
-                .single();
-
-            if (orderError) throw orderError;
-
-            const hasReceived = (order.total_received_quantity || 0) > 0;
-
-            // Determine new status
-            let newStatus;
-            if (hasReceived) {
-                // If some items were received, mark as Closed (completed)
-                newStatus = 'Closed';
-            } else {
-                // If nothing received, mark as Cancelled
-                newStatus = 'Cancelled';
-            }
-
-            // Update PO header
-            const { error: updateError } = await supabaseClient
-                .from('purchase_orders')
-                .update({
-                    status: newStatus,
-                    cancelled_at: new Date().toISOString(),
-                    cancellation_reason: reason,
-                    updated_at: new Date().toISOString(),
-                    fully_received: hasReceived ? true : false
-                })
-                .eq('id', poId);
-
-            if (updateError) throw updateError;
-
-            // Update PO lines - cancel remaining quantities only
-            const { data: lines, error: linesError } = await supabaseClient
-                .from('purchase_order_lines')
-                .select('id, order_quantity, received_quantity, cancelled_quantity')
-                .eq('purchase_order_id', poId);
-
-            if (linesError) throw linesError;
-
-            for (const line of lines) {
-                const currentReceived = line.received_quantity || 0;
-                const currentOrdered = line.order_quantity || 0;
-                const currentCancelled = line.cancelled_quantity || 0;
-                
-                // Only cancel the remaining quantity
-                const remainingToCancel = Math.max(0, currentOrdered - currentReceived - currentCancelled);
-                
-                let newCancelled = currentCancelled + remainingToCancel;
-                let newRemaining = currentOrdered - currentReceived - newCancelled;
-
-                await supabaseClient
-                    .from('purchase_order_lines')
-                    .update({
-                        cancelled_quantity: newCancelled,
-                        remaining_quantity: Math.max(0, newRemaining),
-                        fully_received: newRemaining <= 0 && currentReceived > 0,
-                        cancellation_reason: reason,
-                        cancelled_at: new Date().toISOString()
-                    })
-                    .eq('id', line.id);
-            }
-
-            // If there were received items, create supplier payable for received amount
-            if (hasReceived && order.total_received_amount > 0) {
-                // Check if payable already exists
-                const { data: existingPayable } = await supabaseClient
-                    .from('supplier_payables')
-                    .select('id')
-                    .eq('po_id', poId)
-                    .maybeSingle();
-
-                if (!existingPayable) {
-                    // Create payable for received amount
-                    const payableData = {
-                        supplier_id: order.supplier_id,
-                        po_id: poId,
-                        invoice_number: `CLOSED-${order.po_number}`,
-                        invoice_date: new Date().toISOString().split('T')[0],
-                        due_date: new Date(new Date().setDate(new Date().getDate() + 30)).toISOString().split('T')[0],
-                        total_amount: order.total_received_amount || 0,
-                        amount_paid: 0,
-                        amount_remaining: order.total_received_amount || 0,
-                        currency: order.currency || 'USD',
-                        exchange_rate: order.exchange_rate || 1,
-                        status: 'Pending',
-                        payment_terms: 'Net 30',
-                        notes: `PO cancelled. Received amount: ${order.total_received_amount}`
-                    };
-
-                    const { error: payableError } = await supabaseClient
-                        .from('supplier_payables')
-                        .insert([payableData]);
-
-                    if (payableError) {
-                        console.error('Error creating payable for received items:', payableError);
-                    } else {
-                        showToast(`✅ Payable created for received amount: ${order.currency} ${formatNumber(order.total_received_amount)}`, 'success');
-                    }
-                }
-            }
-
-            // Update PO totals
-            await updatePOHeader(poId);
-
-            const statusMessage = hasReceived 
-                ? `PO closed with ${order.total_received_quantity} items received. Payable created for received amount.`
-                : 'PO cancelled successfully. No items received.';
-
-            showToast(statusMessage, 'success');
-            closeModal('cancelRemainingModal');
-            await loadPurchaseOrders();
-
-        } catch (error) {
-            console.error('Error cancelling remaining PO:', error);
-            showToast('Error cancelling remaining PO: ' + error.message, 'error');
-        }
-    }
-
-    // ============================================
-    // GRN FUNCTIONS - REMOVED CANCELLATION
-    // ============================================
-
-    async function openGRN(orderId) {
-        try {
-            const orderCheck = await getOrderStatus(orderId);
-            
-            if (!['Approved', 'Partially Received'].includes(orderCheck.status)) {
-                showToast(`Cannot receive goods. Current status: ${orderCheck.status}`, 'error');
-                return;
-            }
-
-            const fullCheck = await getOrderReceiptStatus(orderId);
-            
-            if (fullCheck.fully_received) {
-                showToast('This PO is already fully received.', 'warning');
-                return;
-            }
-
-            const order = await getOrderWithLines(orderId);
-            
-            if (!hasRemainingItems(order)) {
-                const hasCancelled = order.purchase_order_lines.some(line => (line.cancelled_quantity || 0) > 0);
-                showToast(hasCancelled ? 'All remaining items have been cancelled. No items to receive.' : 'No items remaining to receive.', 'warning');
-                return;
-            }
-
-            await initializeGRN(order);
-            showModal('grnModal');
-        } catch (error) {
-            console.error('Error opening GRN:', error);
-            showToast('Error opening GRN: ' + error.message, 'error');
-        }
-    }
-
-    async function getOrderStatus(orderId) {
-        const { data, error } = await supabaseClient
-            .from('purchase_orders')
-            .select('status')
-            .eq('id', orderId)
-            .single();
-
-        if (error) throw error;
-        return data;
-    }
-
-    async function getOrderReceiptStatus(orderId) {
-        const { data, error } = await supabaseClient
-            .from('purchase_orders')
-            .select('fully_received, remaining_quantity')
-            .eq('id', orderId)
-            .single();
-
-        if (error) throw error;
-        return data;
-    }
-
-    async function getOrderWithLines(orderId) {
-        const { data, error } = await supabaseClient
-            .from('purchase_orders')
-            .select(`
-                *,
-                suppliers:supplier_id (name),
-                purchase_order_lines (*)
-            `)
-            .eq('id', orderId)
-            .single();
-
-        if (error) throw error;
-        return data;
-    }
-
-    function hasRemainingItems(order) {
-        return order.purchase_order_lines.some(line => 
-            (line.order_quantity || 0) > ((line.received_quantity || 0) + (line.cancelled_quantity || 0))
-        );
-    }
-
-    async function initializeGRN(order) {
-        state.currentGRNOrderId = order.id;
-        state.currentGRNOrderData = order;
-        state.currentGRNCurrency = order.currency || 'USD';
-        state.currentGRNExchangeRate = order.exchange_rate || 1;
-        
-        state.grnLines = (order.purchase_order_lines || [])
-            .filter(line => (line.order_quantity || 0) > ((line.received_quantity || 0) + (line.cancelled_quantity || 0)))
-            .map(line => ({
-                ...line,
-                received_quantity: 0,
-                batch_number: '',
-                expiry_date: '',
-                total_amount: 0,
-                max_receivable: (line.order_quantity || 0) - (line.received_quantity || 0) - (line.cancelled_quantity || 0),
-                cancel_remaining: false,
-                cancel_reason: '',
-                cancelled_quantity: line.cancelled_quantity || 0
-            }));
-
-        // 🔥 FIX (issue #2): load existing batches for every product on
-        // this GRN, so the batch number field can offer them as a
-        // dropdown -- pick one to reuse its expiry, or type a new batch
-        // number that doesn't exist yet.
-        await loadExistingBatchesForGRN();
-        populateGRNModal(order);
-        renderGRNLines();
-        updateGRNTotal();
-    }
-
-    async function loadExistingBatchesForGRN() {
-        state.existingBatchesByProduct = {};
-        const productIds = [...new Set(state.grnLines.map(l => l.product_id).filter(Boolean))];
-        if (productIds.length === 0) return;
-
-        try {
-            const { data: batches, error } = await supabaseClient
-                .from('batches')
-                .select('product_id, batch_number, expiry_date')
-                .in('product_id', productIds)
-                .order('expiry_date', { ascending: true });
-
-            if (error) throw error;
-
-            (batches || []).forEach(b => {
-                if (!state.existingBatchesByProduct[b.product_id]) {
-                    state.existingBatchesByProduct[b.product_id] = [];
-                }
-                // Avoid duplicate batch numbers for the same product in the list.
-                if (!state.existingBatchesByProduct[b.product_id].some(x => x.batch_number === b.batch_number)) {
-                    state.existingBatchesByProduct[b.product_id].push(b);
-                }
-            });
-        } catch (error) {
-            console.error('Error loading existing batches for GRN:', error);
-        }
-    }
-
-    // 🔥 ADDED (issue #4): red if expiry is under 3 months away, yellow
-    // if under 6 months, otherwise normal. Returns style strings for the
-    // expiry input's border/background.
-    function getExpiryUrgencyStyle(dateStr) {
-        if (!dateStr) return { border: '#e2e8f0', background: 'white' };
-        const expiry = new Date(dateStr);
-        if (isNaN(expiry.getTime())) return { border: '#e2e8f0', background: 'white' };
-
-        const today = new Date();
-        const threeMonths = new Date(today);
-        threeMonths.setMonth(threeMonths.getMonth() + 3);
-        const sixMonths = new Date(today);
-        sixMonths.setMonth(sixMonths.getMonth() + 6);
-
-        if (expiry <= threeMonths) return { border: '#dc2626', background: '#fef2f2' };
-        if (expiry <= sixMonths) return { border: '#f59e0b', background: '#fffbeb' };
-        return { border: '#e2e8f0', background: 'white' };
-    }
-
-    function populateGRNModal(order) {
-        const poRef = document.getElementById('grnPOReference');
-        const supplier = document.getElementById('grnSupplier');
-        const entryDate = document.getElementById('grnEntryDate');
-        const invoiceNumber = document.getElementById('grnInvoiceNumber');
-        const invoiceDate = document.getElementById('grnInvoiceDate');
-        const freight = document.getElementById('grnFreight');
-        const insurance = document.getElementById('grnInsurance');
-        const notes = document.getElementById('grnNotes');
-        const invoiceTotal = document.getElementById('grnInvoiceTotal');
-        const currencyDisplay = document.getElementById('grnCurrencyDisplay');
-        const exchangeRateDisplay = document.getElementById('grnExchangeRateDisplay');
-        const remainingInfo = document.getElementById('grnRemainingInfo');
-        // 🔥 ADDED: default GRN payment type to Credit. Most stock is
-        // received on supplier credit, not paid cash on the spot -- Cash
-        // is still one click away in the dropdown, but the common case no
-        // longer needs to be re-selected on every single GRN.
-        const paymentType = document.getElementById('grnPaymentType');
-
-        if (poRef) poRef.textContent = order.po_number || 'N/A';
-        if (supplier) supplier.textContent = order.suppliers?.name || 'Unknown';
-        if (entryDate) entryDate.value = new Date().toISOString().split('T')[0];
-        if (invoiceNumber) invoiceNumber.value = '';
-        if (invoiceDate) invoiceDate.value = new Date().toISOString().split('T')[0];
-        if (freight) freight.value = 0;
-        if (insurance) insurance.value = 0;
-        if (notes) notes.value = '';
-        if (invoiceTotal) invoiceTotal.value = '';
-        if (paymentType) paymentType.value = 'Credit';
-
-        if (currencyDisplay) {
-            currencyDisplay.textContent = state.currentGRNCurrency;
-        }
-        if (exchangeRateDisplay) {
-            exchangeRateDisplay.textContent = state.currentGRNExchangeRate;
-        }
-        
-        if (remainingInfo) {
-            const totalRemaining = order.purchase_order_lines.reduce((sum, l) => 
-                sum + ((l.order_quantity || 0) - (l.received_quantity || 0) - (l.cancelled_quantity || 0)), 0);
-            const totalCancelled = order.purchase_order_lines.reduce((sum, l) => 
-                sum + (l.cancelled_quantity || 0), 0);
-            remainingInfo.textContent = `Remaining to receive: ${totalRemaining} packs | Already cancelled: ${totalCancelled} packs`;
-        }
-    }
-
-    // ============================================
-    // VIEW FUNCTIONS
-    // ============================================
-
-    async function viewPO(orderId) {
-        try {
-            const { data: order, error } = await supabaseClient
-                .from('purchase_orders')
-                .select(`
-                    *,
-                    suppliers:supplier_id (name),
-                    purchase_order_lines (*)
-                `)
-                .eq('id', orderId)
-                .single();
-
-            if (error) throw error;
-
-            const content = document.getElementById('viewPOContent');
-            if (!content) return;
-
-            // 🔥 ADDED: a PO "becomes" a GRN once it's fully received --
-            // same condition already used elsewhere in this file to show
-            // the dedicated "View GRN" button (renderOrderActions above).
-            // Drives whether this modal's Print button prints the
-            // Purchase Order or the Goods Receipt Note, instead of always
-            // printing "PURCHASE ORDER" even after receiving. A
-            // Partially Received order still prints as a PO here (it's
-            // still open, with remaining items) -- its GRN-so-far can be
-            // viewed/printed via the green receipt icon.
-            const hasGRN = order.status === 'Goods Received' || order.status === 'Closed';
-            state.currentViewOrderId = orderId;
-            state.currentViewHasGRN = hasGRN;
-            const printLabel = document.getElementById('viewPOPrintBtnLabel');
-            if (printLabel) printLabel.textContent = hasGRN ? 'Print GRN' : 'Print PO';
-
-            const supplierName = order.suppliers?.name || 'Unknown';
-            const symbol = order.currency === 'ZMW' ? 'ZK' : '$';
-            const lines = order.purchase_order_lines || [];
-            
-            const totalOrderQty = lines.reduce((sum, l) => sum + (l.order_quantity || 0), 0);
-            const totalReceivedQty = lines.reduce((sum, l) => sum + (l.received_quantity || 0), 0);
-            const totalCancelledQty = lines.reduce((sum, l) => sum + (l.cancelled_quantity || 0), 0);
-            const remainingQty = totalOrderQty - totalReceivedQty - totalCancelledQty;
-            
-            const isOverdue = checkIfOverdue(order);
-            
-            content.innerHTML = `
-                <div class="view-po-details">
-                    <div class="detail-row">
-                        <span class="label">PO Number</span>
-                        <span class="value"><strong>${order.po_number}</strong></span>
-                    </div>
-                    <div class="detail-row">
-                        <span class="label">Supplier</span>
-                        <span class="value">${supplierName}</span>
-                    </div>
-                    <div class="detail-row">
-                        <span class="label">Currency</span>
-                        <span class="value">${order.currency || 'USD'}</span>
-                    </div>
-                    <div class="detail-row">
-                        <span class="label">Exchange Rate</span>
-                        <span class="value">${order.exchange_rate || 1}</span>
-                    </div>
-                    <div class="detail-row">
-                        <span class="label">Expected Delivery</span>
-                        <span class="value">
-                            ${formatDate(order.expected_delivery_date)}
-                            ${isOverdue ? `<span style="color: #dc2626; margin-left: 8px;">⚠️ ${getDaysOverdue(order)} days overdue</span>` : ''}
-                        </span>
-                    </div>
-                    <div class="detail-row">
-                        <span class="label">Status</span>
-                        <span class="value">
-                            <span class="status-badge status-${(order.status || 'Draft').toLowerCase().replace(/ /g, '-')}">${order.status}</span>
-                            ${order.status === 'Partially Received' ? 
-                                `<span style="font-size: 0.75rem; color: #f59e0b; margin-left: 8px;">
-                                    (${totalReceivedQty}/${totalOrderQty} items received)
-                                </span>` : ''}
-                            ${totalCancelledQty > 0 ? 
-                                `<span style="font-size: 0.75rem; color: #dc2626; margin-left: 8px;">
-                                    (${totalCancelledQty} items cancelled)
-                                </span>` : ''}
-                            ${order.fully_received && order.status !== 'Cancelled' ? 
-                                `<span style="font-size: 0.75rem; color: #10b981; margin-left: 8px;">✅ Fully Received</span>` : ''}
-                            ${order.status === 'Cancelled' && order.cancellation_reason ?
-                                `<span style="font-size: 0.75rem; color: #64748b; margin-left: 8px;">Reason: ${order.cancellation_reason}</span>` : ''}
-                        </span>
-                    </div>
-                    <div class="detail-row">
-                        <span class="label">Total Amount</span>
-                        <span class="value" style="font-weight: bold; font-size: 1.1rem; color: #2563eb;">
-                            ${symbol} ${formatNumber(order.total_amount)}
-                            ${order.total_received_amount > 0 ? 
-                                `<br><span style="font-size: 0.85rem; color: #10b981;">Received: ${symbol} ${formatNumber(order.total_received_amount)}</span>` : ''}
-                            ${order.total_cancelled_amount > 0 ? 
-                                `<br><span style="font-size: 0.85rem; color: #dc2626;">Cancelled: ${symbol} ${formatNumber(order.total_cancelled_amount)}</span>` : ''}
-                            ${order.remaining_amount > 0 && order.status !== 'Draft' && order.status !== 'Cancelled' ? 
-                                `<br><span style="font-size: 0.85rem; color: #f59e0b;">Remaining: ${symbol} ${formatNumber(order.remaining_amount)}</span>` : ''}
-                        </span>
-                    </div>
-                    ${order.notes ? `
-                    <div class="detail-row">
-                        <span class="label">Notes</span>
-                        <span class="value">${order.notes}</span>
-                    </div>
-                    ` : ''}
-                    <div style="margin-top: 20px;">
-                        <h5>Order Lines</h5>
-                        <div class="table-responsive">
-                            <table class="table-minimal">
-                                <thead>
-                                    <tr>
-                                        <th>#</th>
-                                        <th>Product</th>
-                                        <th>Pack Size</th>
-                                        <th>Ordered</th>
-                                        <th>Received</th>
-                                        <th>Cancelled</th>
-                                        <th>Remaining</th>
-                                        <th style="text-align: right;">Rate</th>
-                                        <th style="text-align: right;">Total</th>
-                                    </tr>
-                                </thead>
-                                <tbody>
-                                    ${lines.length === 0 ? `
-                                        <tr><td colspan="9" style="text-align: center; padding: 20px; color: #94a3b8;">No items in this order</td></tr>
-                                    ` : lines.map((line, idx) => {
-                                        const remaining = (line.order_quantity || 0) - (line.received_quantity || 0) - (line.cancelled_quantity || 0);
-                                        const isFullyReceived = remaining <= 0 && (line.received_quantity || 0) > 0;
-                                        const isFullyCancelled = remaining <= 0 && (line.received_quantity || 0) === 0 && (line.cancelled_quantity || 0) > 0;
-                                        return `
-                                        <tr>
-                                            <td>${idx + 1}</td>
-                                            <td>${line.product_name}</td>
-                                            <td>${line.pack_size || 1}</td>
-                                            <td>${line.order_quantity}</td>
-                                            <td style="color: #10b981;">${line.received_quantity || 0}</td>
-                                            <td style="color: #dc2626;">${line.cancelled_quantity || 0}</td>
-                                            <td style="color: ${isFullyReceived ? '#10b981' : isFullyCancelled ? '#dc2626' : '#f59e0b'};">${isFullyReceived ? '✅' : isFullyCancelled ? '❌' : remaining}</td>
-                                            <td style="text-align: right;">${symbol} ${formatNumber(line.purchase_rate)}</td>
-                                            <td style="text-align: right;">${symbol} ${formatNumber(line.total_amount)}</td>
-                                        </tr>
-                                    `}).join('')}
-                                </tbody>
-                            </table>
-                        </div>
-                    </div>
-                </div>
-            `;
-            
-            showModal('viewPOModal');
-        } catch (error) {
-            console.error('Error viewing PO:', error);
-            showToast('Error loading PO details: ' + error.message, 'error');
-        }
-    }
-
-    async function deletePO(orderId) {
-        if (!confirm('Are you sure you want to delete this purchase order?')) return;
-        
-        try {
-            const { error } = await supabaseClient
-                .from('purchase_orders')
-                .delete()
-                .eq('id', orderId);
-
-            if (error) throw error;
-            
-            showToast('Purchase order deleted successfully', 'success');
-            await loadPurchaseOrders();
-        } catch (error) {
-            console.error('Error deleting PO:', error);
-            showToast('Error deleting PO: ' + error.message, 'error');
-        }
-    }
-
-    async function viewGRN(orderId) {
-        try {
-            const { data: grns, error } = await supabaseClient
-                .from('goods_receipt_notes')
-                .select(`
-                    *,
-                    goods_receipt_lines (*),
-                    purchase_orders:purchase_order_id (
-                        po_number,
-                        suppliers:supplier_id (name),
-                        currency,
-                        exchange_rate
-                    )
-                `)
-                .eq('purchase_order_id', orderId)
-                .order('created_at', { ascending: true });
-
-            if (error) {
-                console.error('GRN query error:', error);
-                showToast('Error loading GRN: ' + error.message, 'error');
-                return;
-            }
-
-            if (!grns || grns.length === 0) {
-                showToast('No GRN found for this order', 'error');
-                return;
-            }
-
-            if (grns.length === 1) {
-                viewSingleGRN(grns[0]);
-            } else {
-                showGRNList(grns);
-            }
-        } catch (error) {
-            console.error('Error viewing GRN:', error);
-            showToast('Error loading GRN: ' + error.message, 'error');
-        }
-    }
-
-    function viewSingleGRN(grn) {
-        const content = document.getElementById('viewPOContent');
-        if (!content) return;
-
-        const symbol = grn.currency === 'ZMW' ? 'ZK' : '$';
-        const lines = grn.goods_receipt_lines || [];
-        const supplierName = grn.purchase_orders?.suppliers?.name || 'Unknown';
-
-        content.innerHTML = `
-            <div class="view-po-details">
-                ${renderGRNInfo(grn, supplierName, symbol)}
-                ${renderGRNTable(lines, symbol, grn)}
-            </div>
-        `;
-
-        // 🔥 ADDED: this is a specific, already-posted GRN -- the Print
-        // button should print this Goods Receipt Note, not the PO.
-        state.currentViewOrderId = grn.purchase_order_id;
-        state.currentViewHasGRN = true;
-        const printLabel = document.getElementById('viewPOPrintBtnLabel');
-        if (printLabel) printLabel.textContent = 'Print GRN';
-
-        // 🔥 ADDED: Credit Note feature -- keep the full GRN object around
-        // (with its lines + PO/supplier context) so the Credit Note modal
-        // doesn't need to re-fetch it, and show the "Create Credit Note"
-        // button now that a single GRN is actually in view.
-        state.currentViewGRNData = grn;
-        const cnBtn = document.getElementById('viewPOCreditNoteBtn');
-        if (cnBtn) cnBtn.style.display = '';
-
-        showModal('viewPOModal');
-    }
-
-    function renderGRNInfo(grn, supplierName, symbol) {
-        return `
-            <div class="detail-row">
-                <span class="label">GRN Number</span>
-                <span class="value"><strong>${grn.grn_number}</strong></span>
-            </div>
-            <div class="detail-row">
-                <span class="label">PO Reference</span>
-                <span class="value">${grn.purchase_orders?.po_number || 'N/A'}</span>
-            </div>
-            <div class="detail-row">
-                <span class="label">Supplier</span>
-                <span class="value">${supplierName}</span>
-            </div>
-            <div class="detail-row">
-                <span class="label">Entry Date</span>
-                <span class="value">${formatDate(grn.entry_date)}</span>
-            </div>
-            <div class="detail-row">
-                <span class="label">Invoice Number</span>
-                <span class="value">${grn.invoice_number || 'N/A'}</span>
-            </div>
-            <div class="detail-row">
-                <span class="label">Invoice Date</span>
-                <span class="value">${formatDate(grn.invoice_date)}</span>
-            </div>
-            <div class="detail-row">
-                <span class="label">Currency</span>
-                <span class="value">${grn.currency || 'USD'}</span>
-            </div>
-            <div class="detail-row">
-                <span class="label">Total Amount</span>
-                <span class="value" style="font-weight: bold; font-size: 1.1rem; color: #2563eb;">
-                    ${symbol} ${formatNumber(grn.total_amount || 0)}
-                </span>
-            </div>
-            ${grn.notes ? `
-            <div class="detail-row">
-                <span class="label">Notes</span>
-                <span class="value">${grn.notes}</span>
-            </div>
-            ` : ''}
-        `;
-    }
-
-    function renderGRNTable(lines, symbol, grn) {
-        return `
-            <div style="margin-top: 20px;">
-                <h5>Received Items</h5>
-                <div class="table-responsive">
-                    <table class="table-minimal">
-                        <thead>
-                            <tr>
-                                <th>#</th>
-                                <th>Product</th>
-                                <th>Pack Size</th>
-                                <th>Ordered</th>
-                                <th>Received</th>
-                                <th>Batch</th>
-                                <th>Expiry</th>
-                                <th style="text-align: right;">Rate</th>
-                                <th style="text-align: right;">Total</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            ${lines.length === 0 ? `
-                                <tr><td colspan="9" style="text-align: center; padding: 20px; color: #94a3b8;">No items received</td></tr>
-                            ` : lines.map((line, idx) => `
-                                <tr>
-                                    <td>${idx + 1}</td>
-                                    <td>${line.product_name}</td>
-                                    <td>${line.pack_size || 1}</td>
-                                    <td>${line.ordered_quantity || 0}</td>
-                                    <td style="color: #10b981;">${line.received_quantity || 0}</td>
-                                    <td>${line.batch_number || 'N/A'}</td>
-                                    <td>${formatDate(line.expiry_date)}</td>
-                                    <td style="text-align: right;">${symbol} ${formatNumber(line.purchase_rate)}</td>
-                                    <td style="text-align: right;">${symbol} ${formatNumber(line.total_amount)}</td>
-                                </tr>
-                            `).join('')}
-                        </tbody>
-                        <tfoot>
-                            ${renderGRNFooters(grn, symbol)}
-                        </tfoot>
-                    </table>
-                </div>
-            </div>
-        `;
-    }
-
-    function renderGRNFooters(grn, symbol) {
-        let html = '';
-        if (grn.freight) {
-            html += `
-                <tr>
-                    <td colspan="8" style="text-align: right;">Freight:</td>
-                    <td style="text-align: right;">${symbol} ${formatNumber(grn.freight)}</td>
-                </tr>
-            `;
-        }
-        if (grn.insurance) {
-            html += `
-                <tr>
-                    <td colspan="8" style="text-align: right;">Insurance:</td>
-                    <td style="text-align: right;">${symbol} ${formatNumber(grn.insurance)}</td>
-                </tr>
-            `;
-        }
-        html += `
-            <tr class="total-row">
-                <td colspan="8" style="text-align: right;">Grand Total:</td>
-                <td style="text-align: right;">${symbol} ${formatNumber(grn.total_amount || 0)}</td>
-            </tr>
-        `;
-        return html;
-    }
-
-    function showGRNList(grns) {
-        const content = document.getElementById('viewPOContent');
-        if (!content) return;
-
-        const symbol = grns[0]?.currency === 'ZMW' ? 'ZK' : '$';
-        const supplierName = grns[0]?.purchase_orders?.suppliers?.name || 'Unknown';
-
-        content.innerHTML = `
-            <div class="view-po-details">
-                <div class="detail-row">
-                    <span class="label">PO Reference</span>
-                    <span class="value"><strong>${grns[0]?.purchase_orders?.po_number || 'N/A'}</strong></span>
-                </div>
-                <div class="detail-row">
-                    <span class="label">Supplier</span>
-                    <span class="value">${supplierName}</span>
-                </div>
-                <div style="margin-top: 20px;">
-                    <h5>GRN History (${grns.length} receipts)</h5>
-                    <div class="table-responsive">
-                        <table class="table-minimal">
-                            <thead>
-                                <tr>
-                                    <th>GRN #</th>
-                                    <th>Date</th>
-                                    <th>Invoice #</th>
-                                    <th style="text-align: right;">Amount</th>
-                                    <th>Status</th>
-                                    <th style="text-align: center;">Action</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                ${grns.map(grn => `
-                                    <tr>
-                                        <td><strong>${grn.grn_number}</strong></td>
-                                        <td>${formatDate(grn.entry_date)}</td>
-                                        <td>${grn.invoice_number || 'N/A'}</td>
-                                        <td style="text-align: right;">${symbol} ${formatNumber(grn.total_amount || 0)}</td>
-                                        <td><span class="status-badge status-goods-received">Posted</span></td>
-                                        <td style="text-align: center;">
-                                            <button class="btn btn-sm btn-outline" onclick="viewSingleGRNById('${grn.id}')">
-                                                <i class="fa-regular fa-eye"></i> View
-                                            </button>
-                                        </td>
-                                    </tr>
-                                `).join('')}
-                            </tbody>
-                            <tfoot>
-                                <tr class="total-row">
-                                    <td colspan="3" style="text-align: right;">Total Received:</td>
-                                    <td style="text-align: right;">${symbol} ${formatNumber(grns.reduce((sum, g) => sum + (g.total_amount || 0), 0))}</td>
-                                    <td colspan="2"></td>
-                                </tr>
-                            </tfoot>
-                        </table>
-                    </div>
-                </div>
-            </div>
-        `;
-
-        // 🔥 ADDED: this is a summary of multiple GRNs against one PO --
-        // there's no single receipt to print here (use "View" on a row
-        // for that), so the Print button falls back to printing the
-        // underlying PO as a whole.
-        state.currentViewOrderId = grns[0]?.purchase_order_id || null;
-        state.currentViewHasGRN = false;
-        const printLabel = document.getElementById('viewPOPrintBtnLabel');
-        if (printLabel) printLabel.textContent = 'Print PO';
-
-        // 🔥 ADDED: this is a multi-GRN summary, not one specific receipt --
-        // Create Credit Note needs a single GRN (use "View" on a row, which
-        // routes through viewSingleGRNById -> viewSingleGRN instead).
-        state.currentViewGRNData = null;
-        const cnBtn = document.getElementById('viewPOCreditNoteBtn');
-        if (cnBtn) cnBtn.style.display = 'none';
-
-        showModal('viewPOModal');
-    }
-
-    async function viewSingleGRNById(grnId) {
-        try {
-            const { data: grn, error } = await supabaseClient
-                .from('goods_receipt_notes')
-                .select(`
-                    *,
-                    goods_receipt_lines (*),
-                    purchase_orders:purchase_order_id (
-                        po_number,
-                        suppliers:supplier_id (name),
-                        currency,
-                        exchange_rate
-                    )
-                `)
-                .eq('id', grnId)
-                .single();
-
-            if (error) throw error;
-            viewSingleGRN(grn);
-        } catch (error) {
-            console.error('Error loading GRN:', error);
-            showToast('Error loading GRN: ' + error.message, 'error');
-        }
-    }
-
-    // ============================================
-    // GRN HELPER FUNCTIONS
-    // ============================================
-
-    function receiveAllItems() {
-        let receivedCount = 0;
-        state.grnLines.forEach((line) => {
-            const maxQty = line.max_receivable || line.order_quantity || 0;
-            if (maxQty > 0 && !line.cancel_remaining) {
-                line.received_quantity = maxQty;
-                line.total_amount = (line.received_quantity || 0) * (line.purchase_rate || 0);
-                receivedCount++;
-            }
-        });
-        renderGRNLines();
-        updateGRNTotal();
-        showToast(`${receivedCount} items marked for receiving. Please enter batch and expiry for each item.`, 'success');
-    }
-
-    function clearReceivedItems() {
-        let clearedCount = 0;
-        state.grnLines.forEach(line => {
-            if (line.received_quantity > 0 && !line.cancel_remaining) {
-                line.received_quantity = 0;
-                line.total_amount = 0;
-                line.batch_number = '';
-                line.expiry_date = '';
-                clearedCount++;
-            }
-        });
-        renderGRNLines();
-        updateGRNTotal();
-        showToast(`${clearedCount} items cleared`, 'info');
-    }
-
-    // ============================================
-    // UPDATE GRN LINE
-    // ============================================
-
-    function updateGRNLine(index, field, value) {
-        const line = state.grnLines[index];
-        if (!line) return;
-        
-        if (field === 'received_quantity') {
-            // 🔥 FIX: GRN is allowed to receive MORE than the ordered qty --
-            // suppliers routinely over-ship, and the whole point of this
-            // screen is to record what actually arrived (and at what rate),
-            // not to enforce the PO as a ceiling. Previously this clamped
-            // any entry above order_quantity back down, silently discarding
-            // real received stock. Now it's a non-blocking heads-up only.
-            const maxQty = line.max_receivable || line.order_quantity || 0;
-            let qty = parseInt(value) || 0;
-            if (qty < 0) qty = 0;
-            if (maxQty > 0 && qty > maxQty) {
-                showToast(`Receiving ${qty} — more than the ${maxQty} ordered (over-delivery).`, 'info');
-            }
-            line.received_quantity = qty;
-            line.total_amount = (line.received_quantity || 0) * (line.purchase_rate || 0);
-        } else if (field === 'purchase_rate') {
-            line.purchase_rate = parseFloat(value) || 0;
-            line.total_amount = (line.received_quantity || 0) * line.purchase_rate;
-        } else if (field === 'batch_number') {
-            line.batch_number = value;
-            // 🔥 FIX (issue #2): if this batch number matches an existing
-            // batch for this product, reuse its expiry automatically --
-            // it's physically the same batch, so the expiry must match.
-            // If it doesn't match anything existing, nothing happens here
-            // and the typed value is simply treated as a new batch.
-            const existingMatch = (state.existingBatchesByProduct[line.product_id] || [])
-                .find(b => b.batch_number === value);
-            if (existingMatch && existingMatch.expiry_date) {
-                line.expiry_date = existingMatch.expiry_date;
-            }
-        } else if (field === 'expiry_date') {
-            line.expiry_date = value;
-        }
-        
-        renderGRNLines();
-        updateGRNTotal();
-    }
-
-    // 🔥 ADDED (issue #3): formats digits into YYYY-MM-DD as the user
-    // types, so entering a date is a plain, predictable typing experience
-    // instead of fighting a native date input's segment-jumping behavior
-    // (the most common cause of "can't type the year properly").
-    window.formatExpiryInput = function(el) {
-        const cursorWasAtEnd = el.selectionStart === el.value.length;
-        let digits = el.value.replace(/\D/g, '').slice(0, 8);
-        let formatted = digits;
-        if (digits.length > 4) formatted = digits.slice(0, 4) + '-' + digits.slice(4);
-        if (digits.length > 6) formatted = digits.slice(0, 4) + '-' + digits.slice(4, 6) + '-' + digits.slice(6);
-        el.value = formatted;
-        if (cursorWasAtEnd) {
-            el.setSelectionRange(formatted.length, formatted.length);
-        }
-    };
-
-    function toggleGRNLineReceive(index, checked) {
-        const line = state.grnLines[index];
-        if (!line) return;
-        
-        const maxQty = line.max_receivable || line.order_quantity || 0;
-        
-        if (checked && !line.cancel_remaining) {
-            line.received_quantity = maxQty;
-            line.total_amount = (line.received_quantity || 0) * (line.purchase_rate || 0);
-        } else {
-            line.received_quantity = 0;
-            line.total_amount = 0;
-            line.batch_number = '';
-            line.expiry_date = '';
-        }
-        
-        renderGRNLines();
-        updateGRNTotal();
-    }
-
-    function updateGRNTotal() {
-        const subtotal = state.grnLines.reduce((sum, line) => sum + (line.total_amount || 0), 0);
-        const freight = parseFloat(document.getElementById('grnFreight')?.value) || 0;
-        const insurance = parseFloat(document.getElementById('grnInsurance')?.value) || 0;
-        const total = subtotal + freight + insurance;
-        
-        const currency = state.currentGRNCurrency || 'USD';
-        const symbol = currency === 'ZMW' ? 'ZK' : '$';
-        
-        const subtotalEl = document.getElementById('grnSubtotal');
-        const freightEl = document.getElementById('grnFreightDisplay');
-        const insuranceEl = document.getElementById('grnInsuranceDisplay');
-        const grandTotalEl = document.getElementById('grnGrandTotal');
-        
-        if (subtotalEl) subtotalEl.textContent = `${symbol} ${formatNumber(subtotal)}`;
-        if (freightEl) freightEl.textContent = `${symbol} ${formatNumber(freight)}`;
-        if (insuranceEl) insuranceEl.textContent = `${symbol} ${formatNumber(insurance)}`;
-        if (grandTotalEl) grandTotalEl.textContent = `${symbol} ${formatNumber(total)}`;
-        
-        validateInvoice();
-    }
-
-    function validateInvoice() {
-        const invoiceTotal = parseFloat(document.getElementById('grnInvoiceTotal')?.value) || 0;
-        const grnTotal = parseFloat(document.getElementById('grnGrandTotal')?.textContent?.replace(/[^0-9.]/g, '')) || 0;
-        const variance = invoiceTotal - grnTotal;
-        const varianceDisplay = document.getElementById('grnVariance');
-        const displayDiv = document.getElementById('grnVarianceDisplay');
-        const symbol = state.currentGRNCurrency === 'ZMW' ? 'ZK' : '$';
-        
-        if (invoiceTotal > 0 && varianceDisplay && displayDiv) {
-            displayDiv.style.display = 'flex';
-            varianceDisplay.textContent = `${symbol} ${formatNumber(variance)}`;
-            if (Math.abs(variance) < 0.01) {
-                varianceDisplay.style.color = '#22c55e';
-                varianceDisplay.textContent = `✓ ${symbol} ${formatNumber(variance)}`;
-            } else {
-                varianceDisplay.style.color = '#ef4444';
-                varianceDisplay.textContent = `⚠ ${symbol} ${formatNumber(variance)}`;
-            }
-        } else if (displayDiv) {
-            displayDiv.style.display = 'none';
-        }
-    }
-
-        // ============================================
-    // 🔥 FIX: the five functions below (getSupplierId, createGRN,
-    // createGRNLines, updateInventory, updatePOLinesFromGRN) were being
-    // CALLED by postGRN() further down but were never DEFINED anywhere in
-    // this file. Posting any GRN would throw "ReferenceError: createGRN is
-    // not defined" and crash immediately -- a complete showstopper for the
-    // entire receiving workflow. Implemented here to match the exact
-    // schema already established elsewhere in this file (purchase_order_lines
-    // from insertPOLines, goods_receipt_notes/goods_receipt_lines from the
-    // existing view/render functions).
-    // ============================================
-
-    async function getSupplierId(orderId) {
-        const { data, error } = await supabaseClient
-            .from('purchase_orders')
-            .select('supplier_id')
-            .eq('id', orderId)
-            .single();
-        if (error) throw error;
-        return data.supplier_id;
-    }
-
-    async function generateGRNNumber(attempt = 0) {
-        const { count, error } = await supabaseClient
-            .from('goods_receipt_notes')
-            .select('id', { count: 'exact', head: true });
-        if (error) throw error;
-        const next = (count || 0) + 1 + attempt;
-        return `GRN-${new Date().getFullYear()}-${String(next).padStart(5, '0')}`;
-    }
-
-    // 🔥 FIX: GRN numbers were generated as COUNT(*)+1 and inserted
-    // outside any retry logic, same as the employee_code bug -- two GRNs
-    // created close together (or one double-click) could compute the
-    // same number and the second insert would fail with a raw
-    // "duplicate key value violates unique constraint
-    // goods_receipt_notes_grn_number_key" error. Now retries with the
-    // next number on that specific collision instead of surfacing the
-    // raw error (the old timestamp-based fallback only covered the count
-    // query itself failing, not this).
-    async function createGRN(orderId, supplierId, currency, exchangeRate, grnTotal, invoiceTotal, invoiceNumber, attempt = 0) {
-        const MAX_ATTEMPTS = 5;
-        const freight = parseFloat(document.getElementById('grnFreight')?.value) || 0;
-        const insurance = parseFloat(document.getElementById('grnInsurance')?.value) || 0;
-        const entryDate = document.getElementById('grnEntryDate')?.value || new Date().toISOString().split('T')[0];
-        const invoiceDate = document.getElementById('grnInvoiceDate')?.value || new Date().toISOString().split('T')[0];
-        const notes = document.getElementById('grnNotes')?.value || '';
-        const grnNumber = await generateGRNNumber(attempt);
-
-        const record = {
-            grn_number: grnNumber,
-            purchase_order_id: orderId,
-            supplier_id: supplierId,
-            entry_date: entryDate,
-            invoice_number: invoiceNumber,
-            invoice_date: invoiceDate,
-            currency: currency,
-            exchange_rate: exchangeRate,
-            total_amount: grnTotal,
-            invoice_total: invoiceTotal,
-            freight: freight,
-            insurance: insurance,
-            notes: notes,
-            created_at: new Date().toISOString()
-        };
-
-        const { data, error } = await supabaseClient
-            .from('goods_receipt_notes')
-            .insert([record])
-            .select();
-        if (error) {
-            const isNumberCollision = error.code === '23505'
-                && (error.message || '').includes('grn_number');
-            if (isNumberCollision && attempt < MAX_ATTEMPTS - 1) {
-                return createGRN(orderId, supplierId, currency, exchangeRate, grnTotal, invoiceTotal, invoiceNumber, attempt + 1);
-            }
-            throw error;
-        }
-        return { id: data[0].id, grn_number: grnNumber };
-    }
-
-    async function createGRNLines(grnId) {
-        // goods_receipt_lines columns confirmed from renderGRNTable() above:
-        // product_name, pack_size, ordered_quantity, received_quantity,
-        // batch_number, expiry_date, purchase_rate, total_amount.
-        const linesToInsert = state.grnLines
-            .filter(line => (line.received_quantity || 0) > 0)
-            .map(line => ({
-                grn_id: grnId,
-                purchase_order_line_id: line.id,
-                product_id: line.product_id,
-                product_name: line.product_name,
-                pack_size: line.pack_size || 1,
-                ordered_quantity: line.order_quantity || 0,
-                received_quantity: line.received_quantity || 0,
-                batch_number: line.batch_number,
-                expiry_date: line.expiry_date,
-                purchase_rate: line.purchase_rate || 0,
-                total_amount: line.total_amount || 0
-            }));
-
-        if (linesToInsert.length === 0) return;
-
-        const { error } = await supabaseClient
-            .from('goods_receipt_lines')
-            .insert(linesToInsert);
-        if (error) throw error;
-    }
-
-    async function updateInventory(grnId, currency, exchangeRate) {
-        // Inventory/COGS elsewhere in this system (retail.js, wholesale.js,
-        // donation.js) is ZMW-based -- batches.cost_price needs to be
-        // stored in ZMW, converting from USD at the PO's exchange rate.
-        // purchase_rate here is PER PACK (see the "(per pack)" label next
-        // to the rate input in the PO line UI); batches.cost_price
-        // elsewhere in the system is PER UNIT, so divide by pack size.
-        const receivedLines = state.grnLines.filter(line => (line.received_quantity || 0) > 0);
-
-        for (const line of receivedLines) {
-            const packSize = line.pack_size || 1;
-            const qtyToAdd = (line.received_quantity || 0) * packSize;
-            const ratePerPack = line.purchase_rate || 0;
-            const ratePerUnit = ratePerPack / packSize;
-            const costPriceZmw = currency === 'USD' ? ratePerUnit * (exchangeRate || 1) : ratePerUnit;
-
-            const { error } = await supabaseClient
-                .from('batches')
-                .insert([{
-                    product_id: line.product_id,
-                    batch_number: line.batch_number,
-                    expiry_date: line.expiry_date,
-                    total_qty: qtyToAdd,
-                    cost_price: costPriceZmw
-                }]);
-
-            if (error) {
-                console.error(`Error creating batch for ${line.product_name}:`, error);
-                throw error;
-            }
-        }
-    }
-
-    async function updatePOLinesFromGRN(orderId) {
-        // Re-query the persisted received_quantity for each line right
-        // before updating, rather than trusting local state -- the local
-        // state.grnLines objects reset received_quantity to 0 for this GRN
-        // SESSION only (see initializeGRN), so the persisted prior total
-        // isn't reliably available locally.
-        const receivedLines = state.grnLines.filter(line => (line.received_quantity || 0) > 0);
-
-        for (const line of receivedLines) {
-            const { data: currentLine, error: fetchError } = await supabaseClient
-                .from('purchase_order_lines')
-                .select('received_quantity')
-                .eq('id', line.id)
-                .single();
-
-            if (fetchError) {
-                console.error(`Error fetching current line for ${line.product_name}:`, fetchError);
-                continue;
-            }
-
-            const newReceivedQty = (currentLine.received_quantity || 0) + (line.received_quantity || 0);
-            const remainingQty = Math.max(0, (line.order_quantity || 0) - newReceivedQty - (line.cancelled_quantity || 0));
-
-            const { error: updateError } = await supabaseClient
-                .from('purchase_order_lines')
-                .update({
-                    received_quantity: newReceivedQty,
-                    remaining_quantity: remainingQty,
-                    fully_received: remainingQty <= 0
-                })
-                .eq('id', line.id);
-
-            if (updateError) {
-                console.error(`Error updating line for ${line.product_name}:`, updateError);
-                throw updateError;
-            }
-        }
-    }
-
-    // ============================================
-    // POST GRN
-    // ============================================
-
-    async function postGRN() {
-        // 🔥 FIX: no click-guard here at all before -- clicking "Post GRN"
-        // more than once (e.g. a slow connection making the first click
-        // look like nothing happened) fired this whole function again
-        // before the first run finished. Since createGRN() inserts the
-        // goods_receipt_notes header before doing anything else, two
-        // overlapping clicks could each insert their OWN header row for
-        // the same delivery; only one of those runs (whichever actually
-        // reaches createGRNLines()/the rest of the flow without erroring)
-        // ends up complete, leaving the other(s) as empty, orphaned GRN
-        // records with a total but no line items, no accounting entry,
-        // and no supplier payable -- exactly what GRN-2026-00022 and
-        // GRN-2026-00023 turned out to be (duplicates of GRN-2026-00024,
-        // since deleted). Those orphans also silently corrupted the Daily
-        // Report: with no payable to point to, its cash-vs-credit guess
-        // (see pages/report/daily-report/index.js's computeTodayPurchaseBreakdown/
-        // computeCashBreakdown) read them as CASH purchases that never
-        // actually happened. Disabling the button for the duration of
-        // this whole function -- including every validation check below,
-        // via the try/finally -- makes a second click while the first is
-        // still running a no-op instead of a second full run.
-        const postBtn = document.getElementById('postGrnBtn');
-        if (postBtn?.disabled) return;
-        if (postBtn) {
-            postBtn.disabled = true;
-            postBtn.dataset.originalHtml = postBtn.innerHTML;
-            postBtn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Posting...';
-        }
-
-        try {
-            await postGRNInner();
-        } finally {
-            if (postBtn) {
-                postBtn.disabled = false;
-                postBtn.innerHTML = postBtn.dataset.originalHtml || '<i class="fa-solid fa-check-circle"></i> Post GRN';
-            }
-        }
-    }
-
-    async function postGRNInner() {
-        const orderId = state.currentGRNOrderId;
-        if (!orderId) {
-            showToast('No order selected', 'error');
-            return;
-        }
-
-        const hasReceived = state.grnLines.some(line => (line.received_quantity || 0) > 0);
-
-        if (!hasReceived) {
-            showToast('Please receive at least one item', 'error');
-            return;
-        }
-
-        // Validate received items have batch and expiry
-        const invalidBatch = state.grnLines.filter(line => 
-            (line.received_quantity || 0) > 0 && (!line.batch_number || line.batch_number.trim() === '')
-        );
-        if (invalidBatch.length > 0) {
-            showToast(`Please enter batch number for: ${invalidBatch.map(l => l.product_name).join(', ')}`, 'error');
-            return;
-        }
-
-        const invalidExpiry = state.grnLines.filter(line => 
-            (line.received_quantity || 0) > 0 && (!line.expiry_date || line.expiry_date === '')
-        );
-        if (invalidExpiry.length > 0) {
-            showToast(`Please enter expiry date for: ${invalidExpiry.map(l => l.product_name).join(', ')}`, 'error');
-            return;
-        }
-
-        // 🔥 FIX: removed the old block that rejected posting whenever a
-        // line's received_quantity exceeded (order_quantity - cancelled).
-        // Over-receiving is a normal, legitimate GRN scenario (supplier
-        // ships more than ordered) -- the GRN's job is to record what was
-        // actually received and at what rate, not to cap it at the PO.
-
-        const totalReceived = state.grnLines.reduce((sum, l) => sum + (l.received_quantity || 0), 0);
-        const grnTotal = parseFloat(document.getElementById('grnGrandTotal')?.textContent?.replace(/[^0-9.]/g, '')) || 0;
-        const invoiceNumber = document.getElementById('grnInvoiceNumber')?.value || null;
-
-        if (!invoiceNumber && totalReceived > 0) {
-            showToast('Please enter invoice number', 'error');
-            return;
-        }
-
-        // 🔥 FIX (issue #5): Invoice Total is the actual amount on the
-        // supplier's invoice -- it's what should be owed/booked, not GRN
-        // Total (which is just what our own line items compute to, and
-        // can legitimately differ from the invoice due to rounding,
-        // freight/insurance the supplier billed differently, etc.).
-        // Previously the field was editable but not actually required,
-        // and the payable/accounting entries used grnTotal instead of it.
-        const invoiceTotal = parseFloat(document.getElementById('grnInvoiceTotal')?.value) || 0;
-        if (totalReceived > 0 && invoiceTotal <= 0) {
-            showToast("Please enter the Invoice Total (the actual amount on the supplier's invoice) before posting.", 'error');
-            return;
-        }
-
-        let confirmMessage = `Confirm receiving ${totalReceived} items with invoice ${invoiceNumber || 'N/A'}?`;
-
-        if (!confirm(confirmMessage)) {
-            return;
-        }
-
-        // 🔥 FIX: Cash vs Credit now actually matters. Previously a payable
-        // was created for EVERY GRN unconditionally (see the old comment
-        // "ALWAYS CREATE PAYABLE"), even for cash purchases where the
-        // supplier was already paid in full -- that would have shown a
-        // false debt for every cash purchase ever made.
-        const paymentType = document.getElementById('grnPaymentType')?.value || 'Cash';
-
-        try {
-            const currency = state.currentGRNCurrency || 'USD';
-            const exchangeRate = state.currentGRNExchangeRate || 1;
-            const supplierId = await getSupplierId(orderId);
-
-            let grnId = null;
-
-            if (totalReceived > 0) {
-                const grn = await createGRN(orderId, supplierId, currency, exchangeRate, grnTotal, invoiceTotal, invoiceNumber);
-                grnId = grn.id;
-                await createGRNLines(grnId);
-                await updateInventory(grnId, currency, exchangeRate);
-
-                // Only Credit purchases create a payable -- Cash purchases
-                // were already paid, so there's nothing owed to record.
-                // Uses invoiceTotal, not grnTotal -- see fix note above.
-                if (paymentType === 'Credit') {
-                    await createSupplierPayable(supplierId, grnId, orderId, currency, exchangeRate, invoiceTotal, invoiceNumber);
-                }
-
-                // Post the accounting entry either way: Debit Inventory,
-                // Credit Cash (Cash purchase) or Credit Accounts Payable
-                // (Credit purchase) -- also uses invoiceTotal, since that's
-                // the actual amount owed/paid, not our own computed total.
-                await createGRNAccountingEntries(grn.grn_number, invoiceTotal, currency, exchangeRate, paymentType);
-            }
-
-            // Update PO lines
-            await updatePOLinesFromGRN(orderId);
-            
-            // Update PO header
-            await updatePOHeader(orderId);
-
-            // Show summary
-            showPostGRNSummary(totalReceived, invoiceNumber, currency, invoiceTotal);
-
-            closeModal('grnModal');
-            await loadPurchaseOrders();
-
-        } catch (error) {
-            console.error('Error posting GRN:', error);
-            showToast('Error posting GRN: ' + error.message, 'error');
-        }
-    }
-
-    // ============================================
-    // CREATE SUPPLIER PAYABLE - ALWAYS CALLED
-    // ============================================
-
-    async function createSupplierPayable(supplierId, grnId, orderId, currency, exchangeRate, grnTotal, invoiceNumber) {
-        if (!supplierId || grnTotal <= 0) return;
-
-        const payableData = {
-            supplier_id: supplierId,
-            grn_id: grnId,
-            po_id: orderId,
-            invoice_number: invoiceNumber,
-            invoice_date: document.getElementById('grnInvoiceDate')?.value || new Date().toISOString().split('T')[0],
-            due_date: new Date(new Date().setDate(new Date().getDate() + 30)).toISOString().split('T')[0],
-            total_amount: grnTotal,
-            amount_paid: 0,
-            amount_remaining: grnTotal,
-            currency: currency,
-            exchange_rate: exchangeRate,
-            status: 'Pending',
-            payment_terms: 'Net 30',
-            notes: `GRN: ${grnId}`,
-            created_at: new Date().toISOString()
-        };
-
-        const { error: payableError } = await supabaseClient
-            .from('supplier_payables')
-            .insert([payableData]);
-
-        if (payableError) {
-            console.error('Error creating supplier payable:', payableError);
-            showToast('⚠️ GRN posted but payable creation failed. Please check manually.', 'warning');
-        } else {
-            showToast(`✅ Supplier payable created for invoice ${invoiceNumber}`, 'success');
-        }
-    }
-
-    // ============================================
-    // UPDATE PO HEADER - FIXED STATUS LOGIC
-    // ============================================
-
-    async function updatePOHeader(orderId) {
-        const { data: allLines, error: linesError } = await supabaseClient
-            .from('purchase_order_lines')
-            .select('order_quantity, received_quantity, cancelled_quantity, purchase_rate')
-            .eq('purchase_order_id', orderId);
-
-        if (linesError) throw linesError;
-
-        let totalReceivedQty = 0;
-        let totalReceivedAmount = 0;
-        let totalOrderQty = 0;
-        let totalOrderAmount = 0;
-        let totalCancelledQty = 0;
-        let totalCancelledAmount = 0;
-
-        allLines.forEach(l => {
-            const orderQty = l.order_quantity || 0;
-            const receivedQty = l.received_quantity || 0;
-            const cancelledQty = l.cancelled_quantity || 0;
-            const rate = l.purchase_rate || 0;
-            
-            totalOrderQty += orderQty;
-            totalReceivedQty += receivedQty;
-            totalCancelledQty += cancelledQty;
-            totalOrderAmount += orderQty * rate;
-            totalReceivedAmount += receivedQty * rate;
-            totalCancelledAmount += cancelledQty * rate;
-        });
-
-        const remainingQty = totalOrderQty - totalReceivedQty - totalCancelledQty;
-        const remainingAmount = totalOrderAmount - totalReceivedAmount - totalCancelledAmount;
-        const isFullyProcessed = remainingQty <= 0;
-        
-        // Determine status - show "Partially Received" if there are both received AND cancelled items
-        let status;
-        if (totalReceivedQty > 0 && totalCancelledQty > 0) {
-            // Both received and cancelled items exist
-            status = 'Partially Received';
-        } else if (!isFullyProcessed && totalReceivedQty > 0) {
-            status = 'Partially Received';
-        } else if (isFullyProcessed && totalReceivedQty > 0 && totalCancelledQty === 0) {
-            status = 'Goods Received';
-        } else if (isFullyProcessed && totalReceivedQty === 0 && totalCancelledQty > 0) {
-            status = 'Cancelled';
-        } else if (isFullyProcessed && totalReceivedQty > 0 && totalCancelledQty > 0) {
-            status = 'Partially Received';
-        } else {
-            // Keep existing status
-            const { data: existing } = await supabaseClient
-                .from('purchase_orders')
-                .select('status')
-                .eq('id', orderId)
-                .single();
-            status = existing?.status || 'Approved';
-        }
-
-        await supabaseClient
-            .from('purchase_orders')
-            .update({
-                total_received_quantity: totalReceivedQty,
-                total_received_amount: totalReceivedAmount,
-                total_cancelled_quantity: totalCancelledQty,
-                total_cancelled_amount: totalCancelledAmount,
-                remaining_quantity: Math.max(0, remainingQty),
-                remaining_amount: Math.max(0, remainingAmount),
-                fully_received: isFullyProcessed,
-                status: status,
-                updated_at: new Date().toISOString()
-            })
-            .eq('id', orderId);
-    }
-
-    // ============================================
-    // SHOW POST GRN SUMMARY - UPDATED
-    // ============================================
-
-    // 🔥 FIX (issue #6): this used to be a plain native alert() -- the
-    // unstyled browser-default popup with no CSS at all. Replaced with a
-    // proper modal matching the same .modal-content-box convention
-    // already used elsewhere in this file (e.g. ensureAddSupplierModal).
-    function showPostGRNSummary(totalReceived, invoiceNumber, currency, invoiceTotal) {
-        const totalRemaining = state.grnLines.reduce((sum, l) =>
-            sum + ((l.order_quantity || 0) - (l.received_quantity || 0) - (l.cancelled_quantity || 0)), 0);
-        const totalCancelled = state.grnLines.reduce((sum, l) => sum + (l.cancelled_quantity || 0), 0);
-
-        let statusLine = '';
-        if (totalRemaining <= 0 && totalCancelled > 0) {
-            statusLine = `<div style="color:#15803d;"><i class="fa-solid fa-circle-check"></i> PO is partially received with some items cancelled.</div>`;
-        } else if (totalRemaining <= 0 && totalCancelled === 0) {
-            statusLine = `<div style="color:#15803d;"><i class="fa-solid fa-circle-check"></i> PO is fully received.</div>`;
-        }
-        if (totalRemaining > 0) {
-            statusLine += `<div style="color:#b45309;margin-top:6px;"><i class="fa-solid fa-triangle-exclamation"></i> ${totalRemaining} item(s) still pending -- use "Cancel Remaining" or receive more later.</div>`;
-        }
-        if (totalCancelled > 0) {
-            statusLine += `<div style="color:#dc2626;margin-top:6px;"><i class="fa-solid fa-ban"></i> ${totalCancelled} item(s) cancelled from this PO.</div>`;
-        }
-
-        const existing = document.getElementById('grnSummaryModal');
-        if (existing) existing.remove();
-
-        const overlay = document.createElement('div');
-        overlay.id = 'grnSummaryModal';
-        overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(15,23,42,0.6);backdrop-filter:blur(4px);z-index:1200;display:flex;justify-content:center;align-items:center;';
-        overlay.innerHTML = `
-            <div class="modal-content-box" style="background:white;padding:30px;border-radius:12px;width:90%;max-width:440px;box-shadow:0 20px 50px rgba(0,0,0,0.5);text-align:center;">
-                <div style="margin-bottom:14px;"><i class="fa-solid fa-circle-check" style="font-size:3rem;color:#22c55e;"></i></div>
-                <h3 style="margin:0 0 16px 0;color:#0f172a;">GRN Processed Successfully</h3>
-                <div style="background:#f8fafc;border-radius:8px;padding:14px;text-align:left;font-size:0.9rem;color:#334155;margin-bottom:12px;">
-                    <div style="display:flex;justify-content:space-between;padding:4px 0;"><span>Received</span><strong>${totalReceived} item(s)</strong></div>
-                    <div style="display:flex;justify-content:space-between;padding:4px 0;"><span>Invoice #</span><strong>${invoiceNumber || 'N/A'}</strong></div>
-                    <div style="display:flex;justify-content:space-between;padding:4px 0;"><span>Invoice Amount</span><strong>${currency} ${formatNumber(invoiceTotal || 0)}</strong></div>
-                    <div style="display:flex;justify-content:space-between;padding:4px 0;"><span>Payable</span><strong>Created for this invoice</strong></div>
-                </div>
-                <div style="text-align:left;font-size:0.85rem;">${statusLine}</div>
-                <button id="grnSummaryCloseBtn" style="margin-top:20px;background:#2563eb;color:white;border:none;padding:10px 28px;border-radius:6px;cursor:pointer;">
-                    <i class="fa-solid fa-check"></i> Done
-                </button>
-            </div>
-        `;
-        document.body.appendChild(overlay);
-        overlay.querySelector('.modal-content-box').addEventListener('click', e => e.stopPropagation());
-        document.getElementById('grnSummaryCloseBtn').addEventListener('click', () => overlay.remove());
-        overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
-    }
-
-    // ============================================
-    // 🔥 ADDED: CREDIT NOTES -- "give something back and adjust the
-    // invoice again". A credit note always ties back to one specific GRN
-    // (physical returns only -- see openCreditNoteModal): it reduces the
-    // matching batch(es)' stock, and adjusts the money side either by
-    // reducing that GRN's supplier_payables row (if it was received on
-    // Credit) or by crediting suppliers.credit_balance (if it was Cash --
-    // there's no payable to reduce, so the amount is tracked as a balance
-    // the supplier owes back to us, drawable against future purchases).
-    // Deliberately does NOT touch purchase_order_lines/purchase_orders --
-    // those represent receipt history and feed updatePOHeader()'s status
-    // machine; a credit note is a separate, cross-referenced adjustment.
-    // ============================================
-
-    function closeCreditNoteModal() {
-        closeModal('creditNoteModal');
-    }
-
-    async function openCreditNoteModal() {
-        const grn = state.currentViewGRNData;
-        if (!grn) {
-            showToast('No GRN in view to create a credit note for', 'error');
-            return;
-        }
-
-        const lines = grn.goods_receipt_lines || [];
-        if (lines.length === 0) {
-            showToast('This GRN has no received lines to return', 'error');
-            return;
-        }
-
-        closeModal('viewPOModal');
-
-        document.getElementById('cnGRNNumber').textContent = grn.grn_number;
-        document.getElementById('cnPONumber').textContent = grn.purchase_orders?.po_number || 'N/A';
-        document.getElementById('cnSupplierName').textContent = grn.purchase_orders?.suppliers?.name || 'Unknown';
-        document.getElementById('cnInvoiceNumber').textContent = grn.invoice_number || 'N/A';
-        document.getElementById('cnCurrency').textContent = grn.currency || 'USD';
-        document.getElementById('cnPaymentType').textContent = 'Checking...';
-        const reasonField = document.getElementById('cnReason');
-        if (reasonField) reasonField.value = '';
-
-        const linesBody = document.getElementById('cnLinesBody');
-        if (linesBody) linesBody.innerHTML = `<tr><td colspan="10" class="text-center text-muted" style="padding: 30px;"><i class="fa-solid fa-spinner fa-spin"></i> Loading returnable items...</td></tr>`;
-
-        const printBtn = document.getElementById('printCreditNoteBtn');
-        if (printBtn) printBtn.style.display = 'none';
-        state.lastSavedCreditNoteId = null;
-
-        showModal('creditNoteModal');
-
-        try {
-            // A supplier_payables row only ever exists for a Credit GRN
-            // (createSupplierPayable() is only called when paymentType ===
-            // 'Credit') -- so its presence/absence IS the cash-vs-credit
-            // signal, with no separate payment_type column needed.
-            const { data: payable, error: payableError } = await supabaseClient
-                .from('supplier_payables')
-                .select('*')
-                .eq('grn_id', grn.id)
-                .maybeSingle();
-            if (payableError) console.error('Error checking supplier payable:', payableError);
-            state.creditNoteSupplierPayable = payable || null;
-            document.getElementById('cnPaymentType').textContent = payable
-                ? 'Credit (reduces outstanding payable first)'
-                : 'Cash (tracked as supplier credit balance)';
-
-            // Resolve the batch(es) each line was actually received into.
-            // goods_receipt_lines has no batch_id FK, so match on
-            // product_id + batch_number + expiry_date, same identity
-            // updateInventory() used to create the batch in the first place.
-            const productIds = [...new Set(lines.map(l => l.product_id).filter(Boolean))];
-            const { data: batchRows, error: batchError } = await supabaseClient
-                .from('batches')
-                .select('id, product_id, batch_number, expiry_date, total_qty')
-                .in('product_id', productIds.length ? productIds : ['00000000-0000-0000-0000-000000000000']);
-            if (batchError) throw batchError;
-
-            // Prior credit notes against these exact GRN lines, so a second
-            // return on the same GRN can't double-return the same stock.
-            const lineIds = lines.map(l => l.id);
-            const { data: priorReturns, error: priorError } = await supabaseClient
-                .from('purchase_credit_note_lines')
-                .select('goods_receipt_line_id, quantity_returned')
-                .in('goods_receipt_line_id', lineIds.length ? lineIds : ['00000000-0000-0000-0000-000000000000']);
-            if (priorError) throw priorError;
-
-            const priorReturnedByLine = {};
-            (priorReturns || []).forEach(r => {
-                priorReturnedByLine[r.goods_receipt_line_id] = (priorReturnedByLine[r.goods_receipt_line_id] || 0) + (r.quantity_returned || 0);
-            });
-
-            state.creditNoteLines = lines.map(line => {
-                const matches = (batchRows || []).filter(b =>
-                    b.product_id === line.product_id &&
-                    (b.batch_number || '') === (line.batch_number || '') &&
-                    (b.expiry_date || '') === (line.expiry_date || '')
-                );
-                const availableUnits = matches.reduce((sum, b) => sum + (b.total_qty || 0), 0);
-                const packSize = line.pack_size || 1;
-                const receivedQty = line.received_quantity || 0;
-                const alreadyReturnedQty = priorReturnedByLine[line.id] || 0;
-                // Capped by BOTH what's left of what we originally received
-                // (some may already have been returned via an earlier
-                // credit note) AND what's still physically in stock (some
-                // may already have been sold) -- whichever is smaller.
-                const maxReturnable = matches.length === 0
-                    ? 0
-                    : Math.max(0, Math.min(receivedQty - alreadyReturnedQty, Math.floor(availableUnits / packSize)));
-
-                return {
-                    goods_receipt_line_id: line.id,
-                    product_id: line.product_id,
-                    product_name: line.product_name,
-                    batch_number: line.batch_number,
-                    expiry_date: line.expiry_date,
-                    pack_size: packSize,
-                    purchase_rate: line.purchase_rate || 0,
-                    receivedQty,
-                    alreadyReturnedQty,
-                    batchMatches: matches.map(b => ({ id: b.id, total_qty: b.total_qty || 0 })),
-                    noBatchFound: matches.length === 0,
-                    maxReturnable,
-                    returnQty: 0
-                };
-            });
-
-            renderCreditNoteLines();
-        } catch (error) {
-            console.error('Error preparing credit note:', error);
-            showToast('Error loading GRN items for return: ' + error.message, 'error');
-            if (linesBody) linesBody.innerHTML = `<tr><td colspan="10" class="text-center text-muted" style="padding: 30px; color: #dc2626;">Failed to load items -- close and try again.</td></tr>`;
-        }
-    }
-
-    function renderCreditNoteLines() {
-        const grn = state.currentViewGRNData;
-        const symbol = grn?.currency === 'ZMW' ? 'ZK' : '$';
-        const linesBody = document.getElementById('cnLinesBody');
-        const countLabel = document.getElementById('cnLineCount');
-        if (!linesBody) return;
-
-        if (state.creditNoteLines.length === 0) {
-            linesBody.innerHTML = `<tr><td colspan="10" class="text-center text-muted" style="padding: 30px;">No items on this GRN</td></tr>`;
-            if (countLabel) countLabel.textContent = '0 lines available';
-            return;
-        }
-
-        linesBody.innerHTML = state.creditNoteLines.map((line, idx) => `
-            <tr>
-                <td>${idx + 1}</td>
-                <td>${line.product_name}${line.noBatchFound ? '<div style="color: #dc2626; font-size: 0.75rem;"><i class="fa-solid fa-triangle-exclamation"></i> Batch not found in stock -- cannot return</div>' : ''}</td>
-                <td>${line.batch_number || 'N/A'}</td>
-                <td>${formatDate(line.expiry_date)}</td>
-                <td>${line.receivedQty}</td>
-                <td>${line.alreadyReturnedQty}</td>
-                <td>${line.maxReturnable}</td>
-                <td>${symbol} ${formatNumber(line.purchase_rate)}</td>
-                <td>
-                    <input type="number" class="form-control cn-return-qty" data-idx="${idx}" min="0" max="${line.maxReturnable}" step="1"
-                        value="${line.returnQty}" ${line.maxReturnable <= 0 ? 'disabled' : ''}
-                        style="width: 75px; padding: 4px 6px;">
-                </td>
-                <td class="cn-line-total" style="text-align: right;">${symbol} ${formatNumber(line.returnQty * line.purchase_rate)}</td>
-            </tr>
-        `).join('');
-
-        if (countLabel) countLabel.textContent = `${state.creditNoteLines.length} line(s) available`;
-        recalcCreditNoteTotals();
-    }
-
-    function recalcCreditNoteTotals() {
-        const grn = state.currentViewGRNData;
-        const currency = grn?.currency || 'USD';
-        const exchangeRate = grn?.exchange_rate || 1;
-        const symbol = currency === 'ZMW' ? 'ZK' : '$';
-
-        const totalAmount = state.creditNoteLines.reduce((sum, l) => sum + (l.returnQty * l.purchase_rate), 0);
-
-        const payable = state.creditNoteSupplierPayable;
-        const payableRemaining = payable ? (payable.amount_remaining || 0) : 0;
-        const payableApplied = payable ? Math.min(totalAmount, payableRemaining) : 0;
-        const creditBalanceApplied = totalAmount - payableApplied;
-
-        const totalEl = document.getElementById('cnTotalAmount');
-        const payableEl = document.getElementById('cnPayableApplied');
-        const creditEl = document.getElementById('cnCreditBalanceApplied');
-        if (totalEl) totalEl.textContent = `${symbol} ${formatNumber(totalAmount)}`;
-        if (payableEl) payableEl.textContent = `${symbol} ${formatNumber(payableApplied)}`;
-        if (creditEl) creditEl.textContent = `${symbol} ${formatNumber(creditBalanceApplied)}`;
-
-        return { totalAmount, payableApplied, creditBalanceApplied, currency, exchangeRate };
-    }
-
-    async function generateCreditNoteNumber(attempt = 0) {
-        const { count, error } = await supabaseClient
-            .from('purchase_credit_notes')
-            .select('id', { count: 'exact', head: true });
-        if (error) throw error;
-        const next = (count || 0) + 1 + attempt;
-        return `CN-${new Date().getFullYear()}-${String(next).padStart(5, '0')}`;
-    }
-
-    async function saveCreditNote() {
-        const grn = state.currentViewGRNData;
-        if (!grn) {
-            showToast('No GRN in view', 'error');
-            return;
-        }
-
-        const reason = document.getElementById('cnReason')?.value?.trim() || '';
-        if (!reason) {
-            showToast('Please enter a reason for the return', 'error');
-            return;
-        }
-
-        const returnedLines = state.creditNoteLines.filter(l => (l.returnQty || 0) > 0);
-        if (returnedLines.length === 0) {
-            showToast('Please enter a return quantity for at least one item', 'error');
-            return;
-        }
-
-        for (const line of returnedLines) {
-            if (line.returnQty > line.maxReturnable) {
-                showToast(`${line.product_name}: return quantity exceeds what can be returned`, 'error');
-                return;
-            }
-        }
-
-        const saveBtn = document.getElementById('saveCreditNoteBtn');
-        if (saveBtn?.disabled) return;
-        if (saveBtn) {
-            saveBtn.disabled = true;
-            saveBtn.dataset.originalHtml = saveBtn.innerHTML;
-            saveBtn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Saving...';
-        }
-
-        try {
-            const currency = grn.currency || 'USD';
-            const exchangeRate = grn.exchange_rate || 1;
-            const supplierId = grn.supplier_id;
-            const symbol = currency === 'ZMW' ? 'ZK' : '$';
-
-            // Re-fetch the payable fresh right before writing -- the copy
-            // in state.creditNoteSupplierPayable could be a little stale if
-            // the modal was left open a while (e.g. someone else recorded a
-            // payment against it meanwhile).
-            let payable = null;
-            if (state.creditNoteSupplierPayable) {
-                const { data, error } = await supabaseClient
-                    .from('supplier_payables')
-                    .select('*')
-                    .eq('id', state.creditNoteSupplierPayable.id)
-                    .maybeSingle();
-                if (error) throw error;
-                payable = data || null;
-            }
-
-            const totalAmount = returnedLines.reduce((sum, l) => sum + (l.returnQty * l.purchase_rate), 0);
-            const zmwAmount = currency === 'USD' ? totalAmount * exchangeRate : totalAmount;
-            const payableRemaining = payable ? (payable.amount_remaining || 0) : 0;
-            const payableApplied = payable ? Math.min(totalAmount, payableRemaining) : 0;
-            const creditBalanceApplied = totalAmount - payableApplied;
-            const creditBalanceAppliedZmw = currency === 'USD' ? creditBalanceApplied * exchangeRate : creditBalanceApplied;
-            const payableAppliedZmw = currency === 'USD' ? payableApplied * exchangeRate : payableApplied;
-
-            const creditNoteNumber = await generateCreditNoteNumber();
-
-            const header = {
-                credit_note_number: creditNoteNumber,
-                po_id: grn.purchase_order_id,
-                grn_id: grn.id,
-                supplier_id: supplierId,
-                reason: reason,
-                currency: currency,
-                exchange_rate: exchangeRate,
-                total_amount: totalAmount,
-                zmw_amount: zmwAmount,
-                payable_applied: payableApplied,
-                credit_balance_applied: creditBalanceApplied,
-                status: 'Posted',
-                created_at: new Date().toISOString()
-            };
-
-            const { data: cnData, error: cnError } = await withAuthRetry(() => supabaseClient
-                .from('purchase_credit_notes')
-                .insert([header])
-                .select());
-            if (cnError) throw cnError;
-            const creditNoteId = cnData[0].id;
-
-            const lineRows = returnedLines.map(l => ({
-                credit_note_id: creditNoteId,
-                goods_receipt_line_id: l.goods_receipt_line_id,
-                product_id: l.product_id,
-                product_name: l.product_name,
-                batch_id: l.batchMatches[0]?.id || null,
-                batch_number: l.batch_number,
-                pack_size: l.pack_size,
-                quantity_returned: l.returnQty,
-                purchase_rate: l.purchase_rate,
-                total_amount: l.returnQty * l.purchase_rate,
-                created_at: new Date().toISOString()
-            }));
-
-            const { error: linesError } = await withAuthRetry(() => supabaseClient
-                .from('purchase_credit_note_lines')
-                .insert(lineRows));
-            if (linesError) throw linesError;
-
-            // Reduce stock: walk each line's matching batch row(s), taking
-            // units out of whichever has stock first, never below zero.
-            for (const line of returnedLines) {
-                let unitsToRemove = line.returnQty * line.pack_size;
-                for (const batch of line.batchMatches) {
-                    if (unitsToRemove <= 0) break;
-                    const take = Math.min(batch.total_qty, unitsToRemove);
-                    if (take <= 0) continue;
-                    const newQty = Math.max(0, batch.total_qty - take);
-                    const { error: batchUpdateError } = await withAuthRetry(() => supabaseClient
-                        .from('batches')
-                        .update({ total_qty: newQty })
-                        .eq('id', batch.id));
-                    if (batchUpdateError) {
-                        console.error(`Error reducing stock for batch ${batch.id}:`, batchUpdateError);
-                    } else {
-                        batch.total_qty = newQty;
-                        unitsToRemove -= take;
-                    }
-                }
-            }
-
-            // Adjust the payable (if one exists) for the portion applied to it.
-            if (payable && payableApplied > 0) {
-                // amount_paid is left untouched -- this reduces what's
-                // owed, it isn't a cash payment against it.
-                const newRemaining = Math.max(0, (payable.amount_remaining || 0) - payableApplied);
-                const newTotal = Math.max(0, (payable.total_amount || 0) - payableApplied);
-                const { error: payableUpdateError } = await withAuthRetry(() => supabaseClient
-                    .from('supplier_payables')
-                    .update({
-                        total_amount: newTotal,
-                        amount_remaining: newRemaining,
-                        status: newRemaining <= 0 ? 'Paid' : (payable.status === 'Pending' ? 'Pending' : payable.status),
-                        notes: `${payable.notes || ''} | Credit note ${creditNoteNumber}: -${currency} ${formatNumber(payableApplied)}`.trim()
-                    })
-                    .eq('id', payable.id));
-                if (payableUpdateError) console.error('Error adjusting supplier payable:', payableUpdateError);
-            }
-
-            // Credit the supplier's balance for the portion not covered by
-            // the payable (the whole amount, for a Cash GRN).
-            if (creditBalanceApplied > 0) {
-                const { data: supplierRow, error: supplierFetchError } = await supabaseClient
-                    .from('suppliers')
-                    .select('credit_balance')
-                    .eq('id', supplierId)
-                    .maybeSingle();
-                if (supplierFetchError) console.error('Error fetching supplier credit balance:', supplierFetchError);
-                const newBalance = (supplierRow?.credit_balance || 0) + creditBalanceAppliedZmw;
-                const { error: supplierUpdateError } = await withAuthRetry(() => supabaseClient
-                    .from('suppliers')
-                    .update({ credit_balance: newBalance })
-                    .eq('id', supplierId));
-                if (supplierUpdateError) console.error('Error updating supplier credit balance:', supplierUpdateError);
-            }
-
-            // Reversing GL entry: Credit Inventory for the full ZMW amount;
-            // Debit Accounts Payable for the portion that reduced the
-            // payable, Debit Advances to Suppliers for the portion tracked
-            // as a credit balance -- mirrors createGRNAccountingEntries()
-            // in reverse.
-            await createCreditNoteAccountingEntries(creditNoteNumber, zmwAmount, payableAppliedZmw, creditBalanceAppliedZmw);
-
-            state.lastSavedCreditNoteId = creditNoteId;
-            closeModal('creditNoteModal');
-            showCreditNoteSavedSummary(creditNoteNumber, creditNoteId, symbol, totalAmount, payableApplied, creditBalanceApplied);
-        } catch (error) {
-            console.error('Error saving credit note:', error);
-            showToast('Error saving credit note: ' + error.message, 'error');
-        } finally {
-            if (saveBtn) {
-                saveBtn.disabled = false;
-                saveBtn.innerHTML = saveBtn.dataset.originalHtml || '<i class="fa-solid fa-check-circle"></i> Save Credit Note';
-            }
-        }
-    }
-
-    async function createCreditNoteAccountingEntries(creditNoteNumber, zmwAmount, payableAppliedZmw, creditBalanceAppliedZmw) {
-        try {
-            await ensureChartOfAccounts();
-            const accountCodes = await getAccountCodesFromChartOfAccounts();
-
-            const journal = {
-                entry_date: new Date().toISOString().split('T')[0],
-                reference: creditNoteNumber,
-                description: `Goods returned to supplier - ${creditNoteNumber}`,
-                journal_number: `CN-${new Date().getFullYear()}-${String(Math.floor(Math.random() * 10000)).padStart(4, '0')}`,
-                status: 'Posted',
-                created_at: new Date().toISOString()
-            };
-
-            const { data: journalData, error: jError } = await withAuthRetry(() => supabaseClient
-                .from('journal_entries')
-                .insert([journal])
-                .select());
-            if (jError) throw jError;
-
-            const lines = [
-                { journal_entry_id: journalData[0].id, account_code: accountCodes.inventory, description: `Inventory returned - ${creditNoteNumber}`, debit: 0, credit: zmwAmount }
-            ];
-            if (payableAppliedZmw > 0) {
-                lines.push({ journal_entry_id: journalData[0].id, account_code: accountCodes.accounts_payable, description: `Payable reduced by return - ${creditNoteNumber}`, debit: payableAppliedZmw, credit: 0 });
-            }
-            if (creditBalanceAppliedZmw > 0) {
-                lines.push({ journal_entry_id: journalData[0].id, account_code: accountCodes.advances_to_suppliers, description: `Supplier credit balance from return - ${creditNoteNumber}`, debit: creditBalanceAppliedZmw, credit: 0 });
-            }
-
-            const { error: jlError } = await withAuthRetry(() => supabaseClient.from('journal_lines').insert(lines));
-            if (jlError) throw jlError;
-
-            console.log(`✅ Credit note accounting entries created for ${creditNoteNumber} (ZK${zmwAmount.toFixed(2)})`);
-        } catch (error) {
-            console.error('Error creating credit note accounting entries:', error);
-            showToast('Credit note saved, but the accounting entry failed -- please check manually.', 'warning');
-        }
-    }
-
-    function printSavedCreditNote() {
-        const printBtn = document.getElementById('printCreditNoteBtn');
-        const creditNoteId = printBtn?.dataset.creditNoteId || state.lastSavedCreditNoteId;
-        if (!creditNoteId) {
-            showToast('No saved credit note to print', 'error');
-            return;
-        }
-        printCreditNoteById(creditNoteId);
-    }
-
-    function printCreditNoteById(creditNoteId) {
-        if (!creditNoteId) {
-            showToast('No saved credit note to print', 'error');
-            return;
-        }
-
-        supabaseClient
-            .from('purchase_credit_notes')
-            .select(`
-                *,
-                purchase_credit_note_lines (*),
-                suppliers:supplier_id (name),
-                purchase_orders:po_id (po_number)
-            `)
-            .eq('id', creditNoteId)
-            .single()
-            .then(({ data, error }) => {
-                if (error || !data) {
-                    showToast('Credit note data not found', 'error');
-                    return;
-                }
-                generateCreditNotePrint(data);
-            });
-    }
-
-    // 🔥 ADDED: success confirmation shown after a credit note saves,
-    // mirroring showPostGRNSummary()'s convention -- with its own Print
-    // button (this GRN's credit-note modal is already closed by the time
-    // this shows, so it doesn't depend on that modal's own print button).
-    function showCreditNoteSavedSummary(creditNoteNumber, creditNoteId, symbol, totalAmount, payableApplied, creditBalanceApplied) {
-        const existing = document.getElementById('cnSummaryModal');
-        if (existing) existing.remove();
-
-        const overlay = document.createElement('div');
-        overlay.id = 'cnSummaryModal';
-        overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(15,23,42,0.6);backdrop-filter:blur(4px);z-index:1200;display:flex;justify-content:center;align-items:center;';
-        overlay.innerHTML = `
-            <div class="modal-content-box" style="background:white;padding:30px;border-radius:12px;width:90%;max-width:440px;box-shadow:0 20px 50px rgba(0,0,0,0.5);text-align:center;">
-                <div style="margin-bottom:14px;"><i class="fa-solid fa-circle-check" style="font-size:3rem;color:#22c55e;"></i></div>
-                <h3 style="margin:0 0 16px 0;color:#0f172a;">Credit Note Saved</h3>
-                <div style="background:#f8fafc;border-radius:8px;padding:14px;text-align:left;font-size:0.9rem;color:#334155;margin-bottom:12px;">
-                    <div style="display:flex;justify-content:space-between;padding:4px 0;"><span>Credit Note #</span><strong>${creditNoteNumber}</strong></div>
-                    <div style="display:flex;justify-content:space-between;padding:4px 0;"><span>Total Credit</span><strong>${symbol} ${formatNumber(totalAmount)}</strong></div>
-                    ${payableApplied > 0 ? `<div style="display:flex;justify-content:space-between;padding:4px 0;"><span>Applied to Payable</span><strong style="color:#2563eb;">${symbol} ${formatNumber(payableApplied)}</strong></div>` : ''}
-                    ${creditBalanceApplied > 0 ? `<div style="display:flex;justify-content:space-between;padding:4px 0;"><span>Supplier Credit Balance</span><strong style="color:#15803d;">${symbol} ${formatNumber(creditBalanceApplied)}</strong></div>` : ''}
-                </div>
-                <div style="display:flex; gap:10px; justify-content:center; margin-top:20px;">
-                    <button id="cnSummaryPrintBtn" style="background:#2563eb;color:white;border:none;padding:10px 20px;border-radius:6px;cursor:pointer;">
-                        <i class="fa-solid fa-print"></i> Print
-                    </button>
-                    <button id="cnSummaryCloseBtn" style="background:#e2e8f0;color:#0f172a;border:none;padding:10px 20px;border-radius:6px;cursor:pointer;">
-                        <i class="fa-solid fa-check"></i> Done
-                    </button>
-                </div>
-            </div>
-        `;
-        document.body.appendChild(overlay);
-        overlay.querySelector('.modal-content-box').addEventListener('click', e => e.stopPropagation());
-        document.getElementById('cnSummaryPrintBtn').addEventListener('click', () => printCreditNoteById(creditNoteId));
-        document.getElementById('cnSummaryCloseBtn').addEventListener('click', () => overlay.remove());
-        overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
-    }
-
-    function generateCreditNotePrint(creditNote) {
-        const printWindow = window.open('', '_blank', 'width=800,height=600');
-        if (!printWindow) {
-            showToast('Please allow popups to print', 'error');
-            return;
-        }
-
-        const symbol = creditNote.currency === 'ZMW' ? 'ZK' : '$';
-        const lines = creditNote.purchase_credit_note_lines || [];
-
-        printWindow.document.write(`
-            <!DOCTYPE html>
-            <html>
-            <head>
-                <title>Credit Note - ${creditNote.credit_note_number}</title>
-                <style>
-                    ${getPrintStyles()}
-                </style>
-            </head>
-            <body>
-                ${getPrintHeader()}
-                <h2 style="text-align: center;">CREDIT NOTE (GOODS RETURNED TO SUPPLIER)</h2>
-                ${getCreditNoteInfoTable(creditNote)}
-                ${getCreditNoteLinesTable(lines, creditNote, symbol)}
-                ${getPrintFooter()}
-                ${getPrintButton()}
-            </body>
-            </html>
-        `);
-        printWindow.document.close();
-        setTimeout(() => printWindow.focus(), 500);
-    }
-
-    function getCreditNoteInfoTable(cn) {
-        return `
-            <div class="info">
-                <table>
-                    <tr><td class="label">Credit Note #:</td><td><strong>${cn.credit_note_number}</strong></td></tr>
-                    <tr><td class="label">PO Reference:</td><td>${cn.purchase_orders?.po_number || 'N/A'}</td></tr>
-                    <tr><td class="label">Supplier:</td><td>${cn.suppliers?.name || 'Unknown'}</td></tr>
-                    <tr><td class="label">Date:</td><td>${formatDate(cn.created_at)}</td></tr>
-                    <tr><td class="label">Currency:</td><td>${cn.currency || 'USD'}</td></tr>
-                    <tr><td class="label">Reason:</td><td>${cn.reason || 'N/A'}</td></tr>
-                </table>
-            </div>
-        `;
-    }
-
-    function getCreditNoteLinesTable(lines, cn, symbol) {
-        return `
-            <h3>Returned Items</h3>
-            <table>
-                <thead>
-                    <tr>
-                        <th>#</th>
-                        <th>Product</th>
-                        <th>Batch</th>
-                        <th class="text-right">Qty Returned</th>
-                        <th class="text-right">Rate</th>
-                        <th class="text-right">Total</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    ${lines.length === 0 ? `
-                        <tr><td colspan="6" style="text-align: center; padding: 20px; color: #94a3b8;">No items</td></tr>
-                    ` : lines.map((line, idx) => `
-                        <tr>
-                            <td>${idx + 1}</td>
-                            <td>${line.product_name}</td>
-                            <td>${line.batch_number || 'N/A'}</td>
-                            <td class="text-right">${line.quantity_returned}</td>
-                            <td class="text-right">${symbol} ${formatNumber(line.purchase_rate)}</td>
-                            <td class="text-right">${symbol} ${formatNumber(line.total_amount)}</td>
-                        </tr>
-                    `).join('')}
-                </tbody>
-                <tfoot>
-                    <tr class="total-row">
-                        <td colspan="5" class="text-right">Total Credit Amount:</td>
-                        <td class="text-right">${symbol} ${formatNumber(cn.total_amount || 0)}</td>
-                    </tr>
-                    ${cn.payable_applied > 0 ? `
-                    <tr>
-                        <td colspan="5" class="text-right">Applied to Outstanding Payable:</td>
-                        <td class="text-right" style="color: #2563eb;">${symbol} ${formatNumber(cn.payable_applied)}</td>
-                    </tr>
-                    ` : ''}
-                    ${cn.credit_balance_applied > 0 ? `
-                    <tr>
-                        <td colspan="5" class="text-right">Added to Supplier Credit Balance:</td>
-                        <td class="text-right" style="color: #15803d;">${symbol} ${formatNumber(cn.credit_balance_applied)}</td>
-                    </tr>
-                    ` : ''}
-                </tfoot>
-            </table>
-        `;
-    }
-
-    // ============================================
-    // DETERMINE PO STATUS - HELPER (optional)
-    // ============================================
-
-    function determinePOStatus(totalReceivedQty, totalCancelledQty, totalOrderQty) {
-        const remainingQty = totalOrderQty - totalReceivedQty - totalCancelledQty;
-        
-        // If both received and cancelled exist -> Partially Received
-        if (totalReceivedQty > 0 && totalCancelledQty > 0) {
-            return 'Partially Received';
-        }
-        
-        // If fully processed
-        if (remainingQty <= 0) {
-            if (totalReceivedQty > 0 && totalCancelledQty === 0) {
-                return 'Goods Received';
-            } else if (totalReceivedQty === 0 && totalCancelledQty > 0) {
-                return 'Cancelled';
-            } else if (totalReceivedQty > 0 && totalCancelledQty > 0) {
-                return 'Partially Received';
-            }
-        }
-        
-        // Partially received
-        if (totalReceivedQty > 0 && remainingQty > 0) {
-            return 'Partially Received';
-        }
-        
-        return 'Approved';
-    }
-
-    // ============================================
-    // STATS AND OVERDUE FUNCTIONS
-    // ============================================
-
-    function updateStats(orders) {
-        const total = orders.length;
-        const pending = orders.filter(o => o.status === 'Pending Approval').length;
-        const received = orders.filter(o => o.status === 'Goods Received' || o.status === 'Closed').length;
-        const partial = orders.filter(o => o.status === 'Partially Received').length;
-        const cancelled = orders.filter(o => o.status === 'Cancelled').length;
-
-        const today = new Date();
-        today.setHours(0, 0, 0, 0);
-        const overdue = orders.filter(o => {
-            // Overdue is a flag - exclude completed/cancelled
-            if (['Cancelled', 'Closed', 'Goods Received'].includes(o.status)) return false;
-            if (o.fully_received === true) return false;
-            if (!o.expected_delivery_date) return false;
-            const expectedDate = new Date(o.expected_delivery_date);
-            expectedDate.setHours(0, 0, 0, 0);
-            // Only overdue if remaining > 0
-            const remaining = (o.total_quantity || 0) - (o.total_received_quantity || 0) - (o.total_cancelled_quantity || 0);
-            if (remaining <= 0) return false;
-            return expectedDate < today;
-        });
-
-        document.getElementById('totalOrders').textContent = total;
-        document.getElementById('pendingOrders').textContent = pending;
-        document.getElementById('receivedOrders').textContent = received;
-        document.getElementById('partialOrders').textContent = partial;
-        document.getElementById('cancelledOrders').textContent = cancelled;
-        document.getElementById('overdueOrders').textContent = overdue.length;
-
-        const overdueEl = document.getElementById('overdueOrders');
-        if (overdue.length > 0) {
-            overdueEl.style.color = '#dc2626';
-        } else {
-            overdueEl.style.color = '#0f172a';
-        }
-    }
-
-    function checkOverduePOs(orders) {
-        const today = new Date();
-        today.setHours(0, 0, 0, 0);
-
-        const overdueList = [];
-        const overdueAlert = document.getElementById('overdueAlert');
-        const overdueListEl = document.getElementById('overdueList');
-
-        orders.forEach(order => {
-            // EXCLUDE ALL COMPLETED/CANCELLED STATUSES
-            const completedStatuses = ['Cancelled', 'Closed', 'Goods Received', 'Received', 'Completed', 'Fully Received'];
-            if (completedStatuses.includes(order.status)) {
-                return;
-            }
-
-            if (order.fully_received === true) {
-                return;
-            }
-
-            // Check remaining quantity
-            const remaining = (order.total_quantity || 0) - (order.total_received_quantity || 0) - (order.total_cancelled_quantity || 0);
-            if (remaining <= 0) {
-                return;
-            }
-
-            if (order.expected_delivery_date) {
-                const expectedDate = new Date(order.expected_delivery_date);
-                expectedDate.setHours(0, 0, 0, 0);
-
-                if (expectedDate < today) {
-                    const daysOverdue = Math.floor((today - expectedDate) / (1000 * 60 * 60 * 24));
-                    overdueList.push({
-                        po_number: order.po_number,
-                        supplier: order.suppliers?.name || 'Unknown',
-                        days: daysOverdue,
-                        status: order.status,
-                        received: order.total_received_quantity || 0,
-                        total: order.total_quantity || 0,
-                        remaining: remaining
-                    });
-                }
-            }
-        });
-
-        if (overdueList.length > 0) {
-            overdueAlert.style.display = 'block';
-            overdueListEl.innerHTML = overdueList.map(o => 
-                `<span style="background: #fee2e2; padding: 2px 10px; border-radius: 12px; margin: 0 4px; display: inline-block;">
-                    ${o.po_number} (${o.supplier}) - ${o.days} days overdue | Remaining: ${o.remaining}
-                </span>`
-            ).join(' ');
-        } else {
-            overdueAlert.style.display = 'none';
-        }
-
-        return overdueList;
-    }
-
-       // ============================================
-    // PRINT FUNCTIONS
-    // ============================================
-
-    function printPO() {
-        const orderId = document.getElementById('editPOId')?.value;
-        if (!orderId) {
-            showToast('Please open a PO to print', 'error');
-            return;
-        }
-        
-        const order = state.orders.find(o => o.id === orderId);
-        if (!order) {
-            showToast('Order not found', 'error');
-            return;
-        }
-        
-        generatePOPrint(order);
-    }
-
-    function printPOFromView() {
-        const content = document.getElementById('viewPOContent');
-        if (!content) return;
-
-        const poNumberEl = content.querySelector('.detail-row .value strong');
-        if (!poNumberEl) {
-            showToast('PO not found', 'error');
-            return;
-        }
-
-        const order = state.orders.find(o => o.po_number === poNumberEl.textContent);
-        if (!order) {
-            showToast('Order not found', 'error');
-            return;
-        }
-
-        generatePOPrint(order);
-    }
-
-    // 🔥 ADDED: the "View PO Details" modal's Print button now dispatches
-    // to whichever document this order actually is right now -- still a
-    // Purchase Order (nothing received yet), or already a Goods Receipt
-    // Note (goods have been received against it), per the hasGRN check
-    // done in viewPO().
-    function printFromView() {
-        if (state.currentViewHasGRN && state.currentViewOrderId) {
-            printGRN(state.currentViewOrderId);
-        } else {
-            printPOFromView();
-        }
-    }
-
-    function generatePOPrint(order) {
-        const printWindow = window.open('', '_blank', 'width=800,height=600');
-        if (!printWindow) {
-            showToast('Please allow popups to print', 'error');
-            return;
-        }
-        
-        const symbol = order.currency === 'ZMW' ? 'ZK' : '$';
-        const lines = order.purchase_order_lines || [];
-
-        printWindow.document.write(`
-            <!DOCTYPE html>
-            <html>
-            <head>
-                <title>Purchase Order - ${order.po_number}</title>
-                <style>
-                    ${getPrintStyles()}
-                </style>
-            </head>
-            <body>
-                ${getPrintHeader()}
-                <h2 style="text-align: center;">PURCHASE ORDER</h2>
-                ${getPOInfoTable(order)}
-                ${getPOLinesTable(lines, order, symbol)}
-                ${getPrintFooter()}
-                ${getPrintButton()}
-            </body>
-            </html>
-        `);
-        printWindow.document.close();
-        setTimeout(() => printWindow.focus(), 500);
-    }
-
-    function getPrintStyles() {
-        return `
-            body { font-family: Arial, sans-serif; padding: 20px; max-width: 800px; margin: 0 auto; }
-            .header { text-align: center; border-bottom: 2px solid #333; padding-bottom: 10px; margin-bottom: 20px; }
-            .header h1 { margin: 0; color: #0f172a; font-size: 1.5rem; }
-            .header p { margin: 3px 0; color: #475569; font-size: 0.9rem; }
-            .info { margin-bottom: 20px; padding: 10px; background: #f8fafc; border-radius: 4px; }
-            .info table { width: 100%; }
-            .info td { padding: 5px; }
-            .info .label { font-weight: 600; width: 120px; }
-            table { width: 100%; border-collapse: collapse; margin: 20px 0; font-size: 0.9rem; }
-            th { background: #f1f5f9; padding: 10px; text-align: left; border: 1px solid #e2e8f0; }
-            td { padding: 10px; border: 1px solid #e2e8f0; }
-            .text-right { text-align: right; }
-            .total-row { font-weight: bold; background: #f8fafc; }
-            .footer { text-align: center; margin-top: 30px; padding-top: 20px; border-top: 1px solid #e2e8f0; color: #64748b; font-size: 0.9rem; }
-            .status-badge { padding: 2px 10px; border-radius: 12px; font-size: 0.8rem; display: inline-block; }
-            .received-status { font-size: 0.8rem; color: #10b981; }
-            @media print {
-                body { margin: 0; padding: 10px; }
-                .no-print { display: none; }
-            }
-        `;
-    }
-
-    function getPrintHeader() {
-        return `
-            <div class="header">
-                <h1>${companySettings.company_name}</h1>
-                <p>${companySettings.address} | Phone: ${companySettings.phone}</p>
-                <p>ZAMRA #: ${companySettings.zamra_number}</p>
-            </div>
-        `;
-    }
-
-    function getPrintFooter() {
-        return `
-            <div class="footer">
-                <p>This is a computer-generated purchase order.</p>
-                <p>Generated on: ${new Date().toLocaleString()}</p>
-            </div>
-        `;
-    }
-
-    function getPrintButton() {
-        return `
-            <div class="no-print" style="text-align: center; margin-top: 20px;">
-                <button onclick="window.print()" style="background: #2563eb; color: white; border: none; padding: 10px 30px; border-radius: 6px; cursor: pointer; font-size: 1rem;">
-                    <i class="fa-solid fa-print"></i> Print
-                </button>
-            </div>
-        `;
-    }
-
-    function getPOInfoTable(order) {
-        const statusBg = order.status === 'Approved' ? '#dcfce7' : order.status === 'Goods Received' ? '#dcfce7' : '#fef3c7';
-        const statusColor = order.status === 'Approved' ? '#15803d' : order.status === 'Goods Received' ? '#15803d' : '#b45309';
-        
-        return `
-            <div class="info">
-                <table>
-                    <tr><td class="label">PO Number:</td><td><strong>${order.po_number}</strong></td></tr>
-                    <tr><td class="label">Supplier:</td><td>${order.suppliers?.name || 'Unknown'}</td></tr>
-                    <tr><td class="label">Currency:</td><td>${order.currency || 'USD'}</td></tr>
-                    <tr><td class="label">Exchange Rate:</td><td>${order.exchange_rate || 1}</td></tr>
-                    <tr><td class="label">Expected Delivery:</td><td>${formatDate(order.expected_delivery_date)}</td></tr>
-                    <tr><td class="label">Status:</td><td>
-                        <span class="status-badge" style="background: ${statusBg}; color: ${statusColor};">${order.status || 'Draft'}</span>
-                        ${order.fully_received ? '<span class="received-status">✅ Fully Received</span>' : ''}
-                        ${order.status === 'Partially Received' ? `<span class="received-status" style="color: #f59e0b;">⚠️ Partially Received (${order.total_received_quantity || 0}/${order.total_quantity || 0})</span>` : ''}
-                        ${order.status === 'Cancelled' ? `<span class="received-status" style="color: #64748b;">❌ Cancelled</span>` : ''}
-                        ${order.total_cancelled_quantity > 0 && order.status !== 'Cancelled' ? `<span class="received-status" style="color: #dc2626;">⚠️ ${order.total_cancelled_quantity} items cancelled</span>` : ''}
-                        ${order.remaining_quantity > 0 && order.status !== 'Draft' && order.status !== 'Cancelled' ? `<span class="received-status" style="color: #f59e0b;">Remaining: ${order.remaining_quantity}</span>` : ''}
-                    </td></tr>
-                    ${order.notes ? `<tr><td class="label">Notes:</td><td>${order.notes}</td></tr>` : ''}
-                    ${order.cancellation_reason ? `<tr><td class="label">Cancellation Reason:</td><td>${order.cancellation_reason}</td></tr>` : ''}
-                </table>
-            </div>
-        `;
-    }
-
-    function getPOLinesTable(lines, order, symbol) {
-        if (lines.length === 0) {
-            return `
-                <h3>Order Lines</h3>
-                <table>
-                    <thead>
-                        <tr>
-                            <th>#</th>
-                            <th>Product</th>
-                            <th>Pack Size</th>
-                            <th class="text-right">Qty</th>
-                            <th class="text-right">Rate</th>
-                            <th class="text-right">Total</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        <tr><td colspan="6" style="text-align: center; padding: 20px; color: #94a3b8;">No items in this order</td></tr>
-                    </tbody>
-                </table>
-            `;
-        }
-
-        return `
-            <h3>Order Lines</h3>
-            <table>
-                <thead>
-                    <tr>
-                        <th>#</th>
-                        <th>Product</th>
-                        <th>Pack Size</th>
-                        <th class="text-right">Qty</th>
-                        <th class="text-right">Received</th>
-                        <th class="text-right">Cancelled</th>
-                        <th class="text-right">Remaining</th>
-                        <th class="text-right">Rate</th>
-                        <th class="text-right">Total</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    ${lines.map((line, idx) => {
-                        const remaining = (line.order_quantity || 0) - (line.received_quantity || 0) - (line.cancelled_quantity || 0);
-                        const isFullyReceived = remaining <= 0 && (line.received_quantity || 0) > 0;
-                        const isFullyCancelled = remaining <= 0 && (line.received_quantity || 0) === 0 && (line.cancelled_quantity || 0) > 0;
-                        return `
-                        <tr>
-                            <td>${idx + 1}</td>
-                            <td>${line.product_name}</td>
-                            <td>${line.pack_size || 1}</td>
-                            <td class="text-right">${line.order_quantity}</td>
-                            <td class="text-right" style="color: #10b981;">${line.received_quantity || 0}</td>
-                            <td class="text-right" style="color: #dc2626;">${line.cancelled_quantity || 0}</td>
-                            <td class="text-right" style="color: ${isFullyReceived ? '#10b981' : isFullyCancelled ? '#dc2626' : '#f59e0b'};">${isFullyReceived ? '✅' : isFullyCancelled ? '❌' : remaining}</td>
-                            <td class="text-right">${symbol} ${formatNumber(line.purchase_rate)}</td>
-                            <td class="text-right">${symbol} ${formatNumber(line.total_amount)}</td>
-                        </tr>
-                    `}).join('')}
-                </tbody>
-                <tfoot>
-                    ${getPOFooterRows(order, symbol)}
-                </tfoot>
-            </table>
-        `;
-    }
-
-    function getPOFooterRows(order, symbol) {
-        let html = `
-            <tr class="total-row">
-                <td colspan="8" class="text-right">Grand Total:</td>
-                <td class="text-right">${symbol} ${formatNumber(order.total_amount || 0)}</td>
-            </tr>
-        `;
-        if (order.total_received_amount > 0) {
-            html += `
-                <tr>
-                    <td colspan="8" class="text-right">Total Received:</td>
-                    <td class="text-right" style="color: #10b981;">${symbol} ${formatNumber(order.total_received_amount)}</td>
-                </tr>
-            `;
-        }
-        if (order.total_cancelled_amount > 0) {
-            html += `
-                <tr>
-                    <td colspan="8" class="text-right">Total Cancelled:</td>
-                    <td class="text-right" style="color: #dc2626;">${symbol} ${formatNumber(order.total_cancelled_amount)}</td>
-                </tr>
-            `;
-        }
-        if (order.remaining_amount > 0 && order.status !== 'Draft' && order.status !== 'Cancelled') {
-            html += `
-                <tr>
-                    <td colspan="8" class="text-right">Remaining:</td>
-                    <td class="text-right" style="color: #f59e0b;">${symbol} ${formatNumber(order.remaining_amount)}</td>
-                </tr>
-            `;
-        }
-        return html;
-    }
-
-    // 🔥 CHANGED: now accepts an optional orderId so it can be called from
-    // the "View PO Details" modal (any received order) as well as from the
-    // GRN receiving modal itself (which still just passes nothing and
-    // relies on state.currentGRNOrderId, unchanged).
-    function printGRN(orderIdOverride) {
-        const orderId = orderIdOverride || state.currentGRNOrderId;
-        if (!orderId) {
-            showToast('No GRN open to print', 'error');
-            return;
-        }
-        
-        supabaseClient
-            .from('goods_receipt_notes')
-            .select(`
-                *,
-                goods_receipt_lines (*),
-                purchase_orders:purchase_order_id (
-                    po_number,
-                    suppliers:supplier_id (name),
-                    currency,
-                    exchange_rate
-                )
-            `)
-            // 🔥 FIX: this was missing the purchase_orders join that
-            // viewGRN()/viewSingleGRNById() already use -- without it,
-            // grn.purchase_orders was always undefined, so every printed
-            // GRN showed "PO Reference: N/A" and "Supplier: Unknown"
-            // regardless of what was actually on the order (caught via the
-            // new View PO -> Print GRN path, but this pre-existed on the
-            // GRN receiving modal's own Print button too).
-            .eq('purchase_order_id', orderId)
-            .order('created_at', { ascending: false })
-            .limit(1)
-            .then(({ data, error }) => {
-                if (error || !data || data.length === 0) {
-                    showToast('GRN data not found', 'error');
-                    return;
-                }
-                generateGRNPrint(data[0]);
-            });
-    }
-
-    function generateGRNPrint(grn) {
-        const printWindow = window.open('', '_blank', 'width=800,height=600');
-        if (!printWindow) {
-            showToast('Please allow popups to print', 'error');
-            return;
-        }
-        
-        const symbol = grn.currency === 'ZMW' ? 'ZK' : '$';
-        const lines = grn.goods_receipt_lines || [];
-
-        printWindow.document.write(`
-            <!DOCTYPE html>
-            <html>
-            <head>
-                <title>Goods Receipt Note - ${grn.grn_number}</title>
-                <style>
-                    ${getPrintStyles()}
-                </style>
-            </head>
-            <body>
-                ${getPrintHeader()}
-                <h2 style="text-align: center;">GOODS RECEIPT NOTE</h2>
-                ${getGRNInfoTable(grn)}
-                ${getGRNLinesTable(lines, grn, symbol)}
-                ${getPrintFooter()}
-                ${getPrintButton()}
-            </body>
-            </html>
-        `);
-        printWindow.document.close();
-        setTimeout(() => printWindow.focus(), 500);
-    }
-
-    function getGRNInfoTable(grn) {
-        return `
-            <div class="info">
-                <table>
-                    <tr><td class="label">GRN Number:</td><td><strong>${grn.grn_number}</strong></td></tr>
-                    <tr><td class="label">PO Reference:</td><td>${grn.purchase_orders?.po_number || 'N/A'}</td></tr>
-                    <tr><td class="label">Supplier:</td><td>${grn.purchase_orders?.suppliers?.name || 'Unknown'}</td></tr>
-                    <tr><td class="label">Entry Date:</td><td>${formatDate(grn.entry_date)}</td></tr>
-                    <tr><td class="label">Invoice Number:</td><td>${grn.invoice_number || 'N/A'}</td></tr>
-                    <tr><td class="label">Invoice Date:</td><td>${formatDate(grn.invoice_date)}</td></tr>
-                    <tr><td class="label">Currency:</td><td>${grn.currency || 'USD'}</td></tr>
-                    ${grn.notes ? `<tr><td class="label">Notes:</td><td>${grn.notes}</td></tr>` : ''}
-                </table>
-            </div>
-        `;
-    }
-
-    function getGRNLinesTable(lines, grn, symbol) {
-        return `
-            <h3>Received Items</h3>
-            <table>
-                <thead>
-                    <tr>
-                        <th>#</th>
-                        <th>Product</th>
-                        <th>Batch</th>
-                        <th>Expiry</th>
-                        <th class="text-right">Ordered</th>
-                        <th class="text-right">Received</th>
-                        <th class="text-right">Rate</th>
-                        <th class="text-right">Total</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    ${lines.length === 0 ? `
-                        <tr><td colspan="8" style="text-align: center; padding: 20px; color: #94a3b8;">No items received</td></tr>
-                    ` : lines.map((line, idx) => `
-                        <tr>
-                            <td>${idx + 1}</td>
-                            <td>${line.product_name}</td>
-                            <td>${line.batch_number || 'N/A'}</td>
-                            <td>${formatDate(line.expiry_date)}</td>
-                            <td class="text-right">${line.ordered_quantity || 0}</td>
-                            <td class="text-right" style="color: #10b981;">${line.received_quantity || 0}</td>
-                            <td class="text-right">${symbol} ${formatNumber(line.purchase_rate)}</td>
-                            <td class="text-right">${symbol} ${formatNumber(line.total_amount)}</td>
-                        </tr>
-                    `).join('')}
-                </tbody>
-                <tfoot>
-                    ${getGRNFooterRows(grn, symbol)}
-                </tfoot>
-            </table>
-        `;
-    }
-
-    function getGRNFooterRows(grn, symbol) {
-        let html = '';
-        if (grn.freight) {
-            html += `
-                <tr>
-                    <td colspan="7" class="text-right">Freight:</td>
-                    <td class="text-right">${symbol} ${formatNumber(grn.freight)}</td>
-                </tr>
-            `;
-        }
-        if (grn.insurance) {
-            html += `
-                <tr>
-                    <td colspan="7" class="text-right">Insurance:</td>
-                    <td class="text-right">${symbol} ${formatNumber(grn.insurance)}</td>
-                </tr>
-            `;
-        }
-        html += `
-            <tr class="total-row">
-                <td colspan="7" class="text-right">Grand Total:</td>
-                <td class="text-right">${symbol} ${formatNumber(grn.total_amount || 0)}</td>
-            </tr>
-        `;
-        return html;
-    }
-
-    // ============================================
-    // UTILITY FUNCTIONS
-    // ============================================
-
-    function formatNumber(num) {
-        return (num || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-    }
-
-    function formatDate(dateStr) {
-        if (!dateStr) return '-';
-        try {
-            const d = new Date(dateStr);
-            return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
-        } catch {
-            return dateStr;
-        }
-    }
-
-    function getFutureDate(days) {
-        const date = new Date();
-        date.setDate(date.getDate() + days);
-        return date.toISOString().split('T')[0];
-    }
-
-    async function updateExchangeRate() {
-        const currency = document.getElementById('poCurrency')?.value;
-        const rateInput = document.getElementById('poExchangeRate');
-
-        // 🔒 LOCKED: this field is read-only now -- always the Dashboard's
-        // shared exchange rate for a USD PO (1 for ZMW), never a typed-in
-        // value. Prevents a typo'd rate (like the 0.07-instead-of-19.5 bug)
-        // from corrupting batch cost, inventory value and the GL entry.
-        // To change it, update the shared rate on the Dashboard first.
-        if (currency === 'ZMW' && rateInput) {
-            rateInput.value = 1;
-        } else if (rateInput) {
-            // 🔥 FIX: re-fetch live instead of trusting whatever
-            // sharedZmwPerUsd happened to hold already -- switching to USD
-            // is a natural moment to also pick up a rate someone just
-            // corrected on the Dashboard, not just whatever was current at
-            // page load or when this modal last opened.
-            try {
-                sharedZmwPerUsd = await getSharedExchangeRate();
-            } catch (e) {
-                console.warn('Could not refresh shared exchange rate, using last known value:', e);
-            }
-            rateInput.value = sharedZmwPerUsd;
-        }
-        updatePOTotal();
-    }
-
-    function refreshPurchaseList() {
-        const searchTerm = document.getElementById('searchPurchase')?.value?.toLowerCase() || '';
-        const statusFilter = document.getElementById('statusFilter')?.value || '';
-        const supplierFilter = document.getElementById('supplierFilter')?.value || '';
-        
-        let filtered = state.orders || [];
-        
-        if (searchTerm) {
-            filtered = filtered.filter(o => 
-                (o.po_number || '').toLowerCase().includes(searchTerm) ||
-                (o.suppliers?.name || '').toLowerCase().includes(searchTerm)
-            );
-        }
-        if (statusFilter) {
-            filtered = filtered.filter(o => o.status === statusFilter);
-        }
-        if (supplierFilter) {
-            filtered = filtered.filter(o => o.supplier_id === supplierFilter);
-        }
-        
-        renderPurchaseOrders(filtered);
-    }
-
-    function showToast(message, type = 'success') {
-        const existing = document.querySelector('#customToast');
-        if (existing) existing.remove();
-
-        const toast = document.createElement('div');
-        toast.id = 'customToast';
-        const bgColor = type === 'success' ? '#059669' : type === 'error' ? '#dc2626' : type === 'warning' ? '#f59e0b' : '#2563eb';
-        toast.style.cssText = `
-            position: fixed; top: 20px; right: 20px; 
-            padding: 16px 24px; border-radius: 8px; 
-            color: white; font-weight: 500; z-index: 9999;
-            box-shadow: 0 4px 12px rgba(0,0,0,0.15);
-            animation: slideIn 0.3s ease;
-            background: ${bgColor};
-            max-width: 400px;
-        `;
-        toast.textContent = message;
-        document.body.appendChild(toast);
-
-        setTimeout(() => {
-            toast.style.animation = 'slideOut 0.3s ease';
-            setTimeout(() => toast.remove(), 300);
-        }, 3000);
-    }
-
-    // ============================================
-    // EVENT LISTENERS
-    // ============================================
-
-    function setupEventListeners() {
-        document.addEventListener('keydown', (e) => {
-            if (e.key === 'Escape') {
-                document.querySelectorAll('.modal.show').forEach(modal => {
-                    modal.classList.remove('show');
-                });
-            }
-        });
-
-        document.querySelectorAll('.modal').forEach(modal => {
-            modal.addEventListener('click', (e) => {
-                if (e.target === modal) {
-                    modal.classList.remove('show');
-                }
-            });
-        });
-
-        // Cancel PO Reason - Other field
-        document.getElementById('cancelReason')?.addEventListener('change', function() {
-            const otherField = document.getElementById('cancelReasonOther');
-            if (this.value === 'Other') {
-                otherField.style.display = 'block';
-                otherField.setAttribute('required', '');
-            } else {
-                otherField.style.display = 'none';
-                otherField.removeAttribute('required');
-                otherField.value = '';
-            }
-        });
-
-        // Cancel Remaining Reason - Other field
-        document.getElementById('cancelRemainingReason')?.addEventListener('change', function() {
-            const otherField = document.getElementById('cancelRemainingReasonOther');
-            if (this.value === 'Other') {
-                otherField.style.display = 'block';
-                otherField.setAttribute('required', '');
-            } else {
-                otherField.style.display = 'none';
-                otherField.removeAttribute('required');
-                otherField.value = '';
-            }
-        });
-
-        // Product search
-        const searchInput = document.getElementById('poProductSearch');
-        if (searchInput) {
-            // 🔥 CHANGED: 'input' (not 'keyup') re-runs the search as you
-            // type -- keydown below now owns Enter/Tab/Arrow keys instead
-            // of keyup re-searching on every key including those.
-            searchInput.addEventListener('input', function() {
-                searchProducts();
-            });
-            // 🔥 FIX (issue #1): opening the dropdown no longer requires
-            // typing anything -- clicking/focusing the field now shows
-            // the product list immediately, same as a normal dropdown.
-            searchInput.addEventListener('focus', function() {
-                searchProducts();
-            });
-            // 🔥 ADDED: arrow keys navigate the results, Enter or Tab adds
-            // whichever one is highlighted -- same request as "arrow keys
-            // should be working to select and tab to add". Tab deliberately
-            // does NOT preventDefault: it adds the product AND lets focus
-            // continue moving to the next field, same as a native <select>.
-            searchInput.addEventListener('keydown', function(e) {
-                const results = document.getElementById('poSearchResults');
-                if (!results || results.style.display === 'none') return;
-
-                if (e.key === 'ArrowDown') {
-                    e.preventDefault();
-                    if (!productSearchResults.length) return;
-                    productSearchHighlightIndex = Math.min(productSearchHighlightIndex + 1, productSearchResults.length - 1);
-                    renderSearchResultsList();
-                    scrollProductHighlightIntoView();
-                } else if (e.key === 'ArrowUp') {
-                    e.preventDefault();
-                    if (!productSearchResults.length) return;
-                    productSearchHighlightIndex = Math.max(productSearchHighlightIndex - 1, 0);
-                    renderSearchResultsList();
-                    scrollProductHighlightIntoView();
-                } else if (e.key === 'Enter') {
-                    e.preventDefault();
-                    if (productSearchHighlightIndex >= 0 && productSearchResults[productSearchHighlightIndex]) {
-                        addProductToPO(productSearchResults[productSearchHighlightIndex].id);
-                    }
-                } else if (e.key === 'Tab') {
-                    if (productSearchHighlightIndex >= 0 && productSearchResults[productSearchHighlightIndex]) {
-                        addProductToPO(productSearchResults[productSearchHighlightIndex].id);
-                    }
-                } else if (e.key === 'Escape') {
-                    results.style.display = 'none';
-                }
-            });
-            document.addEventListener('click', function(e) {
-                const results = document.getElementById('poSearchResults');
-                if (results && !searchInput.contains(e.target) && !results.contains(e.target)) {
-                    results.style.display = 'none';
-                }
-            });
-        }
-
-        const searchBtn = document.querySelector('.search-input-group .btn');
-        if (searchBtn) {
-            searchBtn.addEventListener('click', function(e) {
-                e.preventDefault();
-                searchProducts();
-            });
-        }
-
-        // Filters
-        const searchPurchase = document.getElementById('searchPurchase');
-        const statusFilter = document.getElementById('statusFilter');
-        const supplierFilter = document.getElementById('supplierFilter');
-        const overdueFilter = document.getElementById('overdueFilter');
-        
-        if (searchPurchase) searchPurchase.addEventListener('input', refreshPurchaseList);
-        if (statusFilter) statusFilter.addEventListener('change', refreshPurchaseList);
-        if (supplierFilter) supplierFilter.addEventListener('change', refreshPurchaseList);
-        if (overdueFilter) overdueFilter.addEventListener('change', refreshPurchaseList);
-
-        // 🔥 ADDED: Credit Note return-quantity inputs -- delegated since
-        // the rows are re-rendered every time the modal opens.
-        const cnLinesBody = document.getElementById('cnLinesBody');
-        if (cnLinesBody) {
-            cnLinesBody.addEventListener('input', function(e) {
-                const input = e.target.closest('.cn-return-qty');
-                if (!input) return;
-                const idx = parseInt(input.dataset.idx, 10);
-                const line = state.creditNoteLines[idx];
-                if (!line) return;
-
-                let qty = parseInt(input.value, 10);
-                if (isNaN(qty) || qty < 0) qty = 0;
-                if (qty > line.maxReturnable) qty = line.maxReturnable;
-                line.returnQty = qty;
-                input.value = qty;
-
-                const row = input.closest('tr');
-                const grn = state.currentViewGRNData;
-                const symbol = grn?.currency === 'ZMW' ? 'ZK' : '$';
-                const totalCell = row?.querySelector('.cn-line-total');
-                if (totalCell) totalCell.textContent = `${symbol} ${formatNumber(qty * line.purchase_rate)}`;
-
-                recalcCreditNoteTotals();
-            });
-        }
-    }
-
-    // ============================================
-    // TOAST CSS
-    // ============================================
-
-    if (!document.getElementById('customToastStyles')) {
-        const style = document.createElement('style');
-        style.id = 'customToastStyles';
-        style.textContent = `
-            @keyframes slideIn {
-                from { transform: translateX(100%); opacity: 0; }
-                to { transform: translateX(0); opacity: 1; }
-            }
-            @keyframes slideOut {
-                from { transform: translateX(0); opacity: 1; }
-                to { transform: translateX(100%); opacity: 0; }
-            }
-        `;
-        document.head.appendChild(style);
-    }
-
-    // ============================================
-    // EXPOSE TO GLOBAL SCOPE
-    // ============================================
-    // IMPORTANT: Functions must be exposed before rendering
-    // so inline onclick handlers in HTML can access them
-    
-    window.openNewPurchaseOrder = openNewPurchaseOrder;
-    window.editPO = editPO;
-    window.viewPO = viewPO;
-    window.deletePO = deletePO;
-    window.openGRN = openGRN;
-    window.viewGRN = viewGRN;
-    window.viewSingleGRNById = viewSingleGRNById;
-    window.closeModal = closeModal;
-    window.searchProducts = searchProducts;
-    window.addProductToPO = addProductToPO;
-    window.removePOLine = removePOLine;
-    window.updatePOLine = updatePOLine;
-    window.updateGRNLine = updateGRNLine;
-    window.toggleGRNLineReceive = toggleGRNLineReceive;
-    window.savePODraft = savePODraft;
-    window.submitPOForApproval = submitPOForApproval;
-    window.approvePO = approvePO;
-    window.postGRN = postGRN;
-    window.updateExchangeRate = updateExchangeRate;
-    window.updatePOTotal = updatePOTotal;
-    window.updateGRNTotal = updateGRNTotal;
-    window.validateInvoice = validateInvoice;
-    window.refreshPurchaseList = refreshPurchaseList;
-    window.printPO = printPO;
-    window.printPOFromView = printPOFromView;
-    window.printGRN = printGRN;
-    window.printFromView = printFromView;
-    window.showToast = showToast;
-    window.openReorderReport = openReorderReport;
-    window.generateReorderReport = generateReorderReport;
-    window.toggleAllReorderItems = toggleAllReorderItems;
-    window.updateReorderSelection = updateReorderSelection;
-    window.addSelectedToPO = addSelectedToPO;
-    window.toggleReorderGenericGroup = toggleReorderGenericGroup;
-    window.openCancelPO = openCancelPO;
-    window.openCancelPOFromModal = openCancelPOFromModal;
-    window.confirmCancelPO = confirmCancelPO;
-    window.openCancelRemainingPO = openCancelRemainingPO;
-    window.confirmCancelRemainingPO = confirmCancelRemainingPO;
-    window.receiveAllItems = receiveAllItems;
-    window.clearReceivedItems = clearReceivedItems;
-    window.checkOverduePOs = checkOverduePOs;
-    window.updateStats = updateStats;
-    window.openCreditNoteModal = openCreditNoteModal;
-    window.closeCreditNoteModal = closeCreditNoteModal;
-    window.saveCreditNote = saveCreditNote;
-    window.printSavedCreditNote = printSavedCreditNote;
-
-    // ============================================
-    // INITIALIZE
-    // ============================================
-    // 🔥 ADDED: load today's shared exchange rate FIRST, before anything
-    // that might read sharedZmwPerUsd (new-PO/new-supplier forms) could
-    // possibly be opened.
-    sharedZmwPerUsd = await getSharedExchangeRate();
-    ensureAddSupplierModal();
-    await ensureChartOfAccounts();
-    await loadSuppliers();
-    await loadPurchaseOrders();
-    setupEventListeners();
-
-    // 🔥 ADDED: searchable Supplier dropdowns -- same pattern as NHIMA
-    // Number search in Retail POS. 'contains' matching (not 'prefix')
-    // since staff may remember any part of a supplier's name, not just
-    // how it starts.
-    initSearchableSelect({ searchInputId: 'poSupplierSearch', selectId: 'poSupplier', panelId: 'poSupplierSearchPanel', matchMode: 'contains', getLabel: opt => opt.textContent });
-    initSearchableSelect({ searchInputId: 'supplierFilterSearch', selectId: 'supplierFilter', panelId: 'supplierFilterSearchPanel', matchMode: 'contains', getLabel: opt => opt.textContent });
-    initSearchableSelect({ searchInputId: 'reorderSupplierSearch', selectId: 'reorderSupplier', panelId: 'reorderSupplierSearchPanel', matchMode: 'contains', getLabel: opt => opt.textContent });
-
-    // 🔥 ADDED: same searchable-dropdown treatment for the Reorder
-    // Report's Category filter -- this one has no matching search
-    // <input> in the HTML, so it uses the auto-injecting version
-    // instead (builds its own search box next to the real <select>).
-    // Category options load asynchronously (populateReorderFilters());
-    // wiring it here is safe either way since initSearchableSelect()
-    // re-reads the live <option> list every time the box is opened.
-    makeSelectSearchable('reorderCategory', { matchMode: 'contains', getLabel: opt => opt.textContent });
-
-    console.log("✅ Purchase module initialized successfully!");
-})();
+// ============================================
+// PURCHASE MODULE - MAIN CONTROLLER (UPDATED)
+// ============================================
+
+(async function initPurchasePage() {
+    console.log("🛒 Purchase module initializing...");
+
+    if (typeof supabaseClient === 'undefined') {
+        console.error("❌ supabaseClient is not defined.");
+        return;
+    }
+
+    // 🔥 CHANGED: the shared window-level getCompanySettings() helper
+    // (assets/js/shared-company-settings.js) no longer exists on the site,
+    // so calling it here threw "getCompanySettings is not defined" and
+    // aborted this entire module's init. Self-contained now: reads the
+    // same single `company_settings` row directly, with a hardcoded
+    // fallback if that fails for any reason.
+    const companySettings = await (async function loadCompanySettingsInline() {
+        const fallback = {
+            company_name: 'GRIFFINS MEDICALS LIMITED',
+            address: 'Plot 3534, Freedomway, Lusaka',
+            phone: '+260 97 000 0000',
+            zamra_number: 'ZAMRA-123456',
+            purchase_order_prefix: 'PO'
+        };
+        try {
+            const { data, error } = await supabaseClient
+                .from('company_settings')
+                .select('company_name, address, phone, zamra_number, purchase_order_prefix')
+                .eq('id', 1)
+                .maybeSingle();
+            if (error || !data) return fallback;
+            return {
+                company_name: data.company_name || fallback.company_name,
+                address: data.address || fallback.address,
+                phone: data.phone || fallback.phone,
+                zamra_number: data.zamra_number || fallback.zamra_number,
+                purchase_order_prefix: data.purchase_order_prefix || fallback.purchase_order_prefix
+            };
+        } catch (e) {
+            console.warn('Could not load company_settings, using defaults:', e);
+            return fallback;
+        }
+    })();
+
+    // ============================================
+    // GLOBAL STATE
+    // ============================================
+    // 🔥 ADDED: today's shared exchange rate (assets/js/shared-exchange-rate.js),
+    // fetched once at init below and reused as the default everywhere this
+    // file needs a rate -- instead of a hardcoded 1.00/25.00 that had to be
+    // corrected by hand on every new PO / new supplier. Deliberately a
+    // plain variable read synchronously by resetPOForm() etc., NOT fetched
+    // on-demand at the moment those forms open -- some callers (e.g.
+    // addSelectedToPO()) populate form fields immediately after opening
+    // the PO modal without awaiting it, and an on-demand fetch there would
+    // race with -- and could clobber -- those fields.
+    let sharedZmwPerUsd = DEFAULT_EXCHANGE_RATE;
+
+    const state = {
+        orders: [],
+        suppliers: [],
+        poLines: [],
+        grnLines: [],
+        currentGRNOrderId: null,
+        currentGRNOrderData: null,
+        currentGRNCurrency: 'USD',
+        currentGRNExchangeRate: 1,
+        // 🔥 ADDED: which order is currently open in the "View PO Details"
+        // modal, and whether goods have actually been received against it
+        // (i.e. it has become a GRN) -- drives whether the modal's Print
+        // button prints the Purchase Order or the Goods Receipt Note.
+        currentViewOrderId: null,
+        currentViewHasGRN: false,
+        // 🔥 ADDED: Credit Note feature.
+        currentViewGRNData: null,
+        creditNoteLines: [],
+        creditNoteSupplierPayable: null,
+        lastSavedCreditNoteId: null,
+        isEditing: false,
+        reorderItems: [],
+        // 🔥 ADDED: products sharing a generic_name_id with something
+        // that IS due for reorder, but aren't themselves below min level
+        // yet -- surfaced as optional "you might consider this too"
+        // suggestions in the Reorder Report (see generateReorderReport()).
+        reorderSuggestedItems: [],
+        selectedReorderItems: [],
+        pendingCancelIndex: null,
+        // 🔥 ADDED (issue #2): existing batches per product, keyed by
+        // product_id -- loaded once per GRN so the batch number field can
+        // offer them as a dropdown.
+        existingBatchesByProduct: {}
+    };
+
+    // ============================================
+    // 🔥 CHART OF ACCOUNTS - AUTO CREATE MISSING ACCOUNTS
+    // ============================================
+    // This module had NO accounting/GL integration at all before this --
+    // GRNs were posted and payables created, but nothing ever touched
+    // journal_entries/journal_lines/chart_of_accounts. Account
+    // codes/names here match retail.js/wholesale.js/donation.js/writeoff.js
+    // exactly, so this never creates duplicates of shared accounts (Cash,
+    // Bank, Inventory, Opening Balance Equity) across the whole system --
+    // it just adds the one new account this module needs: Accounts Payable.
+    const REQUIRED_ACCOUNTS = [
+        { code: '1111', name: 'Cash in Hand (ZMW)', type: 'Asset', category: 'Current Asset', normal_balance: 'Debit' },
+        { code: '1121', name: 'Bank - ZMW', type: 'Asset', category: 'Current Asset', normal_balance: 'Debit' },
+        { code: '1400', name: 'Inventory', type: 'Asset', category: 'Current Asset', normal_balance: 'Debit' },
+        { code: '2001', name: 'Accounts Payable', type: 'Liability', category: 'Current Liability', normal_balance: 'Credit' },
+        { code: '3000', name: 'Opening Balance Equity', type: 'Equity', category: 'Equity', normal_balance: 'Credit' },
+        // 🔥 ADDED: Credit Note feature -- the ZMW balance a supplier owes
+        // back to us when goods are returned against a Cash-paid GRN (no
+        // supplier_payables row exists to reduce, so the credit is tracked
+        // here instead, and drawn down against future purchases).
+        { code: '1205', name: 'Advances to Suppliers', type: 'Asset', category: 'Current Asset', normal_balance: 'Debit' }
+    ];
+
+    async function ensureChartOfAccounts() {
+        try {
+            let created = 0, existing = 0;
+            for (const account of REQUIRED_ACCOUNTS) {
+                const { data: existingAccount, error: findError } = await supabaseClient
+                    .from('chart_of_accounts')
+                    .select('code, name')
+                    .eq('code', account.code)
+                    .maybeSingle();
+
+                if (findError && findError.code !== 'PGRST116') {
+                    console.error(`Error checking account ${account.code}:`, findError);
+                    continue;
+                }
+                if (existingAccount) { existing++; continue; }
+
+                const { error: insertError } = await supabaseClient
+                    .from('chart_of_accounts')
+                    .insert([{
+                        code: account.code,
+                        name: account.name,
+                        type: account.type,
+                        category: account.category,
+                        normal_balance: account.normal_balance,
+                        created_at: new Date().toISOString(),
+                        updated_at: new Date().toISOString()
+                    }]);
+
+                if (insertError) {
+                    console.error(`Error creating account ${account.code}:`, insertError);
+                } else {
+                    created++;
+                    console.log(`✅ Created account: ${account.code} - ${account.name}`);
+                }
+            }
+            console.log(`✅ Chart of Accounts sync complete: ${created} created, ${existing} existing`);
+            return { created, existing };
+        } catch (error) {
+            console.error('Error ensuring chart of accounts:', error);
+            return { created: 0, existing: 0, error };
+        }
+    }
+
+    async function getAccountCodesFromChartOfAccounts() {
+        try {
+            await ensureChartOfAccounts();
+            const accountNames = REQUIRED_ACCOUNTS.map(a => a.name);
+            const { data: accounts, error } = await supabaseClient
+                .from('chart_of_accounts')
+                .select('code, name')
+                .in('name', accountNames);
+
+            if (error) throw error;
+
+            const accountMap = {};
+            accounts.forEach(acc => {
+                const key = acc.name.toLowerCase().replace(/[^a-z0-9]/g, '_');
+                accountMap[key] = acc.code;
+            });
+
+            return {
+                cash_zmw: accountMap['cash_in_hand_zmw'] || '1111',
+                bank_zmw: accountMap['bank_zmw'] || '1121',
+                inventory: accountMap['inventory'] || '1400',
+                accounts_payable: accountMap['accounts_payable'] || '2001',
+                opening_balance_equity: accountMap['opening_balance_equity'] || '3000',
+                advances_to_suppliers: accountMap['advances_to_suppliers'] || '1205'
+            };
+        } catch (error) {
+            console.error('Error fetching account codes:', error);
+            return {
+                cash_zmw: '1111',
+                bank_zmw: '1121',
+                inventory: '1400',
+                accounts_payable: '2001',
+                opening_balance_equity: '3000',
+                advances_to_suppliers: '1205'
+            };
+        }
+    }
+
+    async function createGRNAccountingEntries(grnNumber, grnTotal, currency, exchangeRate, paymentType) {
+        try {
+            await ensureChartOfAccounts();
+            const accountCodes = await getAccountCodesFromChartOfAccounts();
+
+            // Ledger is ZMW-based -- convert if the PO/GRN was raised in USD.
+            const zmwAmount = currency === 'USD' ? grnTotal * (exchangeRate || 1) : grnTotal;
+
+            const creditAccount = paymentType === 'Credit' ? accountCodes.accounts_payable : accountCodes.cash_zmw;
+            const creditDescription = paymentType === 'Credit'
+                ? `Credit purchase via ${grnNumber}`
+                : `Cash purchase via ${grnNumber}`;
+
+            const journal = {
+                entry_date: new Date().toISOString().split('T')[0],
+                reference: grnNumber,
+                description: `Goods received - ${grnNumber}` + (currency === 'USD' ? ` (USD ${formatNumber(grnTotal)} @ ${exchangeRate})` : ''),
+                journal_number: `GRN-${new Date().getFullYear()}-${String(Math.floor(Math.random() * 10000)).padStart(4, '0')}`,
+                status: 'Posted',
+                created_at: new Date().toISOString()
+            };
+
+            // 🔥 CHANGED: both writes now go through withAuthRetry(). This
+            // function does ~10 background round trips first (ensureChartOfAccounts
+            // + getAccountCodesFromChartOfAccounts), so by the time it gets here
+            // a near-expiry session token can look stale and get a 403 -- that's
+            // exactly what silently dropped GRN-2026-00017's journal entry while
+            // everything else about that GRN (line items, stock, payable) saved
+            // fine. withAuthRetry refreshes the session and retries once instead
+            // of just failing.
+            const { data: journalData, error: jError } = await withAuthRetry(() => supabaseClient
+                .from('journal_entries')
+                .insert([journal])
+                .select());
+            if (jError) throw jError;
+
+            const { error: jlError } = await withAuthRetry(() => supabaseClient.from('journal_lines').insert([
+                { journal_entry_id: journalData[0].id, account_code: accountCodes.inventory, description: `Inventory received - ${grnNumber}`, debit: zmwAmount, credit: 0 },
+                { journal_entry_id: journalData[0].id, account_code: creditAccount, description: creditDescription, debit: 0, credit: zmwAmount }
+            ]));
+            if (jlError) throw jlError;
+
+            console.log(`✅ GRN accounting entries created for ${grnNumber} (${paymentType}, ZK${zmwAmount.toFixed(2)})`);
+        } catch (error) {
+            console.error('Error creating GRN accounting entries:', error);
+            showToast('GRN posted, but the accounting entry failed -- please check manually.', 'warning');
+        }
+    }
+
+    async function createOpeningPayableGLEntry(supplierId, supplierName, zmwAmount, note) {
+        try {
+            const accountCodes = await getAccountCodesFromChartOfAccounts();
+            const journal = {
+                entry_date: new Date().toISOString().split('T')[0],
+                reference: `OPEN-PAYABLE-${String(supplierId).slice(0, 8)}`,
+                description: `Opening payable for supplier: ${supplierName} (${note})`,
+                journal_number: `OPN-${new Date().getFullYear()}-${String(Math.floor(Math.random() * 10000)).padStart(4, '0')}`,
+                status: 'Posted',
+                created_at: new Date().toISOString()
+            };
+            const { data: journalData, error: jError } = await supabaseClient.from('journal_entries').insert([journal]).select();
+            if (jError) throw jError;
+
+            await supabaseClient.from('journal_lines').insert([
+                { journal_entry_id: journalData[0].id, account_code: accountCodes.opening_balance_equity, description: `Opening equity for payable - ${supplierName}`, debit: zmwAmount, credit: 0 },
+                { journal_entry_id: journalData[0].id, account_code: accountCodes.accounts_payable, description: `Opening payable - ${supplierName}`, debit: 0, credit: zmwAmount }
+            ]);
+            console.log(`✅ Opening payable GL entry created for ${supplierName}: ZK${zmwAmount}`);
+        } catch (error) {
+            console.error('Error creating opening payable GL entry:', error);
+        }
+    }
+
+    // ============================================
+    // LOAD DATA
+    // ============================================
+    
+    async function loadSuppliers() {
+        try {
+            // 🔥 CHANGED: added `phone` -- needed for the WhatsApp PO
+            // notification in createNewPO() below.
+            const { data, error } = await supabaseClient
+                .from('suppliers')
+                .select('id, name, phone')
+                .order('name', { ascending: true });
+
+            if (error) throw error;
+            state.suppliers = data || [];
+            console.log(`✅ Loaded ${state.suppliers.length} suppliers`);
+            populateSupplierSelects();
+        } catch (error) {
+            console.error('Error loading suppliers:', error);
+            state.suppliers = [];
+            populateSupplierSelects();
+        }
+    }
+
+    async function loadPurchaseOrders() {
+        try {
+            const { data, error } = await supabaseClient
+                .from('purchase_orders')
+                .select(`
+                    *,
+                    suppliers:supplier_id (name)
+                `)
+                .order('created_at', { ascending: false });
+
+            if (error) throw error;
+            state.orders = data || [];
+            console.log(`✅ Loaded ${state.orders.length} purchase orders`);
+            renderPurchaseOrders();
+            updateStats(state.orders);
+            checkOverduePOs(state.orders);
+        } catch (error) {
+            console.error('Error loading purchase orders:', error);
+            state.orders = [];
+            renderPurchaseOrders();
+            updateStats([]);
+        }
+    }
+
+    // ============================================
+    // SEARCH PRODUCTS
+    // ============================================
+
+    // 🔥 FIX (issue #1): previously this required typing at least 2
+    // characters before showing ANY results at all -- there was no way
+    // to just open a dropdown and browse. Now: empty search shows the
+    // first 20 products (alphabetical) so it behaves like a normal
+    // dropdown you can click straight into; typing still filters as
+    // before.
+    async function searchProducts() {
+        const searchInput = document.getElementById('poProductSearch');
+        const searchTerm = searchInput ? searchInput.value.trim() : '';
+        const resultsDiv = document.getElementById('poSearchResults');
+
+        if (!resultsDiv) return;
+
+        try {
+            let query = supabaseClient
+                .from('products')
+                .select('id, product_name, conversion_rate, generic_name_id')
+                .order('product_name', { ascending: true })
+                .limit(searchTerm ? 30 : 20);
+
+            if (searchTerm) {
+                // 🔥 CHANGED: match on generic name too, not just product
+                // name -- staff often know a drug by its generic name
+                // rather than the brand name it's stocked under. Finds any
+                // generic_names rows matching the term first, then ORs
+                // their ids into the same products query alongside the
+                // existing product_name match.
+                const escapedTerm = searchTerm.replace(/[%_]/g, '\\$&').replace(/[,()]/g, ' ');
+                const { data: matchingGenerics } = await supabaseClient
+                    .from('generic_names')
+                    .select('id')
+                    .ilike('name', `%${escapedTerm}%`);
+                const genericIds = (matchingGenerics || []).map(g => g.id);
+
+                const orClauses = [`product_name.ilike.%${escapedTerm}%`];
+                if (genericIds.length > 0) {
+                    orClauses.push(`generic_name_id.in.(${genericIds.join(',')})`);
+                }
+                query = query.or(orClauses.join(','));
+            }
+
+            const { data: products, error } = await query;
+
+            if (error) throw error;
+
+            let allProducts = [];
+            
+            if (products && products.length > 0) {
+                const genericIds = products.map(p => p.generic_name_id).filter(id => id);
+                let genericMap = {};
+                
+                if (genericIds.length > 0) {
+                    const { data: generics, error: genError } = await supabaseClient
+                        .from('generic_names')
+                        .select('id, name')
+                        .in('id', genericIds);
+                        
+                    if (!genError && generics) {
+                        generics.forEach(g => {
+                            genericMap[g.id] = g.name;
+                        });
+                    }
+                }
+                
+                allProducts = products.map(p => ({
+                    id: p.id,
+                    product_name: p.product_name,
+                    generic_name: genericMap[p.generic_name_id] || '',
+                    conversion_rate: p.conversion_rate || 1
+                }));
+
+                // 🔥 ADDED: last purchase cost, shown in the dropdown so
+                // you can eyeball pricing before deciding what to add.
+                const lastPurchaseMap = await fetchLastPurchaseCosts(allProducts.map(p => p.id));
+                allProducts = allProducts.map(p => ({ ...p, last_purchase: lastPurchaseMap[p.id] || null }));
+            }
+
+            displaySearchResults(allProducts);
+        } catch (error) {
+            console.error('Error searching products:', error);
+            displaySearchResults([]);
+        }
+    }
+
+    // 🔥 ADDED: keyboard state for the product search dropdown -- ArrowUp/
+    // ArrowDown move productSearchHighlightIndex, Enter/Tab add whichever
+    // result it's currently pointing at. Mirrors the same highlight
+    // pattern initSearchableSelect() already uses for Supplier search.
+    let productSearchResults = [];
+    let productSearchHighlightIndex = -1;
+
+    function displaySearchResults(products) {
+        productSearchResults = products || [];
+        productSearchHighlightIndex = productSearchResults.length ? 0 : -1;
+        renderSearchResultsList();
+        const resultsDiv = document.getElementById('poSearchResults');
+        if (resultsDiv) resultsDiv.style.display = 'block';
+    }
+
+    // Separate render step so arrow-key navigation can just redraw the
+    // highlight without re-querying the database on every keypress.
+    function renderSearchResultsList() {
+        const resultsDiv = document.getElementById('poSearchResults');
+        if (!resultsDiv) return;
+
+        if (!productSearchResults || productSearchResults.length === 0) {
+            resultsDiv.innerHTML = `<div class="result-item" style="color: #94a3b8; justify-content: center;">No products found</div>`;
+            return;
+        }
+
+        resultsDiv.innerHTML = productSearchResults.map((p, i) => `
+            <div class="result-item" data-index="${i}" onclick="addProductToPO('${p.id}')" style="${i === productSearchHighlightIndex ? 'background:#eff6ff;' : ''}">
+                <div>
+                    <strong>${p.product_name}</strong>
+                    <div style="font-size: 0.75rem; color: #94a3b8;">${p.generic_name || 'No generic'}</div>
+                    ${p.last_purchase ? `<div style="font-size: 0.7rem; color: #059669;">Last paid: ${p.last_purchase.currency === 'ZMW' ? 'ZK' : '$'}${Number(p.last_purchase.rate).toFixed(2)} &middot; ${formatDate(p.last_purchase.date)}</div>` : ''}
+                </div>
+                <span style="color: #94a3b8; font-size: 0.8rem; background: #f1f5f9; padding: 2px 8px; border-radius: 4px;">Pack: ${p.conversion_rate || 1}</span>
+            </div>
+        `).join('');
+    }
+
+    function scrollProductHighlightIntoView() {
+        const resultsDiv = document.getElementById('poSearchResults');
+        const el = resultsDiv?.querySelector(`.result-item[data-index="${productSearchHighlightIndex}"]`);
+        if (el) el.scrollIntoView({ block: 'nearest' });
+    }
+
+    // ============================================
+    // ADD PRODUCT TO PO
+    // ============================================
+
+    async function addProductToPO(productId) {
+        try {
+            const { data: product, error } = await supabaseClient
+                .from('products')
+                .select('id, product_name, conversion_rate, generic_name_id')
+                .eq('id', productId)
+                .single();
+
+            if (error) throw error;
+
+            let genericName = '';
+            if (product.generic_name_id) {
+                const { data: generic, error: genError } = await supabaseClient
+                    .from('generic_names')
+                    .select('name')
+                    .eq('id', product.generic_name_id)
+                    .single();
+                    
+                if (!genError && generic) {
+                    genericName = generic.name;
+                }
+            }
+
+            // 🔥 ADDED: last purchase cost for this specific product, so
+            // it's available to show right next to the Purchase Rate
+            // input once the line is on the PO, not just in the search
+            // dropdown.
+            const lastPurchaseMap = await fetchLastPurchaseCosts([productId]);
+            const lastPurchase = lastPurchaseMap[productId] || null;
+
+            const existing = state.poLines.find(l => l.product_id === productId);
+            if (existing) {
+                existing.order_quantity = (existing.order_quantity || 0) + 1;
+                existing.total_amount = (existing.order_quantity || 0) * (existing.purchase_rate || 0);
+                if (!existing.last_purchase && lastPurchase) existing.last_purchase = lastPurchase;
+                renderPOLines();
+                updatePOTotal();
+                clearSearchResults();
+                return;
+            }
+
+            state.poLines.push({
+                product_id: product.id,
+                product_name: product.product_name,
+                generic_name: genericName,
+                pack_size: product.conversion_rate || 1,
+                order_quantity: 1,
+                purchase_rate: 0,
+                total_amount: 0,
+                last_purchase: lastPurchase
+            });
+
+            renderPOLines();
+            updatePOTotal();
+            clearSearchResults();
+        } catch (error) {
+            console.error('Error adding product:', error);
+            showToast('Error adding product: ' + error.message, 'error');
+        }
+    }
+
+    function clearSearchResults() {
+        const results = document.getElementById('poSearchResults');
+        const search = document.getElementById('poProductSearch');
+        if (results) results.style.display = 'none';
+        if (search) search.value = '';
+        productSearchResults = [];
+        productSearchHighlightIndex = -1;
+    }
+
+    // ============================================
+    // REORDER REPORT
+    // ============================================
+
+    async function openReorderReport() {
+        console.log('📋 Opening reorder report...');
+        const modal = document.getElementById('reorderModal');
+        if (modal) modal.classList.add('show');
+        
+        await populateReorderFilters();
+        await generateReorderReport();
+    }
+
+    async function populateReorderFilters() {
+        const suppliers = state.suppliers || [];
+        
+        const supplierSelect = document.getElementById('reorderSupplier');
+        if (supplierSelect) {
+            const currentVal = supplierSelect.value;
+            supplierSelect.innerHTML = `<option value="">All Suppliers</option>` + 
+                suppliers.map(s => `<option value="${s.id}">${s.name}</option>`).join('');
+            if (currentVal) supplierSelect.value = currentVal;
+        }
+
+        try {
+            const { data: categories, error } = await supabaseClient
+                .from('categories')
+                .select('id, name')
+                .order('name');
+                
+            if (!error && categories) {
+                const catSelect = document.getElementById('reorderCategory');
+                if (catSelect) {
+                    catSelect.innerHTML = `<option value="">All Categories</option>` +
+                        categories.map(c => `<option value="${c.id}">${c.name}</option>`).join('');
+                    // 🔥 ADDED: .innerHTML above doesn't fire 'change', so the
+                    // injected searchable dropdown's visible text needs an
+                    // explicit nudge to stay in sync (same fix as
+                    // populateSupplierSelects()).
+                    if (typeof catSelect.__syncSearchLabel === 'function') catSelect.__syncSearchLabel();
+                }
+            }
+        } catch (e) {
+            console.log('Could not load categories');
+        }
+    }
+
+    async function generateReorderReport() {
+        try {
+            const supplierId = document.getElementById('reorderSupplier')?.value || '';
+            const categoryId = document.getElementById('reorderCategory')?.value || '';
+            
+            let query = supabaseClient
+                .from('products')
+                .select('id, product_name, conversion_rate, generic_name_id, supplier_id, category_id');
+
+            if (supplierId) {
+                query = query.eq('supplier_id', supplierId);
+            }
+            if (categoryId) {
+                query = query.eq('category_id', categoryId);
+            }
+
+            const { data: products, error } = await query;
+            if (error) throw error;
+
+            const genericMap = await fetchGenericNames(products);
+            const supplierMap = await fetchSupplierNames(products);
+            const categoryMap = await fetchCategoryNames(products);
+            const stockMap = await fetchStockLevels(products);
+
+            // 🔥 ADDED: last purchase cost + 3-month sales for every
+            // product in the current filter (not just the ones already
+            // known to be due) -- needed up front now because the "due"
+            // decision itself depends on combined generic-level sales,
+            // computed below.
+            const allIds = products.map(p => p.id);
+            const lastPurchaseMap = await fetchLastPurchaseCosts(allIds);
+
+            // 🔥 CHANGED (Minimum Order Qty removed entirely): reorder_qty
+            // tops current stock back up to the generic's own trailing
+            // 3-month demand, so one order lasts a full reorder cycle
+            // instead of landing right back below the trigger.
+            const salesMap = await fetchLast3MonthSales(allIds);
+
+            // 🔥 CHANGED: reorder decisions happen at the GENERIC NAME
+            // level, not per individual brand/product. Two brands of the
+            // same generic (e.g. Panadol and a generic Paracetamol) are
+            // the same medicine to a patient -- 40 units of Panadol plus
+            // 30 of the generic is 70 units of "Paracetamol" on the
+            // shelf, not two separate low-stock situations that happen to
+            // both be half-empty. Stock and 3-month sales are SUMMED
+            // across every brand sharing a generic_name_id. Only products
+            // with no generic name set (surgicals/instruments, per the
+            // earlier "some categories can't have a generic name"
+            // conversation) are judged on their own.
+            const genericGroups = {}; // generic_name_id -> { stock, sales, hasSales, brandCount }
+            products.forEach(p => {
+                if (!p.generic_name_id) return;
+                const g = genericGroups[p.generic_name_id] || {
+                    stock: 0,
+                    sales: 0,
+                    hasSales: false,
+                    brandCount: 0
+                };
+                g.stock += stockMap[p.id] || 0;
+                if (salesMap[p.id] !== undefined) { g.sales += salesMap[p.id]; g.hasSales = true; }
+                g.brandCount += 1;
+                genericGroups[p.generic_name_id] = g;
+            });
+
+            // 🔥 CHANGED (Minimum Order Qty removed entirely, per explicit
+            // request): the reorder trigger is now PURELY "stock below what
+            // this generic actually sold in the last 3 months". There's no
+            // stored minimum left to fall back on -- and deliberately no
+            // fallback of any kind -- for a generic/product with zero sales
+            // in that window: if it hasn't moved in 3 months, there's no
+            // case for reordering it regardless of how little is on the
+            // shelf, so it's simply left off this report until it has some
+            // sales history to judge it by.
+            const reorderItems = products.filter(p => {
+                const group = p.generic_name_id ? genericGroups[p.generic_name_id] : null;
+                if (group) return group.hasSales && group.stock < group.sales;
+                const ownSales = salesMap[p.id];
+                if (ownSales === undefined) return false;
+                const stock = stockMap[p.id] || 0;
+                return stock < ownSales;
+            });
+
+            const mapReorderItem = (p) => {
+                const ownStock = stockMap[p.id] || 0;
+                const ownSales = salesMap[p.id];
+                const group = p.generic_name_id ? genericGroups[p.generic_name_id] : null;
+                // groupStock/groupSales are the combined-across-brands
+                // figures actually used for the reorder math; ownStock
+                // stays available for display ("brand just for viewing").
+                // Every item reaching this point already has sales history
+                // (the filter above guarantees it), so groupSales is always
+                // defined here.
+                const groupStock = group ? group.stock : ownStock;
+                const groupSales = group ? group.sales : ownSales;
+
+                return {
+                    ...p,
+                    generic_name: genericMap[p.generic_name_id]?.name || '',
+                    supplier_name: supplierMap[p.supplier_id] || '',
+                    category_name: categoryMap[p.category_id] || '',
+                    current_stock: ownStock,
+                    is_grouped: !!group && group.brandCount > 1,
+                    group_stock: groupStock,
+                    three_month_sales: groupSales,
+                    // 🔥 Same total suggested-order figure is shown on
+                    // EVERY brand row that shares the due generic --
+                    // deliberately not auto-split between brands, since
+                    // which specific brand(s) to actually order from is a
+                    // purchasing decision for staff to make (via the
+                    // checkboxes + editable qty already on this table),
+                    // not something to guess at automatically.
+                    reorder_qty: Math.max(1, groupSales - groupStock),
+                    last_purchase: lastPurchaseMap[p.id] || null
+                };
+            };
+
+            state.reorderItems = reorderItems.map(mapReorderItem);
+            // Superseded by the generic-grouped logic above: every brand
+            // that shares a due generic is now itself listed as due
+            // (they're evaluated together), so there's nothing left that
+            // needs a separate "not due yet, but related" section.
+            state.reorderSuggestedItems = [];
+
+            console.log(`✅ Found ${state.reorderItems.length} items below reorder level (generic-combined)`);
+            renderReorderReport();
+        } catch (error) {
+            console.error('Error generating reorder report:', error);
+            const tbody = document.getElementById('reorderTableBody');
+            if (tbody) {
+                tbody.innerHTML = `<tr><td colspan="7" style="text-align: center; padding: 40px; color: #dc2626;">
+                    Error loading reorder report: ${error.message}
+                </td></tr>`;
+            }
+        }
+    }
+
+    async function fetchGenericNames(products) {
+        const genericIds = [...new Set(products.map(p => p.generic_name_id).filter(id => id))];
+        let genericMap = {};
+        if (genericIds.length > 0) {
+            const { data: generics, error: genError } = await supabaseClient
+                .from('generic_names')
+                .select('id, name')
+                .in('id', genericIds);
+
+            if (!genError && generics) {
+                generics.forEach(g => {
+                    genericMap[g.id] = { name: g.name };
+                });
+            }
+        }
+        return genericMap;
+    }
+
+    async function fetchSupplierNames(products) {
+        const supplierIds = products.map(p => p.supplier_id).filter(id => id);
+        let supplierMap = {};
+        if (supplierIds.length > 0) {
+            const { data: suppliers, error: supError } = await supabaseClient
+                .from('suppliers')
+                .select('id, name')
+                .in('id', supplierIds);
+                
+            if (!supError && suppliers) {
+                suppliers.forEach(s => {
+                    supplierMap[s.id] = s.name;
+                });
+            }
+        }
+        return supplierMap;
+    }
+
+    async function fetchCategoryNames(products) {
+        const categoryIds = products.map(p => p.category_id).filter(id => id);
+        let categoryMap = {};
+        if (categoryIds.length > 0) {
+            const { data: categories, error: catError } = await supabaseClient
+                .from('categories')
+                .select('id, name')
+                .in('id', categoryIds);
+                
+            if (!catError && categories) {
+                categories.forEach(c => {
+                    categoryMap[c.id] = c.name;
+                });
+            }
+        }
+        return categoryMap;
+    }
+
+    // 🔥 ADDED: PostgREST silently caps any single query at 1000 rows
+    // unless you page through it yourself with .range() -- with ~2,000
+    // qualifying sale_items rows in just the last 3 months (and growing
+    // every day), the old unpaged query in fetchLast3MonthSales() below
+    // was quietly dropping close to half of them. WHICH products got
+    // dropped was arbitrary -- whatever didn't make it into that first
+    // 1000 -- and that's exactly why Oxa 100mg showed "No sales history"
+    // despite having real sales as recently as today: its rows just
+    // weren't in the returned page. Not a one-off glitch, a genuine bug
+    // that gets worse as sales history grows. Every "fetch everything
+    // for these product IDs" query in this report gets the same
+    // treatment now, not just the one that happened to get caught.
+    async function fetchAllPages(buildQuery, pageSize = 1000) {
+        let allRows = [];
+        let from = 0;
+        while (true) {
+            const { data, error } = await buildQuery(from, from + pageSize - 1);
+            if (error) throw error;
+            allRows = allRows.concat(data || []);
+            if (!data || data.length < pageSize) break;
+            from += pageSize;
+        }
+        return allRows;
+    }
+
+    async function fetchStockLevels(products) {
+        const productIds = products.map(p => p.id);
+        let stockMap = {};
+
+        if (productIds.length > 0) {
+            try {
+                const batches = await fetchAllPages((from, to) =>
+                    supabaseClient
+                        .from('batches')
+                        .select('product_id, total_qty')
+                        .in('product_id', productIds)
+                        .range(from, to)
+                );
+
+                batches.forEach(b => {
+                    if (!stockMap[b.product_id]) stockMap[b.product_id] = 0;
+                    stockMap[b.product_id] += b.total_qty || 0;
+                });
+            } catch (batchError) {
+                console.warn('Could not load stock levels:', batchError);
+            }
+        }
+        return stockMap;
+    }
+
+    // ============================================
+    // 🔥 ADDED: LAST 3-MONTH SALES (for reorder qty)
+    // ============================================
+    // Returns { [product_id]: totalQtySold } summed over completed
+    // RETAIL/WHOLESALE sales in the trailing 3 months. Quotations,
+    // donations, and write-offs are deliberately excluded -- this is
+    // meant to reflect real customer demand, not every movement that
+    // touched stock. A product with no matching rows simply won't have a
+    // key in the returned map (see reorder_qty fallback below), rather
+    // than showing as a misleading 0.
+    async function fetchLast3MonthSales(productIds) {
+        const salesMap = {};
+        if (!productIds || productIds.length === 0) return salesMap;
+
+        try {
+            const threeMonthsAgo = new Date();
+            threeMonthsAgo.setMonth(threeMonthsAgo.getMonth() - 3);
+
+            // 🔥 FIX: was a single unpaged query -- see fetchAllPages()
+            // above for why that silently lost real sales history (this
+            // is the exact query that was dropping Oxa 100mg and others).
+            const data = await fetchAllPages((from, to) =>
+                supabaseClient
+                    .from('sale_items')
+                    .select('product_id, quantity, sales!inner(client_type, is_quotation, created_at)')
+                    .in('product_id', productIds)
+                    .in('sales.client_type', ['RETAIL', 'WHOLESALE'])
+                    .neq('sales.is_quotation', true)
+                    .gte('sales.created_at', threeMonthsAgo.toISOString())
+                    .range(from, to)
+            );
+
+            data.forEach(row => {
+                salesMap[row.product_id] = (salesMap[row.product_id] || 0) + (row.quantity || 0);
+            });
+        } catch (error) {
+            console.warn('Could not load last 3-month sales:', error);
+        }
+
+        return salesMap;
+    }
+
+    // ============================================
+    // 🔥 ADDED: LAST PURCHASE COST
+    // ============================================
+    // "Generic name" was already tracked on products but never actually
+    // used for anything -- this, and the reorder-suggestion logic below,
+    // are the first real uses of it.
+    //
+    // Returns { [product_id]: { rate, currency, date } } for whichever
+    // product IDs are passed in, based on actual goods received (not
+    // just ordered) -- goods_receipt_lines is what was really paid for,
+    // joined to its parent GRN for currency/date, since GRN lines don't
+    // carry their own currency column. Ordered most-recent-first and we
+    // only keep the first row seen per product, so this always reflects
+    // the LAST purchase, not an average or a random one.
+    //
+    // Deliberately does not fall back to purchase_order_lines (the
+    // ordered rate) when there's no GRN history -- an order that hasn't
+    // actually been received yet isn't a "last cost paid", and showing
+    // it as one would be misleading.
+    async function fetchLastPurchaseCosts(productIds) {
+        const lastPurchaseMap = {};
+        if (!productIds || productIds.length === 0) return lastPurchaseMap;
+
+        try {
+            // 🔥 FIX: paginated for the same reason as fetchLast3MonthSales()
+            // above -- small today (22 rows total), but the same silent-
+            // truncation trap as the store's purchase history grows.
+            const data = await fetchAllPages((from, to) =>
+                supabaseClient
+                    .from('goods_receipt_lines')
+                    .select('product_id, purchase_rate, created_at, goods_receipt_notes(currency, exchange_rate, received_date, entry_date)')
+                    .in('product_id', productIds)
+                    .order('created_at', { ascending: false })
+                    .range(from, to)
+            );
+
+            data.forEach(line => {
+                if (lastPurchaseMap[line.product_id]) return; // already have a more recent row
+                const grn = line.goods_receipt_notes || {};
+                lastPurchaseMap[line.product_id] = {
+                    rate: line.purchase_rate || 0,
+                    currency: grn.currency || 'USD',
+                    date: grn.received_date || grn.entry_date || line.created_at
+                };
+            });
+        } catch (error) {
+            console.warn('Could not load last purchase costs:', error);
+        }
+
+        return lastPurchaseMap;
+    }
+
+    function renderReorderReport() {
+        const tbody = document.getElementById('reorderTableBody');
+        if (!tbody) return;
+
+        if (state.reorderItems.length === 0 && state.reorderSuggestedItems.length === 0) {
+            tbody.innerHTML = `<tr><td colspan="7" style="text-align: center; padding: 40px; color: #22c55e;">
+                <i class="fa-regular fa-circle-check" style="font-size: 2rem; display: block; margin-bottom: 10px;"></i>
+                All products are above reorder level
+            </td></tr>`;
+            state.selectedReorderItems = [];
+            return;
+        }
+
+        // 🔥 CHANGED: due items are now grouped by generic before
+        // rendering. A generic with more than one brand due (item.is_grouped)
+        // collapses into ONE clickable header row -- expand it to see
+        // exactly which brands make up the combined total and how much
+        // stock each one holds. A single-brand generic, or a product with
+        // no generic at all, still renders as one plain row exactly as
+        // before -- there's nothing to collapse.
+        const byGeneric = {};
+        const standaloneItems = [];
+        state.reorderItems.forEach(item => {
+            if (item.is_grouped && item.generic_name_id) {
+                if (!byGeneric[item.generic_name_id]) byGeneric[item.generic_name_id] = [];
+                byGeneric[item.generic_name_id].push(item);
+            } else {
+                standaloneItems.push(item);
+            }
+        });
+
+        let rowsHtml = Object.keys(byGeneric)
+            .map(genericId => renderGenericGroupRow(genericId, byGeneric[genericId]))
+            .join('');
+        rowsHtml += standaloneItems.map((item) => renderReorderRow(item, false)).join('');
+
+        if (rowsHtml === '') {
+            rowsHtml = `<tr><td colspan="7" style="text-align: center; padding: 20px; color: #22c55e;">
+                   No items below reorder level right now
+               </td></tr>`;
+        }
+
+        // 🔥 ADDED: "same generic name" suggestions -- rendered as a
+        // visually distinct group below the items actually due, so it
+        // reads as optional rather than as more of the same list.
+        if (state.reorderSuggestedItems.length > 0) {
+            rowsHtml += `<tr><td colspan="7" style="padding: 10px 12px; background: #f8fafc; color: #64748b; font-size: 0.75rem; font-weight: 600; border-top: 2px dashed #e2e8f0;">
+                <i class="fa-solid fa-link"></i> Same generic name as an item above -- not yet due, but worth considering while you're ordering
+            </td></tr>`;
+            rowsHtml += state.reorderSuggestedItems.map((item) => renderReorderRow(item, true)).join('');
+        }
+
+        tbody.innerHTML = rowsHtml;
+
+        state.selectedReorderItems = [];
+        const selectAll = document.getElementById('selectAllReorder');
+        if (selectAll) selectAll.checked = false;
+    }
+
+    // 🔥 CHANGED (dynamic-threshold pivot): one collapsed, clickable row
+    // per generic that has more than one brand due -- combined stock, a
+    // suggested total reorder figure, and every contributing brand
+    // available underneath (collapsed by default) via the chevron. The
+    // "Min Level" column is no longer a manual number to maintain: when
+    // there's 3-month sales history it shows that computed demand
+    // figure (read-only -- it's not something staff type in, it's
+    // whatever the generic actually sold), and only falls back to the
+    // old editable Minimum Order Qty input for the no-sales-history case,
+    // where there's nothing dynamic to show yet.
+    function renderGenericGroupRow(genericId, brands) {
+        const first = brands[0];
+        const groupId = `reorder-generic-${genericId}`;
+        const hasSales = first.three_month_sales !== undefined;
+        // Every generic reaching this row already has sales history --
+        // that's now the only way onto the report at all (see
+        // generateReorderReport()'s due-decision) -- so this is always the
+        // sales label, no fallback branch left to handle.
+        const salesLabel = `3-mo sales (all brands): ${first.three_month_sales}`;
+        const allSameSupplier = brands.every(b => b.supplier_id === first.supplier_id);
+        const supplierLabel = allSameSupplier ? (first.supplier_name || '-') : 'Multiple suppliers';
+
+        const headerRow = `
+            <tr class="reorder-generic-header" style="background:#eff6ff; cursor:pointer;" onclick="toggleReorderGenericGroup('${groupId}')">
+                <td></td>
+                <td colspan="2">
+                    <i class="fa-solid fa-chevron-right reorder-generic-chevron" id="chevron-${groupId}" style="margin-right:8px; transition: transform 0.15s; display:inline-block;"></i>
+                    <strong>${first.generic_name || 'Unnamed generic'}</strong>
+                    <span style="margin-left:6px; background:#dbeafe; color:#1d4ed8; padding:1px 7px; border-radius:8px; font-size:0.65rem; font-weight:600;">${brands.length} brands</span>
+                </td>
+                <td style="color:#dc2626; font-weight:600;">${first.group_stock}</td>
+                <td>
+                    <span style="font-weight:600;">${first.three_month_sales}</span>
+                    <br><span style="font-size:0.62rem; color:#64748b;">3-mo demand</span>
+                </td>
+                <td>${supplierLabel}</td>
+                <td>
+                    <span style="font-weight:600;">Suggested total: ${first.reorder_qty || 1}</span>
+                    <br><span style="font-size:0.68rem; color:#64748b;">${salesLabel}</span>
+                </td>
+            </tr>
+        `;
+
+        const childRows = brands.map(item => renderReorderRow(item, false, groupId)).join('');
+        return headerRow + childRows;
+    }
+
+    // 🔥 ADDED: expand/collapse the brands nested under a generic header
+    // row -- exposed on window since it's wired up via onclick in the
+    // generated HTML above, which runs in global scope, not this file's
+    // module closure.
+    function toggleReorderGenericGroup(groupId) {
+        const isHidden = document.querySelector(`tr.reorder-generic-child[data-group="${groupId}"]`)?.style.display === 'none';
+        document.querySelectorAll(`tr.reorder-generic-child[data-group="${groupId}"]`).forEach(row => {
+            row.style.display = isHidden ? 'table-row' : 'none';
+        });
+        const chevron = document.getElementById(`chevron-${groupId}`);
+        if (chevron) chevron.style.transform = isHidden ? 'rotate(90deg)' : 'rotate(0deg)';
+    }
+
+    // 🔥 ADDED: shared row renderer for the "due" list (grouped or
+    // standalone), its nested brand rows under a generic header, and the
+    // "same generic name" suggestions below it -- isSuggested only
+    // changes the visual treatment (badge + muted stock color); groupId,
+    // when passed, marks this row as a child of a collapsed generic
+    // header (hidden by default, indented, and the now-redundant
+    // "combined with other brands" badge/subline are skipped since the
+    // header row above already shows that). All variants use the same
+    // checkbox/qty mechanism so they flow through updateReorderSelection()
+    // identically.
+    function renderReorderRow(item, isSuggested, groupId) {
+        const lastPurchaseHtml = item.last_purchase
+            ? `<br><span style="font-size: 0.68rem; color: #059669;">Last: ${item.last_purchase.currency === 'ZMW' ? 'ZK' : '$'}${Number(item.last_purchase.rate).toFixed(2)} &middot; ${formatDate(item.last_purchase.date)}</span>`
+            : '';
+        // Badge/subline only make sense on a row rendered OUTSIDE a
+        // generic group header (there's currently no such case left where
+        // is_grouped is true but groupId is absent, but keeping this
+        // guard is what makes that safe if it ever comes up again).
+        const groupedBadge = (item.is_grouped && !groupId)
+            ? `<span style="margin-left: 6px; background: #dbeafe; color: #1d4ed8; padding: 1px 7px; border-radius: 8px; font-size: 0.65rem; font-weight: 600;" title="Reorder decision uses the combined stock of every brand sharing this generic name">Combined w/ other brands</span>`
+            : '';
+        const stockStyle = 'color: #dc2626; font-weight: 600;';
+        const groupStockHtml = (item.is_grouped && !groupId)
+            ? `<br><span style="font-size: 0.65rem; color: #64748b;">Generic total: ${item.group_stock} / 3-mo demand ${item.three_month_sales}</span>`
+            : '';
+
+        // 🔥 CHANGED (Minimum Order Qty removed entirely): every item on
+        // this report now has 3-month sales history by definition -- that's
+        // the only way onto it (see generateReorderReport()'s due-decision)
+        // -- so this column is always the dynamic demand figure, never a
+        // stored minimum.
+        const minQtyDisplay = `${item.three_month_sales} <span style="font-size:0.62rem; color:#64748b;">(3-mo demand)</span>`;
+
+        const childRowAttrs = groupId
+            ? `class="reorder-generic-child" data-group="${groupId}" style="display:none; background:#f8fafc;"`
+            : '';
+        const productCellPadding = groupId ? 'padding-left: 34px;' : '';
+
+        return `
+            <tr ${childRowAttrs}>
+                <td><input type="checkbox" class="reorder-checkbox" data-id="${item.id}" onchange="updateReorderSelection()"></td>
+                <td style="${productCellPadding}">
+                    <strong>${item.product_name}</strong>${groupedBadge}
+                    ${lastPurchaseHtml}
+                </td>
+                <td>${item.generic_name || '-'}</td>
+                <td style="${stockStyle}">${item.current_stock}${groupStockHtml}</td>
+                <td>${minQtyDisplay}</td>
+                <td>${item.supplier_name || '-'}</td>
+                <td>
+                    <input type="number" class="form-control reorder-qty-input"
+                        data-id="${item.id}" value="${item.reorder_qty || 1}"
+                        style="width: 80px; padding: 4px 8px;" min="1"
+                        onchange="updateReorderSelection()">
+                    <br><span style="font-size: 0.68rem; color: #64748b;">3-mo sales${item.is_grouped ? ' (all brands)' : ''}: ${item.three_month_sales}</span>
+                </td>
+            </tr>
+        `;
+    }
+
+    function toggleAllReorderItems() {
+        const checked = document.getElementById('selectAllReorder')?.checked || false;
+        document.querySelectorAll('.reorder-checkbox').forEach(cb => cb.checked = checked);
+        updateReorderSelection();
+    }
+
+    function updateReorderSelection() {
+        state.selectedReorderItems = [];
+        document.querySelectorAll('.reorder-checkbox:checked').forEach(cb => {
+            const id = cb.dataset.id;
+            // 🔥 CHANGED: a checked row can now come from either the
+            // "due" list or the "same generic name" suggestions -- look
+            // in both.
+            const item = state.reorderItems.find(p => p.id === id)
+                || state.reorderSuggestedItems.find(p => p.id === id);
+            if (item) {
+                const qtyInput = document.querySelector(`.reorder-qty-input[data-id="${id}"]`);
+                const qty = parseInt(qtyInput?.value) || item.reorder_qty || 1;
+                state.selectedReorderItems.push({
+                    ...item,
+                    reorder_qty: qty
+                });
+            }
+        });
+    }
+
+    function addSelectedToPO() {
+        if (state.selectedReorderItems.length === 0) {
+            showToast('Please select at least one item', 'error');
+            return;
+        }
+
+        closeModal('reorderModal');
+
+        const poModal = document.getElementById('poModal');
+        if (!poModal || !poModal.classList.contains('show')) {
+            openNewPurchaseOrder();
+        }
+
+        const firstItem = state.selectedReorderItems[0];
+        if (firstItem && firstItem.supplier_id) {
+            const supplierSelect = document.getElementById('poSupplier');
+            if (supplierSelect) {
+                supplierSelect.value = firstItem.supplier_id;
+            }
+        }
+
+        const allSameSupplier = state.selectedReorderItems.every(item => 
+            item.supplier_id === firstItem?.supplier_id
+        );
+
+        if (!allSameSupplier && state.selectedReorderItems.length > 1) {
+            showToast('Selected items have different suppliers. Please add them separately.', 'warning');
+            return;
+        }
+
+        state.selectedReorderItems.forEach(item => {
+            const existing = state.poLines.find(l => l.product_id === item.id);
+            if (existing) {
+                existing.order_quantity += item.reorder_qty || 1;
+                existing.total_amount = (existing.order_quantity || 0) * (existing.purchase_rate || 0);
+            } else {
+                state.poLines.push({
+                    product_id: item.id,
+                    product_name: item.product_name,
+                    generic_name: item.generic_name || '',
+                    pack_size: item.conversion_rate || 1,
+                    order_quantity: item.reorder_qty || 1,
+                    purchase_rate: 0,
+                    total_amount: 0,
+                    last_purchase: item.last_purchase || null // 🔥 ADDED -- carried over from the reorder report, already fetched
+                });
+            }
+        });
+
+        renderPOLines();
+        updatePOTotal();
+        showToast(`Added ${state.selectedReorderItems.length} items to purchase order`, 'success');
+    }
+
+    // ============================================
+    // RENDER FUNCTIONS
+    // ============================================
+
+    function renderPurchaseOrders(orders = null) {
+        const list = orders || state.orders;
+        const tbody = document.getElementById('purchaseTableBody');
+        if (!tbody) return;
+        
+        const filtered = applyFilters(list);
+        
+        if (filtered.length === 0) {
+            tbody.innerHTML = `<tr><td colspan="6" style="text-align: center; padding: 40px; color: #94a3b8;">
+                <i class="fa-regular fa-file-lines" style="font-size: 2rem; display: block; margin-bottom: 10px;"></i>
+                No purchase orders found
+            </td></tr>`;
+            updateOrderCount(0);
+            return;
+        }
+
+        tbody.innerHTML = filtered.map(order => renderOrderRow(order)).join('');
+        updateOrderCount(filtered.length);
+    }
+
+    function applyFilters(list) {
+        const overdueFilter = document.getElementById('overdueFilter')?.value || 'all';
+        let filtered = list;
+        
+        // First, exclude all completed/cancelled orders
+        const completedStatuses = ['Cancelled', 'Closed', 'Goods Received', 'Received', 'Completed', 'Fully Received'];
+        
+        if (overdueFilter === 'overdue') {
+            const today = new Date();
+            today.setHours(0, 0, 0, 0);
+            filtered = filtered.filter(o => {
+                // Exclude completed/cancelled orders
+                if (completedStatuses.includes(o.status)) return false;
+                if (o.fully_received === true) return false;
+                if (!o.expected_delivery_date) return false;
+                const expectedDate = new Date(o.expected_delivery_date);
+                expectedDate.setHours(0, 0, 0, 0);
+                return expectedDate < today;
+            });
+        } else if (overdueFilter === 'upcoming') {
+            const today = new Date();
+            today.setHours(0, 0, 0, 0);
+            const future = new Date(today);
+            future.setDate(future.getDate() + 7);
+            filtered = filtered.filter(o => {
+                // Exclude completed/cancelled orders
+                if (completedStatuses.includes(o.status)) return false;
+                if (o.fully_received === true) return false;
+                if (!o.expected_delivery_date) return false;
+                const expectedDate = new Date(o.expected_delivery_date);
+                expectedDate.setHours(0, 0, 0, 0);
+                return expectedDate >= today && expectedDate <= future;
+            });
+        }
+        
+        return filtered;
+    }
+
+    function renderOrderRow(order) {
+        const statusClass = (order.status || 'Draft').toLowerCase().replace(/ /g, '-');
+        const supplierName = order.suppliers?.name || 'Unknown';
+        const symbol = order.currency === 'ZMW' ? 'ZK' : '$';
+        const isOverdue = checkIfOverdue(order);
+        
+        const totalReceivedQty = order.total_received_quantity || 0;
+        const totalCancelledQty = order.total_cancelled_quantity || 0;
+        const totalOrderQty = order.total_quantity || 0;
+        // Remaining = Ordered - Received - Cancelled (calculated)
+        const remainingQty = totalOrderQty - totalReceivedQty - totalCancelledQty;
+        
+        return `
+        <tr style="${isOverdue && !['Cancelled', 'Closed', 'Goods Received'].includes(order.status) ? 'background: #fef2f2;' : ''}">
+            <td style="padding-left: 20px; font-weight: 500;">
+                ${order.po_number || 'N/A'}
+                ${isOverdue && !['Cancelled', 'Closed', 'Goods Received'].includes(order.status) ? 
+                    `<span style="font-size: 0.6rem; color: #dc2626; display: block;">⚠️ OVERDUE</span>` : ''}
+            </td>
+            <td>${supplierName}</td>
+            <td>
+                ${formatDate(order.expected_delivery_date)}
+                ${isOverdue && !['Cancelled', 'Closed', 'Goods Received'].includes(order.status) ? 
+                    `<span style="font-size: 0.6rem; color: #dc2626; display: block;">${getDaysOverdue(order)} days overdue</span>` : ''}
+            </td>
+            <td>
+                <span class="status-badge status-${statusClass}">${order.status || 'Draft'}</span>
+                ${renderOrderStatusDetails(order, remainingQty, totalReceivedQty, totalCancelledQty)}
+            </td>
+            <td style="text-align: right; padding-right: 20px;">
+                ${symbol} ${formatNumber(order.total_amount || 0)}
+                ${renderOrderTotals(order, symbol)}
+            </td>
+            <td style="text-align: center;">
+                <div class="action-buttons">
+                    ${renderOrderActions(order)}
+                </div>
+            </td>
+        </tr>
+        `;
+    }
+
+    function renderOrderStatusDetails(order, remainingQty, totalReceivedQty, totalCancelledQty) {
+        let html = '';
+        
+        if (totalReceivedQty > 0 && totalCancelledQty > 0) {
+            html += `<span style="font-size: 0.6rem; color: #f59e0b; display: block;">📦 Received: ${totalReceivedQty} | ❌ Cancelled: ${totalCancelledQty}</span>`;
+        } else if (totalReceivedQty > 0 && remainingQty > 0) {
+            html += `<span style="font-size: 0.6rem; color: #f59e0b; display: block;">Remaining: ${remainingQty}</span>`;
+        } else if (totalCancelledQty > 0 && order.status !== 'Cancelled') {
+            html += `<span style="font-size: 0.6rem; color: #dc2626; display: block;">Cancelled: ${totalCancelledQty}</span>`;
+        }
+        
+        if (totalReceivedQty > 0 && order.status !== 'Goods Received') {
+            html += `<span style="font-size: 0.6rem; color: #10b981; display: block;">Received: ${totalReceivedQty}</span>`;
+        }
+        
+        return html;
+    }
+
+    function renderOrderTotals(order, symbol) {
+        let html = '';
+        if (order.total_received_amount > 0) {
+            html += `<br><span style="font-size: 0.65rem; color: #10b981;">Received: ${symbol} ${formatNumber(order.total_received_amount)}</span>`;
+        }
+        if (order.total_cancelled_amount > 0) {
+            html += `<br><span style="font-size: 0.65rem; color: #dc2626;">Cancelled: ${symbol} ${formatNumber(order.total_cancelled_amount)}</span>`;
+        }
+        if (order.remaining_amount > 0 && order.status !== 'Draft' && order.status !== 'Cancelled') {
+            html += `<br><span style="font-size: 0.65rem; color: #f59e0b;">Remaining: ${symbol} ${formatNumber(order.remaining_amount)}</span>`;
+        }
+        return html;
+    }
+
+    // ============================================
+    // RENDER ORDER ACTIONS - UPDATED WITH CANCEL REMAINING
+    // ============================================
+
+    function renderOrderActions(order) {
+        const remainingQty = (order.total_quantity || 0) - (order.total_received_quantity || 0) - (order.total_cancelled_quantity || 0);
+        
+        let html = `
+            <button class="action-btn" onclick="viewPO('${order.id}')" title="View Details">
+                <i class="fa-regular fa-eye"></i>
+            </button>
+        `;
+        
+        // GRN button - only for Approved or Partially Received with remaining items
+        if ((order.status === 'Approved' || order.status === 'Partially Received') && 
+            order.status !== 'Cancelled' && 
+            remainingQty > 0) {
+            html += `
+                <button class="action-btn grn" onclick="openGRN('${order.id}')" title="Receive Goods">
+                    <i class="fa-solid fa-boxes"></i>
+                </button>
+            `;
+        }
+        
+        // Edit/Delete - only for Draft or Pending Approval
+        if (order.status === 'Draft' || order.status === 'Pending Approval') {
+            html += `
+                <button class="action-btn" onclick="editPO('${order.id}')" title="Edit">
+                    <i class="fa-regular fa-pen-to-square"></i>
+                </button>
+                <button class="action-btn" onclick="deletePO('${order.id}')" title="Delete" style="color: #ef4444;">
+                    <i class="fa-regular fa-trash-can"></i>
+                </button>
+            `;
+        }
+        
+        // Cancel Remaining - show when there are remaining items to cancel
+        // Only show for Approved or Partially Received with remaining > 0
+        if (remainingQty > 0 && 
+            (order.status === 'Approved' || order.status === 'Partially Received') &&
+            order.status !== 'Cancelled' && 
+            order.status !== 'Closed' && 
+            order.status !== 'Goods Received') {
+            html += `
+                <button class="action-btn cancel-remaining" onclick="openCancelRemainingPO('${order.id}')" title="Cancel Remaining Items" style="color: #f59e0b;">
+                    <i class="fa-solid fa-ban"></i> Cancel Remaining
+                </button>
+            `;
+        }
+        
+        // Cancel Full PO - only for Approved with nothing received
+        if (order.status === 'Approved' && order.total_received_quantity === 0 && order.total_cancelled_quantity === 0) {
+            html += `
+                <button class="action-btn" onclick="openCancelPO('${order.id}')" title="Cancel Full PO" style="color: #ef4444;">
+                    <i class="fa-solid fa-ban"></i> Cancel PO
+                </button>
+            `;
+        }
+        
+        // View GRN - for Goods Received or Closed
+        if (order.status === 'Goods Received' || order.status === 'Closed') {
+            html += `
+                <button class="action-btn" onclick="viewGRN('${order.id}')" title="View GRN" style="color: #22c55e;">
+                    <i class="fa-regular fa-receipt"></i>
+                </button>
+            `;
+        }
+        
+        if (order.status === 'Pending Approval') {
+            html += `
+                <span style="font-size: 0.7rem; color: #f59e0b; padding: 2px 8px; background: #fef3c7; border-radius: 12px;">
+                    <i class="fa-regular fa-clock"></i> Awaiting Approval
+                </span>
+            `;
+        }
+        
+        if (order.status === 'Cancelled') {
+            html += `
+                <span style="font-size: 0.7rem; color: #64748b; padding: 2px 8px; background: #e2e8f0; border-radius: 12px;">
+                    <i class="fa-solid fa-ban"></i> Cancelled
+                </span>
+            `;
+        }
+        
+        return html;
+    }
+
+    function checkIfOverdue(order) {
+        if (!order.expected_delivery_date) return false;
+        // Overdue is a flag, not a status - exclude completed/cancelled
+        if (['Cancelled', 'Closed', 'Goods Received'].includes(order.status)) return false;
+        if (order.fully_received === true) return false;
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+        const expectedDate = new Date(order.expected_delivery_date);
+        expectedDate.setHours(0, 0, 0, 0);
+        // Only overdue if remaining > 0
+        const remaining = (order.total_quantity || 0) - (order.total_received_quantity || 0) - (order.total_cancelled_quantity || 0);
+        if (remaining <= 0) return false;
+        return expectedDate < today;
+    }
+
+    function getDaysOverdue(order) {
+        if (!order.expected_delivery_date) return 0;
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+        const expectedDate = new Date(order.expected_delivery_date);
+        expectedDate.setHours(0, 0, 0, 0);
+        return Math.floor((today - expectedDate) / (1000 * 60 * 60 * 24));
+    }
+
+    function updateOrderCount(count) {
+        const countSpan = document.getElementById('poCount');
+        const countDisplay = document.getElementById('poCountDisplay');
+        if (countSpan) countSpan.textContent = `${count} orders`;
+        if (countDisplay) countDisplay.textContent = `${count} orders`;
+    }
+
+    // ============================================
+    // 🔥 ADDED: SEARCHABLE SUPPLIER DROPDOWN
+    // ============================================
+    // Same type-to-filter dropdown pattern as the NHIMA Number / Phone
+    // Number search boxes in Retail POS (initSearchableSelect() there) --
+    // generalized here with getLabel(), since a plain <select> matches on
+    // its option VALUE, but here the value needs to stay the supplier's
+    // database id (what actually gets saved) while the search/display
+    // text is the supplier's NAME. The real <select> stays in the DOM,
+    // hidden -- every place that reads e.g. document.getElementById
+    // ('poSupplier').value keeps working unchanged.
+    function initSearchableSelect({ searchInputId, selectId, panelId, normalize, matchMode, getLabel }) {
+        const searchInput = document.getElementById(searchInputId);
+        const select = document.getElementById(selectId);
+        if (!searchInput || !select) return;
+        const normalizeFn = normalize || (v => (v || '').toLowerCase());
+        const mode = matchMode || 'prefix';
+        const labelFn = getLabel || (opt => opt.value);
+
+        let panel = document.getElementById(panelId);
+        if (!panel) {
+            panel = document.createElement('div');
+            panel.id = panelId;
+            panel.style.cssText = 'display:none; position:fixed; z-index:2000; background:white; border:1px solid #e2e8f0; border-radius:8px; box-shadow:0 12px 28px rgba(15,23,42,0.18); max-height:260px; overflow-y:auto; font-size:0.82rem;';
+            document.body.appendChild(panel);
+        }
+
+        let matches = [];
+        let highlightIndex = -1;
+
+        function liveOptions() {
+            return Array.from(select.options).filter(o => o.value !== '');
+        }
+
+        function position() {
+            const rect = searchInput.getBoundingClientRect();
+            panel.style.left = `${Math.round(rect.left)}px`;
+            panel.style.top = `${Math.round(rect.bottom + 4)}px`;
+            panel.style.width = `${Math.max(180, Math.round(rect.width))}px`;
+        }
+
+        function render() {
+            if (matches.length === 0) {
+                panel.innerHTML = `<div style="padding:10px 12px; color:#94a3b8;">No matches.</div>`;
+                return;
+            }
+            panel.innerHTML = matches.map((opt, i) => `
+                <div class="searchable-select-result" data-index="${i}" style="padding:8px 12px; cursor:pointer; border-bottom:1px solid #f1f5f9; ${i === highlightIndex ? 'background:#eff6ff;' : ''}">${labelFn(opt)}</div>
+            `).join('');
+        }
+
+        function scrollHighlightIntoView() {
+            const el = panel.querySelector(`.searchable-select-result[data-index="${highlightIndex}"]`);
+            if (el) el.scrollIntoView({ block: 'nearest' });
+        }
+
+        function hide() {
+            panel.style.display = 'none';
+            matches = [];
+            highlightIndex = -1;
+        }
+
+        function show(query) {
+            const term = normalizeFn(query.trim());
+            const all = liveOptions();
+            matches = (term
+                ? all.filter(opt => {
+                    const nv = normalizeFn(labelFn(opt));
+                    return mode === 'contains' ? nv.includes(term) : nv.startsWith(term);
+                })
+                : all
+            ).slice(0, 30);
+            highlightIndex = matches.length ? 0 : -1;
+            render();
+            position();
+            panel.style.display = 'block';
+        }
+
+        function commit(opt) {
+            select.value = opt ? opt.value : '';
+            searchInput.value = opt ? labelFn(opt) : '';
+            select.dispatchEvent(new Event('change', { bubbles: true }));
+            hide();
+        }
+
+        function selectHighlighted() {
+            if (highlightIndex < 0 || !matches[highlightIndex]) return false;
+            commit(matches[highlightIndex]);
+            return true;
+        }
+
+        searchInput.addEventListener('focus', () => {
+            searchInput.select();
+            show(searchInput.value);
+        });
+        searchInput.addEventListener('input', () => show(searchInput.value));
+        searchInput.addEventListener('keydown', (e) => {
+            if (panel.style.display === 'none') return;
+            if (e.key === 'ArrowDown') {
+                e.preventDefault();
+                if (!matches.length) return;
+                highlightIndex = Math.min(highlightIndex + 1, matches.length - 1);
+                render();
+                scrollHighlightIntoView();
+            } else if (e.key === 'ArrowUp') {
+                e.preventDefault();
+                if (!matches.length) return;
+                highlightIndex = Math.max(highlightIndex - 1, 0);
+                render();
+                scrollHighlightIntoView();
+            } else if (e.key === 'Enter') {
+                if (selectHighlighted()) e.preventDefault();
+            } else if (e.key === 'Tab') {
+                selectHighlighted();
+            } else if (e.key === 'Escape') {
+                hide();
+            }
+        });
+
+        // mousedown (not click) + preventDefault so the search input never
+        // blurs before the pick registers.
+        document.addEventListener('mousedown', (e) => {
+            if (panel.style.display === 'none') return;
+            const resultEl = e.target.closest(`#${panelId} .searchable-select-result`);
+            if (resultEl) {
+                e.preventDefault();
+                const idx = parseInt(resultEl.dataset.index, 10);
+                commit(matches[idx]);
+                return;
+            }
+            if (!e.target.closest(`#${panelId}`) && e.target !== searchInput) {
+                hide();
+            }
+        });
+
+        // 🔥 FIX: "sometimes it can be selected, sometimes not" -- 'scroll'
+        // events don't bubble, but a capturing-phase listener on window
+        // still sees them fire for ANY scrollable descendant, including
+        // this dropdown's OWN results list (max-height + overflow-y:auto
+        // above). With more than a handful of suppliers, scrolling down
+        // inside the list itself to reach one further down immediately
+        // fired this handler and closed the whole dropdown out from under
+        // the click -- looked exactly like "the dropdown opens but you
+        // can't always pick something", and reopening/retyping (or a full
+        // page refresh, which resets everything back to a short list that
+        // doesn't need scrolling) was the only way around it. Only hide on
+        // a scroll that happens OUTSIDE the panel -- e.g. the modal body
+        // scrolling underneath it -- which is what this was meant to catch
+        // in the first place.
+        window.addEventListener('scroll', (e) => {
+            if (panel.contains(e.target)) return;
+            hide();
+        }, true);
+        window.addEventListener('resize', () => hide());
+
+        function currentLabel() {
+            const opt = select.options[select.selectedIndex];
+            return (opt && opt.value) ? labelFn(opt) : '';
+        }
+
+        // Same "don't stomp what's being typed" fix as Retail POS's
+        // version of this: only auto-sync the visible text from a
+        // programmatic change (populateSupplierSelects() re-running,
+        // loadPO() setting a value, etc), never while the cashier/staff
+        // member is actively typing in this box themselves.
+        select.addEventListener('change', () => {
+            if (document.activeElement === searchInput) return;
+            searchInput.value = currentLabel();
+        });
+
+        // Reflect whatever the select already holds right now, and expose
+        // a manual re-sync for populateSupplierSelects() -- that function
+        // replaces select.innerHTML directly (no 'change' event fires on
+        // its own from that), so without this the search box would keep
+        // showing stale/blank text after suppliers reload.
+        searchInput.value = currentLabel();
+        select.__syncSearchLabel = () => { searchInput.value = currentLabel(); };
+    }
+
+    // ============================================
+    // 🔥 ADDED: AUTO-INJECTING SEARCHABLE DROPDOWN
+    // ============================================
+    // initSearchableSelect() above needs a matching search <input> and
+    // panel <div> already sitting in the HTML (that's how poSupplier /
+    // supplierFilter / reorderSupplier are wired, just above). Most
+    // other dropdowns in this module don't have that companion markup
+    // yet, and this file has no matching index.html to add it to.
+    // makeSelectSearchable() builds that companion input itself at
+    // runtime -- inserted right next to the real <select>, copying its
+    // classes/size so it drops in without needing any HTML change --
+    // then wires it up with the exact same initSearchableSelect()
+    // logic (arrow keys navigate, Enter picks, Tab picks and moves on,
+    // Escape closes, mousedown-not-click on results) used everywhere
+    // else, including in Retail POS.
+    //
+    // Only worth doing for a dropdown backed by a real, growing list
+    // (Category, Generic, etc.) -- a 2-3 option toggle like Currency or
+    // Payment Type already gets working arrow-key/Tab navigation for
+    // free from the native <select>, so turning those into a type-to-
+    // search box would just make a two-click choice slower. Call this
+    // for any additional long-list dropdown that needs it.
+    function makeSelectSearchable(selectId, { matchMode, getLabel, normalize } = {}) {
+        const select = document.getElementById(selectId);
+        if (!select || select.dataset.searchableInjected === '1') return;
+
+        const searchInputId = `${selectId}__searchInput`;
+        const panelId = `${selectId}__searchPanel`;
+
+        const input = document.createElement('input');
+        input.type = 'text';
+        input.id = searchInputId;
+        input.className = select.className;
+        input.autocomplete = 'off';
+        input.placeholder = select.options.length ? select.options[0].textContent : 'Search...';
+
+        const computed = window.getComputedStyle(select);
+        input.style.cssText = select.getAttribute('style') || '';
+        input.style.width = computed.width;
+
+        select.insertAdjacentElement('afterend', input);
+
+        // Keep the real <select> in the DOM (everything that reads its
+        // .value or listens for its 'change' event keeps working
+        // unchanged) but hand its visible spot in the layout to the new
+        // search input.
+        select.style.position = 'absolute';
+        select.style.opacity = '0';
+        select.style.width = '1px';
+        select.style.height = '1px';
+        select.style.pointerEvents = 'none';
+        select.tabIndex = -1;
+        select.dataset.searchableInjected = '1';
+
+        initSearchableSelect({ searchInputId, selectId, panelId, matchMode, getLabel, normalize });
+    }
+
+    function populateSupplierSelects() {
+        const selects = ['poSupplier', 'supplierFilter', 'reorderSupplier'];
+        const suppliers = state.suppliers || [];
+
+        selects.forEach(id => {
+            const select = document.getElementById(id);
+            if (!select) return;
+
+            const placeholder = id === 'poSupplier' ? 'Select Supplier' : 'All Suppliers';
+            const currentVal = select.value;
+
+            select.innerHTML = `<option value="">${placeholder}</option>` +
+                suppliers.map(s => `<option value="${s.id}">${s.name}</option>`).join('');
+
+            if (currentVal && Array.from(select.options).some(opt => opt.value === currentVal)) {
+                select.value = currentVal;
+            }
+            // 🔥 ADDED: .innerHTML above doesn't fire 'change', so the
+            // searchable dropdown's visible text (if wired up for this
+            // select) needs an explicit nudge to stay in sync.
+            if (typeof select.__syncSearchLabel === 'function') select.__syncSearchLabel();
+        });
+    }
+
+    // ============================================
+    // 🔥 ADD SUPPLIER MODAL (Name/TPIN/ZAMRA/Contact/Mobile/Email/Address
+    // + Opening Payable in USD/ZMW/both) -- injected once, reusable from
+    // any [data-open-add-supplier] trigger on the page via
+    // data-target-select pointing at the dropdown to auto-select after save.
+    // ============================================
+    function ensureAddSupplierModal() {
+        if (document.getElementById('purchaseAddSupplierModal')) return;
+        const html = `
+        <div id="purchaseAddSupplierModal" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(15,23,42,0.6);backdrop-filter:blur(4px);z-index:1100;justify-content:center;align-items:center;">
+            <div class="modal-content-box" style="background:white;padding:30px;border-radius:12px;width:90%;max-width:520px;max-height:90vh;overflow-y:auto;box-shadow:0 20px 50px rgba(0,0,0,0.5);">
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:20px;border-bottom:1px solid #e2e8f0;padding-bottom:15px;">
+                    <h3 style="margin:0;"><i class="fa-solid fa-truck-field" style="color:#2563eb;"></i> Add Supplier</h3>
+                    <button id="purchaseCloseSupplierModalBtn" type="button" style="background:none;border:none;font-size:1.5rem;cursor:pointer;color:#64748b;">&times;</button>
+                </div>
+                <form id="purchaseAddSupplierForm">
+                    <div style="margin-bottom:12px;"><label style="display:block;font-weight:500;color:#475569;margin-bottom:3px;font-size:0.85rem;">Supplier Name *</label>
+                        <input type="text" id="newSupplierName" required style="width:100%;padding:6px 10px;border:1px solid #e2e8f0;border-radius:4px;"></div>
+                    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px;">
+                        <div><label style="display:block;font-weight:500;color:#475569;margin-bottom:3px;font-size:0.85rem;">TPIN Number</label>
+                            <input type="text" id="newSupplierTpin" style="width:100%;padding:6px 10px;border:1px solid #e2e8f0;border-radius:4px;"></div>
+                        <div><label style="display:block;font-weight:500;color:#475569;margin-bottom:3px;font-size:0.85rem;">ZAMRA Number</label>
+                            <input type="text" id="newSupplierZamra" style="width:100%;padding:6px 10px;border:1px solid #e2e8f0;border-radius:4px;"></div>
+                    </div>
+                    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px;">
+                        <div><label style="display:block;font-weight:500;color:#475569;margin-bottom:3px;font-size:0.85rem;">Contact Person</label>
+                            <input type="text" id="newSupplierContact" style="width:100%;padding:6px 10px;border:1px solid #e2e8f0;border-radius:4px;"></div>
+                        <div><label style="display:block;font-weight:500;color:#475569;margin-bottom:3px;font-size:0.85rem;">Mobile Number *</label>
+                            <input type="text" id="newSupplierPhone" required style="width:100%;padding:6px 10px;border:1px solid #e2e8f0;border-radius:4px;"></div>
+                    </div>
+                    <div style="margin-bottom:12px;"><label style="display:block;font-weight:500;color:#475569;margin-bottom:3px;font-size:0.85rem;">Email Address</label>
+                        <input type="email" id="newSupplierEmail" style="width:100%;padding:6px 10px;border:1px solid #e2e8f0;border-radius:4px;"></div>
+                    <div style="margin-bottom:12px;"><label style="display:block;font-weight:500;color:#475569;margin-bottom:3px;font-size:0.85rem;">Address</label>
+                        <input type="text" id="newSupplierAddress" style="width:100%;padding:6px 10px;border:1px solid #e2e8f0;border-radius:4px;"></div>
+
+                    <div style="background:#fff7ed;border-left:4px solid #f97316;padding:10px 12px;border-radius:6px;margin:16px 0 12px;">
+                        <strong style="font-size:0.85rem;color:#9a3412;">Opening Payable (optional -- either or both)</strong>
+                    </div>
+                    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px;">
+                        <div><label style="display:block;font-weight:500;color:#475569;margin-bottom:3px;font-size:0.85rem;">Opening Payable (USD)</label>
+                            <input type="number" step="0.01" min="0" id="newSupplierOpeningUsd" value="0" style="width:100%;padding:6px 10px;border:1px solid #e2e8f0;border-radius:4px;"></div>
+                        <div><label style="display:block;font-weight:500;color:#475569;margin-bottom:3px;font-size:0.85rem;">Opening Payable (ZMW)</label>
+                            <input type="number" step="0.01" min="0" id="newSupplierOpeningZmw" value="0" style="width:100%;padding:6px 10px;border:1px solid #e2e8f0;border-radius:4px;"></div>
+                    </div>
+                    <div id="newSupplierOpeningRateGroup" style="display:none;margin-bottom:12px;">
+                        <label style="display:block;font-weight:500;color:#475569;margin-bottom:3px;font-size:0.85rem;">Exchange Rate (USD → ZMW, for posting the USD opening balance to the ledger)</label>
+                        <input type="number" step="0.0001" min="0" id="newSupplierOpeningRate" value="25.00" style="width:100%;padding:6px 10px;border:1px solid #e2e8f0;border-radius:4px;">
+                    </div>
+
+                    <div style="margin-top:20px;display:flex;gap:10px;justify-content:flex-end;border-top:1px solid #e2e8f0;padding-top:20px;">
+                        <button type="button" id="purchaseCancelSupplierModalBtn" style="background:white;border:1px solid #e2e8f0;padding:10px 25px;border-radius:6px;cursor:pointer;">Cancel</button>
+                        <button type="submit" id="purchaseSaveSupplierBtn" style="background:#2563eb;color:white;border:none;padding:10px 25px;border-radius:6px;cursor:pointer;">
+                            <i class="fa-solid fa-floppy-disk"></i> Save Supplier
+                        </button>
+                    </div>
+                </form>
+            </div>
+        </div>`;
+        document.body.insertAdjacentHTML('beforeend', html);
+
+        const modal = document.getElementById('purchaseAddSupplierModal');
+        modal.querySelector('.modal-content-box').addEventListener('click', e => e.stopPropagation());
+        document.getElementById('purchaseCloseSupplierModalBtn').addEventListener('click', () => modal.style.display = 'none');
+        document.getElementById('purchaseCancelSupplierModalBtn').addEventListener('click', () => modal.style.display = 'none');
+        modal.addEventListener('click', e => { if (e.target === modal) modal.style.display = 'none'; });
+
+        document.getElementById('newSupplierOpeningUsd').addEventListener('input', function () {
+            document.getElementById('newSupplierOpeningRateGroup').style.display = parseFloat(this.value) > 0 ? 'block' : 'none';
+        });
+
+        document.getElementById('purchaseAddSupplierForm').addEventListener('submit', handleSaveSupplier);
+    }
+
+    document.addEventListener('click', function (e) {
+        const trigger = e.target.closest('[data-open-add-supplier]');
+        if (!trigger) return;
+        e.preventDefault();
+        ensureAddSupplierModal();
+        const modal = document.getElementById('purchaseAddSupplierModal');
+        document.getElementById('purchaseAddSupplierForm').reset();
+        document.getElementById('newSupplierOpeningRateGroup').style.display = 'none';
+        // 🔥 FIX: form.reset() puts the rate field back to its static HTML
+        // default (25.00) -- override with today's shared exchange rate
+        // instead, same as resetPOForm().
+        const openingRateInput = document.getElementById('newSupplierOpeningRate');
+        if (openingRateInput) openingRateInput.value = sharedZmwPerUsd;
+        modal.style.display = 'flex';
+        modal.dataset.targetSelectId = trigger.dataset.targetSelect || '';
+    });
+
+    // 🔥 ADDED: safeguard against a repeat of the ALL-CAPS-vs-Proper-Case
+    // mess found and cleaned up across products/customers/suppliers/etc.
+    // Only touches a value that is ENTIRELY caps -- anything already
+    // mixed-case, including deliberately-preserved acronyms like "(UK)",
+    // is left exactly as typed.
+    function toProperCaseIfAllCaps(str) {
+        if (!str) return str;
+        const trimmed = str.trim();
+        if (trimmed.length > 2 && trimmed === trimmed.toUpperCase() && trimmed !== trimmed.toLowerCase()) {
+            return trimmed.replace(/\w\S*/g, w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase());
+        }
+        return str;
+    }
+
+    async function handleSaveSupplier(e) {
+        e.preventDefault();
+        const name = toProperCaseIfAllCaps(document.getElementById('newSupplierName').value.trim());
+        const phoneVal = document.getElementById('newSupplierPhone').value.trim();
+        if (!name) { alert('Supplier Name is required'); return; }
+        if (!phoneVal) { alert('Mobile Number is required'); return; }
+
+        const openingUsd = parseFloat(document.getElementById('newSupplierOpeningUsd').value) || 0;
+        const openingZmw = parseFloat(document.getElementById('newSupplierOpeningZmw').value) || 0;
+        const openingRate = parseFloat(document.getElementById('newSupplierOpeningRate').value) || 25.00;
+
+        const btn = document.getElementById('purchaseSaveSupplierBtn');
+        btn.disabled = true;
+        btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Saving...';
+
+        try {
+            const record = {
+                name,
+                tpin_number: document.getElementById('newSupplierTpin').value.trim() || null,
+                zamra_number: document.getElementById('newSupplierZamra').value.trim() || null,
+                contact_person: document.getElementById('newSupplierContact').value.trim() || null,
+                phone: phoneVal,
+                email: document.getElementById('newSupplierEmail').value.trim() || null,
+                address: document.getElementById('newSupplierAddress').value.trim() || null,
+                opening_balance_usd: openingUsd,
+                opening_balance_zmw: openingZmw,
+                created_at: new Date().toISOString()
+            };
+
+            const { data, error } = await supabaseClient.from('suppliers').insert([record]).select();
+            if (error) throw error;
+
+            const newSupplier = data[0];
+
+            // Opening payable GL posting -- Debit Opening Balance Equity,
+            // Credit Accounts Payable (this is a LIABILITY, the reverse of
+            // wholesale.js's opening-receivable pattern). Posted separately
+            // per currency since the ledger tracks Accounts Payable in ZMW.
+            if (openingUsd > 0) {
+                await createOpeningPayableGLEntry(newSupplier.id, name, openingUsd * openingRate, `USD ${formatNumber(openingUsd)} @ ${openingRate}`);
+            }
+            if (openingZmw > 0) {
+                await createOpeningPayableGLEntry(newSupplier.id, name, openingZmw, `ZMW ${formatNumber(openingZmw)}`);
+            }
+
+            await loadSuppliers();
+
+            const modal = document.getElementById('purchaseAddSupplierModal');
+            const targetSelectId = modal.dataset.targetSelectId;
+            if (targetSelectId) {
+                const targetSelect = document.getElementById(targetSelectId);
+                if (targetSelect) {
+                    targetSelect.value = newSupplier.id;
+                    targetSelect.dispatchEvent(new Event('change'));
+                }
+            }
+            modal.style.display = 'none';
+
+            showToast(`Supplier "${name}" added` + (openingUsd > 0 || openingZmw > 0 ? ' with opening payable' : ''), 'success');
+        } catch (error) {
+            console.error('Error saving supplier:', error);
+            alert('❌ Error saving supplier: ' + error.message);
+        } finally {
+            btn.disabled = false;
+            btn.innerHTML = '<i class="fa-solid fa-floppy-disk"></i> Save Supplier';
+        }
+    }
+
+    // ============================================
+    // 🔥 LOOKUP TABLE QUICK-ADD (Category, Generic -- Brand and
+    // Subcategory are NOT wired up here: nothing in this file's existing
+    // code references a brand_id or subcategory_id column on products, so
+    // rather than guess at column/table names that might not exist, this
+    // only covers the two lookup tables already confirmed in use:
+    // categories and generic_names)
+    // ============================================
+    const LOOKUP_TABLE_CONFIG = {
+        categories: { label: 'Category', nameColumn: 'name' },
+        generic_names: { label: 'Generic', nameColumn: 'name' }
+    };
+
+    document.addEventListener('click', async function (e) {
+        const trigger = e.target.closest('[data-quick-add-lookup]');
+        if (!trigger) return;
+        e.preventDefault();
+        const table = trigger.dataset.quickAddLookup;
+        const config = LOOKUP_TABLE_CONFIG[table] || { label: table, nameColumn: 'name' };
+        const name = prompt(`New ${config.label} name:`);
+        if (!name || !name.trim()) return;
+
+        try {
+            const { data, error } = await supabaseClient.from(table).insert([{ [config.nameColumn]: name.trim() }]).select();
+            if (error) throw error;
+
+            if (table === 'categories') await populateReorderFilters();
+
+            const targetId = trigger.dataset.quickAddTarget;
+            if (targetId) {
+                const targetSelect = document.getElementById(targetId);
+                if (targetSelect && data && data[0]) targetSelect.value = data[0].id;
+            }
+            showToast(`${config.label} "${name.trim()}" added`, 'success');
+        } catch (error) {
+            console.error(`Error adding ${table}:`, error);
+            alert(`❌ Error adding ${config.label}: ` + error.message);
+        }
+    });
+
+    // ============================================
+    // RENDER PO LINES
+    // ============================================
+
+    function renderPOLines() {
+        const tbody = document.getElementById('poLinesBody');
+        if (!tbody) return;
+        
+        if (state.poLines.length === 0) {
+            tbody.innerHTML = `<tr><td colspan="8" class="text-center text-muted" style="padding: 30px;">
+                <i class="fa-regular fa-plus" style="display: block; margin-bottom: 8px;"></i>
+                Add products using the search above or from Reorder Report
+            </td></tr>`;
+            updatePOLineCounts();
+            return;
+        }
+
+        const currency = document.getElementById('poCurrency')?.value || 'USD';
+        const symbol = currency === 'ZMW' ? 'ZK' : '$';
+        
+        tbody.innerHTML = state.poLines.map((line, index) => {
+            const totalQty = (line.pack_size || 1) * (line.order_quantity || 0);
+            return `
+            <tr>
+                <td>${index + 1}</td>
+                <td>
+                    <strong>${line.product_name || 'Unknown'}</strong>
+                    <br><span style="font-size: 0.7rem; color: #94a3b8;">${line.generic_name || ''}</span>
+                </td>
+                <td>${line.pack_size || 1}</td>
+                <td>
+                    <input type="number" class="form-control" value="${line.order_quantity || 0}" 
+                        style="width: 70px; padding: 4px 8px;" 
+                        onchange="updatePOLine(${index}, 'order_quantity', this.value)" min="1">
+                </td>
+                <td><strong>${totalQty}</strong></td>
+                <td>
+                    <input type="number" class="form-control" value="${line.purchase_rate || 0}"
+                        style="width: 100px; padding: 4px 8px;"
+                        onchange="updatePOLine(${index}, 'purchase_rate', this.value)" step="0.01" min="0">
+                    <span style="font-size: 0.65rem; color: #94a3b8;">(per pack)</span>
+                    ${(() => {
+                        // 🔥 ADDED: same live per-unit cost preview as the GRN screen,
+                        // shown as early as the PO stage so a mistyped rate can be
+                        // caught before it's ever received into stock.
+                        const packSize = line.pack_size || 1;
+                        const ratePerPack = line.purchase_rate || 0;
+                        if (!ratePerPack) return '';
+                        const exchangeRate = parseFloat(document.getElementById('poExchangeRate')?.value) || 1;
+                        const ratePerUnit = packSize > 0 ? ratePerPack / packSize : ratePerPack;
+                        const costPriceZmw = currency === 'USD' ? ratePerUnit * exchangeRate : ratePerUnit;
+                        return `<br><span style="font-size: 0.65rem; color: #64748b;">≈ ZK ${formatNumber(costPriceZmw)} / unit${packSize > 1 ? ` (pack of ${packSize})` : ''}</span>`;
+                    })()}
+                    ${line.last_purchase
+                        ? `<br><span style="font-size: 0.65rem; color: #059669;">Last: ${line.last_purchase.currency === 'ZMW' ? 'ZK' : '$'}${Number(line.last_purchase.rate).toFixed(2)} &middot; ${formatDate(line.last_purchase.date)}</span>`
+                        : ''}
+                </td>
+                <td style="text-align: right;">${symbol} ${formatNumber(line.total_amount || 0)}</td>
+                <td style="text-align: center;">
+                    <button class="action-btn" onclick="removePOLine(${index})" style="color: #ef4444;">
+                        <i class="fa-regular fa-trash-can"></i>
+                    </button>
+                </td>
+            </tr>
+            `;
+        }).join('');
+        
+        updatePOLineCounts();
+    }
+
+    function updatePOLineCounts() {
+        const totalItems = state.poLines.reduce((sum, l) => sum + (l.order_quantity || 0), 0);
+        document.getElementById('poLineCount').textContent = `${state.poLines.length} items`;
+        document.getElementById('poTotalItems').textContent = totalItems;
+    }
+
+    // ============================================
+    // RENDER GRN LINES - NO CANCELLATION COLUMN
+    // ============================================
+
+    function renderGRNLines(readonly = false) {
+        const tbody = document.getElementById('grnLinesBody');
+        if (!tbody) return;
+        
+        if (state.grnLines.length === 0) {
+            tbody.innerHTML = `<tr><td colspan="10" class="text-center text-muted" style="padding: 30px;">
+                <i class="fa-regular fa-box" style="display: block; margin-bottom: 8px;"></i>
+                No items to receive
+            </td></tr>`;
+            document.getElementById('grnLineCount').textContent = '0 items';
+            return;
+        }
+
+        const currency = state.currentGRNCurrency || 'USD';
+        const symbol = currency === 'ZMW' ? 'ZK' : '$';
+
+        tbody.innerHTML = state.grnLines.map((line, index) => {
+            const totalOrderedQty = (line.pack_size || 1) * (line.order_quantity || 0);
+            const remainingQty = (line.order_quantity || 0) - (line.received_quantity || 0) - (line.cancelled_quantity || 0);
+            const isFullyReceived = remainingQty <= 0 && (line.received_quantity || 0) > 0;
+            const isFullyCancelled = remainingQty <= 0 && (line.received_quantity || 0) === 0 && (line.cancelled_quantity || 0) > 0;
+            const isPartiallyProcessed = (line.received_quantity || 0) > 0 && (line.cancelled_quantity || 0) > 0;
+            const isCancelled = line.cancel_remaining || false;
+            
+            const isReceiving = (line.received_quantity || 0) > 0;
+            const isDisabled = readonly || isCancelled;
+            const expiryStyle = getExpiryUrgencyStyle(line.expiry_date);
+            
+            let rowClass = '';
+            if (isFullyReceived) rowClass = 'grn-row-received';
+            else if (isFullyCancelled) rowClass = 'grn-row-cancelled';
+            else if (isPartiallyProcessed) rowClass = 'grn-row-partial';
+            else if (isCancelled) rowClass = 'grn-row-cancelled';
+            
+            return `
+            <tr class="${rowClass}">
+                <td>${index + 1}</td>
+                <td>
+                    <strong>${line.product_name || 'Unknown'}</strong>
+                    <br><span style="font-size: 0.7rem; color: #94a3b8;">${line.generic_name || ''}</span>
+                    ${renderGRNStatusBadges(line, isCancelled, isFullyReceived, isFullyCancelled, isPartiallyProcessed)}
+                </td>
+                <td>${line.pack_size || 1}</td>
+                <td><strong>${totalOrderedQty}</strong></td>
+                <td>
+                    <input type="number" class="form-control" value="${line.received_quantity || 0}"
+                        style="width: 70px; padding: 4px 8px; ${isCancelled ? 'background: #fef2f2;' : ''}"
+                        onchange="updateGRNLine(${index}, 'received_quantity', this.value)"
+                        ${readonly || isCancelled ? 'disabled' : ''}
+                        min="0">
+                    ${line.received_quantity > 0 ? `<span style="font-size: 0.6rem; color: #059669;">${line.received_quantity} received</span>` : ''}
+                </td>
+                <td>
+                    <span style="font-weight: 600; color: ${remainingQty > 0 ? '#f59e0b' : (remainingQty < 0 ? '#2563eb' : '#059669')};">
+                        ${remainingQty > 0 ? remainingQty : (remainingQty < 0 ? `+${Math.abs(remainingQty)} over` : '✅')}
+                    </span>
+                    ${line.cancelled_quantity > 0 ? `<span style="font-size: 0.6rem; color: #dc2626; display: block;">${line.cancelled_quantity} cancelled</span>` : ''}
+                </td>
+                <td>
+                    <input type="number" class="form-control" value="${line.purchase_rate || 0}"
+                        style="width: 100px; padding: 4px 8px;"
+                        onchange="updateGRNLine(${index}, 'purchase_rate', this.value)"
+                        ${readonly ? 'disabled' : ''}
+                        step="0.01" min="0">
+                    ${(() => {
+                        // 🔥 ADDED: live per-UNIT cost preview, computed with the exact
+                        // same formula updateInventory() uses to set batches.cost_price
+                        // (rate / pack size, then converted to ZMW). Whoever is typing
+                        // the purchase rate sees immediately what that implies per
+                        // tablet/capsule/etc, so a mistyped rate (extra digit, wrong
+                        // decimal place, or entering a per-unit price into this
+                        // per-pack field) is obvious before the GRN is posted, instead
+                        // of silently becoming a wrong batches.cost_price later.
+                        const packSize = line.pack_size || 1;
+                        const ratePerPack = line.purchase_rate || 0;
+                        const ratePerUnit = packSize > 0 ? ratePerPack / packSize : ratePerPack;
+                        const costPriceZmw = currency === 'USD' ? ratePerUnit * (state.currentGRNExchangeRate || 1) : ratePerUnit;
+                        if (!ratePerPack) return '';
+                        return `<div style="font-size: 0.65rem; color: #64748b; margin-top: 2px;">≈ ZK ${formatNumber(costPriceZmw)} / unit${packSize > 1 ? ` (pack of ${packSize})` : ''}</div>`;
+                    })()}
+                </td>
+                <td>
+                    <input type="text" class="form-control" list="batchList-${index}" value="${line.batch_number || ''}" 
+                        style="width: 130px; padding: 4px 8px; ${isCancelled ? 'background: #fef2f2;' : ''}" 
+                        onchange="updateGRNLine(${index}, 'batch_number', this.value)"
+                        ${readonly || isCancelled ? 'disabled' : ''}
+                        placeholder="${isReceiving ? 'Batch # *' : 'Batch #'}" 
+                        ${isReceiving && !isCancelled ? 'required' : ''}>
+                    <datalist id="batchList-${index}">
+                        ${(state.existingBatchesByProduct[line.product_id] || []).map(b => `<option value="${b.batch_number}">`).join('')}
+                    </datalist>
+                </td>
+                <td>
+                    <input type="text" class="form-control" inputmode="numeric" value="${line.expiry_date || ''}" 
+                        style="width: 130px; padding: 4px 8px; border-color: ${expiryStyle.border}; background: ${isCancelled ? '#fef2f2' : expiryStyle.background};" 
+                        oninput="formatExpiryInput(this)"
+                        onchange="updateGRNLine(${index}, 'expiry_date', this.value)"
+                        ${readonly || isCancelled ? 'disabled' : ''}
+                        placeholder="YYYY-MM-DD"
+                        maxlength="10"
+                        ${isReceiving && !isCancelled ? 'required' : ''}>
+                </td>
+                <td style="text-align: center;">
+                    <input type="checkbox" ${(line.received_quantity || 0) > 0 ? 'checked' : ''} 
+                        onchange="toggleGRNLineReceive(${index}, this.checked)"
+                        ${readonly || isCancelled ? 'disabled' : ''}
+                        ${(line.cancelled_quantity || 0) > 0 ? 'disabled' : ''}
+                        title="Receive items">
+                </td>
+            </tr>
+            `;
+        }).join('');
+        
+        document.getElementById('grnLineCount').textContent = `${state.grnLines.length} items`;
+    }
+
+    function renderGRNStatusBadges(line, isCancelled, isFullyReceived, isFullyCancelled, isPartiallyProcessed) {
+        let html = '';
+        if (isCancelled) {
+            html += `<br><span style="font-size: 0.6rem; color: #dc2626;">⚠️ Cancelling: ${line.cancel_reason || 'No reason provided'}</span>`;
+        }
+        if (isFullyReceived && !isCancelled) {
+            html += `<br><span style="font-size: 0.6rem; color: #059669;">✅ Fully Received</span>`;
+        }
+        if (isFullyCancelled) {
+            html += `<br><span style="font-size: 0.6rem; color: #dc2626;">❌ Fully Cancelled</span>`;
+        }
+        if (isPartiallyProcessed) {
+            html += `<br><span style="font-size: 0.6rem; color: #f59e0b;">⚠️ Partially Received & Cancelled</span>`;
+        }
+        return html;
+    }
+
+    // ============================================
+    // MODAL FUNCTIONS
+    // ============================================
+
+    async function openNewPurchaseOrder() {
+        state.poLines = [];
+        state.isEditing = false;
+        // 🔥 FIX: "not taking the right rate from dashboard" -- sharedZmwPerUsd
+        // used to be fetched ONCE, when this whole module first loaded, and
+        // never again. If the shared exchange rate got corrected on the
+        // Dashboard afterwards (without a full page reload of Purchase),
+        // every "New Purchase Order" from then on kept quietly using the
+        // stale rate captured at page load. Re-fetching it here, every time
+        // this modal opens, means it's always current.
+        try {
+            sharedZmwPerUsd = await getSharedExchangeRate();
+        } catch (e) {
+            console.warn('Could not refresh shared exchange rate, using last known value:', e);
+        }
+        resetPOForm();
+        renderPOLines();
+        updatePOTotal();
+        enablePOFields(true);
+        showModal('poModal');
+    }
+
+    async function editPO(orderId) {
+        try {
+            const { data: order, error } = await supabaseClient
+                .from('purchase_orders')
+                .select(`
+                    *,
+                    purchase_order_lines (*)
+                `)
+                .eq('id', orderId)
+                .single();
+
+            if (error) throw error;
+
+            if (order.status === 'Cancelled' || order.status === 'Closed' || order.status === 'Goods Received') {
+                showToast('Completed orders cannot be edited', 'error');
+                return;
+            }
+
+            state.isEditing = true;
+            state.poLines = order.purchase_order_lines || [];
+            
+            populatePOForm(order);
+            renderPOLines();
+            updatePOTotal();
+            enablePOFields(true);
+            showModal('poModal');
+        } catch (error) {
+            console.error('Error loading PO for edit:', error);
+            showToast('Error loading PO: ' + error.message, 'error');
+        }
+    }
+
+    function resetPOForm() {
+        const editId = document.getElementById('editPOId');
+        const title = document.getElementById('poModalTitle');
+        const supplier = document.getElementById('poSupplier');
+        const currency = document.getElementById('poCurrency');
+        const rate = document.getElementById('poExchangeRate');
+        const delivery = document.getElementById('poDeliveryDate');
+        const notes = document.getElementById('poNotes');
+        const search = document.getElementById('poProductSearch');
+        const results = document.getElementById('poSearchResults');
+        
+        if (editId) editId.value = '';
+        if (title) title.innerHTML = '<i class="fa-solid fa-file-invoice"></i> New Purchase Order';
+        // 🔥 CHANGED: dispatch 'change' -- see the same fix's comment in
+        // populatePOForm() just above.
+        if (supplier) {
+            supplier.value = '';
+            supplier.dispatchEvent(new Event('change'));
+        }
+        if (currency) currency.value = 'USD';
+        // 🔒 LOCKED: always today's shared exchange rate -- the field is
+        // read-only now, so this is the only way it ever gets set for a
+        // new PO. Update the rate on the Dashboard if it needs changing.
+        if (rate) rate.value = sharedZmwPerUsd;
+        if (delivery) delivery.value = getFutureDate(14);
+        if (notes) notes.value = '';
+        if (search) search.value = '';
+        if (results) results.style.display = 'none';
+        
+        document.getElementById('cancelPOBtn').style.display = 'none';
+    }
+
+    function populatePOForm(order) {
+        const editId = document.getElementById('editPOId');
+        const title = document.getElementById('poModalTitle');
+        const supplier = document.getElementById('poSupplier');
+        const currency = document.getElementById('poCurrency');
+        const rate = document.getElementById('poExchangeRate');
+        const delivery = document.getElementById('poDeliveryDate');
+        const notes = document.getElementById('poNotes');
+        const cancelBtn = document.getElementById('cancelPOBtn');
+        
+        if (editId) editId.value = order.id;
+        if (title) title.innerHTML = `<i class="fa-solid fa-pen-to-square"></i> Edit PO: ${order.po_number}`;
+        // 🔥 CHANGED: dispatch 'change' after setting .value directly --
+        // that's what the searchable Supplier dropdown's sync listener
+        // (initSearchableSelect()) needs to update its visible search
+        // text to match; without this, editing a PO left the search box
+        // showing whatever it last had (or blank) instead of this PO's
+        // actual supplier.
+        if (supplier) {
+            supplier.value = order.supplier_id || '';
+            supplier.dispatchEvent(new Event('change'));
+        }
+        if (currency) currency.value = order.currency || 'USD';
+        // 🔒 LOCKED: shows the rate this PO was actually created with
+        // (read-only) -- editing other fields on an existing PO no longer
+        // re-prices it to today's rate.
+        if (rate) rate.value = order.exchange_rate || 1;
+        if (delivery) delivery.value = order.expected_delivery_date || '';
+        if (notes) notes.value = order.notes || '';
+        
+        // Only show cancel button if no items received and not cancelled
+        if (order.total_received_quantity === 0 && order.total_cancelled_quantity === 0 && 
+            order.status !== 'Cancelled' && order.status !== 'Closed' && order.status !== 'Goods Received') {
+            cancelBtn.style.display = 'inline-flex';
+        } else {
+            cancelBtn.style.display = 'none';
+        }
+    }
+
+    function showModal(modalId) {
+        const modal = document.getElementById(modalId);
+        if (modal) modal.classList.add('show');
+    }
+
+    function closeModal(modalId) {
+        const modal = document.getElementById(modalId);
+        if (modal) modal.classList.remove('show');
+    }
+
+    function enablePOFields(enabled) {
+        const fields = ['poSupplier', 'poCurrency', 'poExchangeRate', 'poDeliveryDate', 'poProductSearch', 'poNotes'];
+        fields.forEach(id => {
+            const el = document.getElementById(id);
+            if (el) el.disabled = !enabled;
+        });
+        const searchBtn = document.querySelector('.search-input-group .btn');
+        if (searchBtn) searchBtn.disabled = !enabled;
+    }
+
+    // ============================================
+    // UPDATE PO LINE
+    // ============================================
+
+    function updatePOLine(index, field, value) {
+        const line = state.poLines[index];
+        if (!line) return;
+        
+        if (field === 'order_quantity') {
+            line.order_quantity = parseInt(value) || 0;
+        } else if (field === 'purchase_rate') {
+            line.purchase_rate = parseFloat(value) || 0;
+        }
+        line.total_amount = (line.order_quantity || 0) * (line.purchase_rate || 0);
+        renderPOLines();
+        updatePOTotal();
+    }
+
+    function removePOLine(index) {
+        state.poLines.splice(index, 1);
+        renderPOLines();
+        updatePOTotal();
+    }
+
+    function updatePOTotal() {
+        const total = state.poLines.reduce((sum, line) => sum + (line.total_amount || 0), 0);
+        const currency = document.getElementById('poCurrency')?.value || 'USD';
+        const rate = parseFloat(document.getElementById('poExchangeRate')?.value) || 1;
+        const symbol = currency === 'ZMW' ? 'ZK' : '$';
+        
+        const grandTotal = document.getElementById('poGrandTotal');
+        if (grandTotal) grandTotal.textContent = `${symbol} ${formatNumber(total)}`;
+        
+        const zmwDisplay = document.getElementById('poZMWDisplay');
+        const zmwTotal = document.getElementById('poZMWTotal');
+        if (currency === 'USD' && rate > 0 && zmwDisplay && zmwTotal) {
+            zmwDisplay.style.display = 'flex';
+            zmwTotal.textContent = `ZK ${formatNumber(total * rate)}`;
+        } else if (zmwDisplay) {
+            zmwDisplay.style.display = 'none';
+        }
+    }
+
+    // ============================================
+    // PO ACTIONS
+    // ============================================
+
+    async function savePODraft() {
+        await savePO('Draft');
+    }
+
+    async function submitPOForApproval() {
+        await savePO('Pending Approval');
+    }
+
+    async function approvePO() {
+        await savePO('Approved');
+    }
+
+    // ============================================
+    // 🔥 ADDED: AUTH-RETRY ON WRITE
+    // ============================================
+    // Same pattern already used elsewhere in the app (Retail POS's label
+    // printing, the Dashboard's notice board, Payments' financial writes)
+    // for a stale/expired login session getting rejected by RLS on a
+    // write -- refresh the session once and retry the SAME write once
+    // before giving up, instead of failing outright and forcing a
+    // half-entered Purchase Order to be re-typed from scratch.
+    async function withAuthRetry(operationFn) {
+        let result = await operationFn();
+        const err = result?.error;
+        const looksLikeAuthRejection = err && (
+            err.code === '42501' ||
+            err.code === 'PGRST301' ||
+            /row-level security|jwt|permission denied/i.test(err.message || '')
+        );
+        if (looksLikeAuthRejection) {
+            console.warn('⚠️ Write rejected (looks like a stale session) -- refreshing session and retrying once:', err.message);
+            try { await supabaseClient.auth.refreshSession(); } catch (refreshError) { console.error('Session refresh failed:', refreshError); }
+            result = await operationFn();
+        }
+        return result;
+    }
+
+    async function savePO(status) {
+        if (!validatePO()) return;
+        
+        const poData = getPOData();
+        if (!poData) return;
+        
+        poData.status = status;
+        
+        try {
+            const isEditing = document.getElementById('editPOId')?.value !== '';
+            const poId = isEditing ? document.getElementById('editPOId').value : null;
+            
+            const totalQty = poData.lines.reduce((sum, l) => sum + (l.order_quantity || 0), 0);
+            
+            if (isEditing && poId) {
+                await updateExistingPO(poId, poData, totalQty);
+                showToast('Purchase order updated successfully!', 'success');
+            } else {
+                await createNewPO(poData, totalQty);
+                showToast(`Purchase order ${poData.po_number} created successfully!`, 'success');
+            }
+
+            closeModal('poModal');
+            await loadPurchaseOrders();
+        } catch (error) {
+            console.error('Error saving PO:', error);
+            showToast('Error saving PO: ' + error.message, 'error');
+        }
+    }
+
+    async function updateExistingPO(poId, poData, totalQty) {
+        // 🔥 ADDED: capture the PO's status before this update overwrites
+        // it, so we can tell whether this save is the moment it BECOMES
+        // Approved (e.g. Pending Approval -> Approved) vs. just re-saving
+        // an already-approved PO or any other transition -- see
+        // promptSendPOIfApproved() below.
+        const previousStatus = (state.orders || []).find(o => o.id === poId)?.status || null;
+
+        // Calculate remaining = total - received - cancelled
+        const { data: existingLines } = await supabaseClient
+            .from('purchase_order_lines')
+            .select('received_quantity, cancelled_quantity')
+            .eq('purchase_order_id', poId);
+        
+        let totalReceived = 0;
+        let totalCancelled = 0;
+        if (existingLines) {
+            totalReceived = existingLines.reduce((sum, l) => sum + (l.received_quantity || 0), 0);
+            totalCancelled = existingLines.reduce((sum, l) => sum + (l.cancelled_quantity || 0), 0);
+        }
+        
+        const remainingQty = totalQty - totalReceived - totalCancelled;
+
+        const { error } = await withAuthRetry(() => supabaseClient
+            .from('purchase_orders')
+            .update({
+                supplier_id: poData.supplier_id,
+                currency: poData.currency,
+                exchange_rate: poData.exchange_rate,
+                expected_delivery_date: poData.expected_delivery_date,
+                status: poData.status,
+                notes: poData.notes,
+                total_amount: poData.total_amount,
+                total_quantity: totalQty,
+                remaining_quantity: Math.max(0, remainingQty),
+                updated_at: new Date().toISOString()
+            })
+            .eq('id', poId));
+
+        if (error) throw error;
+
+        await withAuthRetry(() => supabaseClient
+            .from('purchase_order_lines')
+            .delete()
+            .eq('purchase_order_id', poId));
+
+        if (poData.lines.length > 0) {
+            await insertPOLines(poId, poData.lines, poData.currency);
+        }
+
+        // 🔥 ADDED: this is the actual "PO approved" moment for the normal
+        // workflow (Draft -> Pending Approval -> Approved) -- prompt to
+        // send the PO document only when this save is what pushed the
+        // status into Approved.
+        promptSendPOIfApproved(poData, previousStatus, poId);
+    }
+
+    // ============================================
+    // 🔥 CHANGED: WHATSAPP SUPPLIER PO DOCUMENT -- fires on APPROVAL, not on
+    // PO creation, and now sends the ACTUAL PO as a PDF (not just a text
+    // notification), after the approver confirms the PO number in a popup.
+    // ============================================
+    // Previously this fired the moment ANY new PO was saved, even a Draft
+    // or one only "Submitted for Approval" -- so a supplier could be
+    // notified about an order that wasn't actually confirmed yet, and an
+    // existing PO that later got approved (the normal Draft -> Pending
+    // Approval -> Approved flow) never notified the supplier at all. That
+    // was also just a plain text message using a placeholder template
+    // ('po_approved_supplier_notice') that was never actually approved in
+    // Meta, so it never really sent anything.
+    //
+    // Fixed + upgraded: promptSendPOIfApproved() below fires only at the
+    // moment a PO's status becomes 'Approved' -- whether that's a
+    // brand-new PO saved directly as Approved, or an existing PO
+    // transitioning into Approved from some other status -- and, instead
+    // of silently firing off a text message, opens a confirmation popup
+    // showing the PO number that's about to go out. The approver can edit
+    // it right there (fixing a typo before it reaches the supplier) or
+    // just confirm it, and only then is the PDF built and sent via the
+    // send-whatsapp-message Edge Function's 'send_document' action, using
+    // the APPROVED 'po_created_supplier_notice' Document-header template
+    // (confirmed Active in Meta WhatsApp Manager).
+    const WHATSAPP_TEMPLATES = {
+        // Document-header template, 4 body vars: supplier name / po_number /
+        // date / amount, fixed footer "PLEASE CONSIDER FREE QTY AS PER THE
+        // DISCUSSION". Confirmed APPROVED in Meta.
+        PO_DOCUMENT: 'po_created_supplier_notice'
+    };
+
+    // 🔥 FIX: loading jsPDF from a single CDN (cdnjs) had no fallback and no
+    // retry -- a single flaky request (e.g. on a weak WiFi connection at the
+    // pharmacy) surfaced as "check your internet connection" even when the
+    // connection was fine a moment later. Now tries a short list of CDNs in
+    // order, and de-dupes an already-appended/loading <script> tag the same
+    // way loadScriptOnce() does elsewhere in this file (e.g. the NHIMA
+    // reconcile XLSX loader), so clicking "Send" again after a failure
+    // doesn't pile up duplicate <script> tags.
+    function loadScriptWithFallback(urls, alreadyLoadedCheck) {
+        return new Promise((resolve, reject) => {
+            if (alreadyLoadedCheck()) { resolve(); return; }
+            let i = 0;
+            const tryNext = () => {
+                if (alreadyLoadedCheck()) { resolve(); return; }
+                if (i >= urls.length) {
+                    reject(new Error('Could not load a required library from any source -- check your internet connection and try again.'));
+                    return;
+                }
+                const src = urls[i++];
+                const existing = document.querySelector(`script[src="${src}"]`);
+                if (existing) {
+                    existing.addEventListener('load', () => resolve());
+                    existing.addEventListener('error', tryNext);
+                    return;
+                }
+                const s = document.createElement('script');
+                s.src = src;
+                s.onload = () => resolve();
+                s.onerror = () => { s.remove(); tryNext(); };
+                document.head.appendChild(s);
+            };
+            tryNext();
+        });
+    }
+
+    async function ensureJsPDFLoaded() {
+        if (window.jspdf && window.jspdf.jsPDF) return;
+        await loadScriptWithFallback(
+            [
+                'https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.2/jspdf.umd.min.js',
+                'https://cdn.jsdelivr.net/npm/jspdf@2.5.2/dist/jspdf.umd.min.js'
+            ],
+            () => !!(window.jspdf && window.jspdf.jsPDF)
+        );
+        await loadScriptWithFallback(
+            [
+                'https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js',
+                'https://cdn.jsdelivr.net/npm/jspdf-autotable@3.8.2/dist/jspdf.plugin.autotable.min.js'
+            ],
+            () => !!(window.jspdf && window.jspdf.jsPDF && window.jspdf.jsPDF.API && window.jspdf.jsPDF.API.autoTable)
+        );
+    }
+
+    // Builds the same document generatePOPrint() shows on screen, as a real
+    // PDF, and returns it as base64 (no data: prefix) ready for the Edge
+    // Function to upload to WhatsApp. `order` must have `suppliers:(name,phone)`
+    // and `purchase_order_lines` embedded (see promptSendPOIfApproved below).
+    function generatePOPDFBase64(order) {
+        const { jsPDF } = window.jspdf;
+        const doc = new jsPDF();
+        const symbol = order.currency === 'ZMW' ? 'ZK' : '$';
+        const lines = order.purchase_order_lines || [];
+
+        doc.setFontSize(14);
+        doc.text(String(companySettings.company_name || 'Griffins Medicals Limited'), 14, 15);
+        doc.setFontSize(9);
+        doc.setTextColor(90);
+        doc.text(`${companySettings.address || ''}   Phone: ${companySettings.phone || ''}`, 14, 21);
+        doc.text(`ZAMRA #: ${companySettings.zamra_number || ''}`, 14, 26);
+        doc.setDrawColor(51);
+        doc.line(14, 30, 196, 30);
+
+        doc.setTextColor(15, 23, 42);
+        doc.setFontSize(13);
+        doc.text('PURCHASE ORDER', 105, 39, { align: 'center' });
+
+        doc.setFontSize(10);
+        let y = 47;
+        const infoRows = [
+            ['PO Number:', order.po_number || ''],
+            ['Supplier:', order.suppliers?.name || 'Unknown'],
+            ['Currency:', order.currency || 'USD'],
+            ['Exchange Rate:', String(order.exchange_rate || 1)],
+            ['Expected Delivery:', formatDate(order.expected_delivery_date) || 'TBC'],
+            ['Status:', order.status || 'Draft'],
+        ];
+        infoRows.forEach(([label, value]) => {
+            doc.setFont(undefined, 'bold');
+            doc.text(label, 14, y);
+            doc.setFont(undefined, 'normal');
+            doc.text(String(value), 55, y);
+            y += 6;
+        });
+
+        const tableRows = lines.map((line, idx) => [
+            String(idx + 1),
+            line.product_name || '',
+            String(line.pack_size || 1),
+            String(line.order_quantity || 0),
+            `${symbol} ${formatNumber(line.purchase_rate)}`,
+            `${symbol} ${formatNumber(line.total_amount)}`,
+        ]);
+
+        doc.autoTable({
+            startY: y + 4,
+            head: [['#', 'Product', 'Pack Size', 'Qty', 'Rate', 'Total']],
+            body: tableRows,
+            styles: { fontSize: 8, cellPadding: 2 },
+            headStyles: { fillColor: [30, 58, 95], textColor: 255 },
+            foot: [['', '', '', '', 'Grand Total:', `${symbol} ${formatNumber(order.total_amount || 0)}`]],
+            footStyles: { fontStyle: 'bold', fillColor: [248, 250, 252], textColor: [15, 23, 42] },
+        });
+
+        const footerY = (doc.lastAutoTable?.finalY || y + 20) + 14;
+        doc.setFontSize(8);
+        doc.setTextColor(100);
+        doc.text('This is a computer-generated purchase order.', 105, footerY, { align: 'center' });
+        doc.text(`Generated on: ${new Date().toLocaleString()}`, 105, footerY + 5, { align: 'center' });
+
+        // datauristring looks like "data:application/pdf;filename=...;base64,JVBERi0x..."
+        // -- only the part after the last comma is the actual base64 payload.
+        const dataUri = doc.output('datauristring');
+        return dataUri.substring(dataUri.indexOf(',') + 1);
+    }
+
+    // Low-level: given a full order row (with suppliers + lines embedded)
+    // and the exact po_number to print/send (may differ from order.po_number
+    // if the approver just edited it in the confirm popup), builds the PDF
+    // and sends it via the send-whatsapp-message Edge Function. Never
+    // throws -- returns { ok, message } so callers can toast the result.
+    async function sendPOPdfToSupplier(order, poNumberToSend) {
+        const phone = order.suppliers?.phone;
+        if (!phone) {
+            return { ok: false, message: 'This supplier has no phone number on file -- add one in Suppliers before sending.' };
+        }
+        try {
+            await ensureJsPDFLoaded();
+            const orderForPdf = { ...order, po_number: poNumberToSend };
+            const pdfBase64 = generatePOPDFBase64(orderForPdf);
+            const symbol = order.currency === 'ZMW' ? 'ZK' : '$';
+
+            const { data: sendResult, error: sendError } = await supabaseClient.functions.invoke('send-whatsapp-message', {
+                body: {
+                    action: 'send_document',
+                    to: phone,
+                    template_name: WHATSAPP_TEMPLATES.PO_DOCUMENT,
+                    filename: `${poNumberToSend || 'PurchaseOrder'}.pdf`,
+                    pdf_base64: pdfBase64,
+                    body_params: [
+                        order.suppliers?.name || '',
+                        poNumberToSend || '',
+                        formatDate(order.created_at) || new Date().toLocaleDateString(),
+                        `${symbol} ${formatNumber(order.total_amount || 0)}`
+                    ]
+                }
+            });
+
+            if (sendError || (sendResult && sendResult.success === false)) {
+                console.error('WhatsApp PO send failed:', sendError || sendResult);
+                return {
+                    ok: false,
+                    message: 'Could not send the PO on WhatsApp -- this usually means the "' + WHATSAPP_TEMPLATES.PO_DOCUMENT +
+                        '" template isn\'t approved/active in Meta right now. See console for the exact error.'
+                };
+            }
+            return { ok: true, message: `Purchase Order ${poNumberToSend} sent to ${order.suppliers?.name || 'the supplier'} on WhatsApp!` };
+        } catch (err) {
+            console.error('Error sending PO via WhatsApp:', err);
+            return { ok: false, message: 'Error sending PO via WhatsApp: ' + err.message };
+        }
+    }
+
+    // 🔥 ADDED: shared gate used by both createNewPO() and
+    // updateExistingPO() -- only prompts to send the PO document the moment
+    // a PO's status BECOMES 'Approved' (previousStatus is null/undefined
+    // for a brand-new PO, so saving one directly as Approved also counts).
+    // Opens the confirm-PO-number popup rather than sending immediately.
+    function promptSendPOIfApproved(poData, previousStatus, poId) {
+        if (poData.status !== 'Approved' || previousStatus === 'Approved') return;
+        if (!poId) return;
+        const supplierRecord = (state.suppliers || []).find(s => s.id === poData.supplier_id);
+        if (!supplierRecord) return;
+        if (!supplierRecord.phone) {
+            console.log('WhatsApp: this supplier has no phone number on file -- skipping PO document send.');
+            return;
+        }
+        showPOSendConfirmModal(poId, poData.po_number || '', supplierRecord.name || '');
+    }
+
+    // 🔥 ADDED: "ask for number to change or not, then send" -- popup shown
+    // the moment a PO becomes Approved, before anything goes out on
+    // WhatsApp. Lets the approver confirm the PO number that will be
+    // printed on the PDF and sent to the supplier, or correct it on the
+    // spot, before the send fires. Choosing "Don't Send" just closes the
+    // popup -- the PO stays Approved, nothing is sent.
+    function showPOSendConfirmModal(poId, currentPoNumber, supplierName) {
+        const existing = document.getElementById('poSendConfirmModal');
+        if (existing) existing.remove();
+
+        const overlay = document.createElement('div');
+        overlay.id = 'poSendConfirmModal';
+        overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(15,23,42,0.6);backdrop-filter:blur(4px);z-index:1300;display:flex;justify-content:center;align-items:center;';
+        overlay.innerHTML = `
+            <div class="modal-content-box" style="background:white;padding:28px;border-radius:12px;width:90%;max-width:440px;box-shadow:0 20px 50px rgba(0,0,0,0.5);">
+                <div style="text-align:center;margin-bottom:14px;"><i class="fa-brands fa-whatsapp" style="font-size:2.6rem;color:#25D366;"></i></div>
+                <h3 style="margin:0 0 8px 0;color:#0f172a;text-align:center;">Send Purchase Order to Supplier?</h3>
+                <p style="margin:0 0 16px 0;color:#64748b;font-size:0.88rem;text-align:center;">
+                    This PO has been approved. It will be sent to <strong>${supplierName || 'the supplier'}</strong> on WhatsApp as a PDF.
+                    Confirm the PO number below, or change it, before sending.
+                </p>
+                <label style="display:block;font-size:0.78rem;font-weight:600;color:#334155;margin-bottom:6px;">PO Number</label>
+                <input type="text" id="poSendConfirmNumberInput" value="${(currentPoNumber || '').replace(/"/g, '&quot;')}"
+                    style="width:100%;box-sizing:border-box;padding:9px 12px;border:1px solid #cbd5e1;border-radius:6px;font-size:0.95rem;margin-bottom:18px;">
+                <div style="display:flex;gap:10px;justify-content:flex-end;">
+                    <button id="poSendConfirmSkipBtn" style="background:#f1f5f9;color:#334155;border:none;padding:10px 18px;border-radius:6px;cursor:pointer;">
+                        Don't Send
+                    </button>
+                    <button id="poSendConfirmSendBtn" style="background:#25D366;color:white;border:none;padding:10px 18px;border-radius:6px;cursor:pointer;">
+                        <i class="fa-brands fa-whatsapp"></i> Send
+                    </button>
+                </div>
+            </div>
+        `;
+        document.body.appendChild(overlay);
+        overlay.querySelector('.modal-content-box').addEventListener('click', e => e.stopPropagation());
+        overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
+        document.getElementById('poSendConfirmSkipBtn').addEventListener('click', () => overlay.remove());
+
+        document.getElementById('poSendConfirmSendBtn').addEventListener('click', async () => {
+            const input = document.getElementById('poSendConfirmNumberInput');
+            const numberToSend = (input?.value || '').trim();
+            if (!numberToSend) {
+                showToast('PO number cannot be empty', 'error');
+                return;
+            }
+
+            const sendBtn = document.getElementById('poSendConfirmSendBtn');
+            const skipBtn = document.getElementById('poSendConfirmSkipBtn');
+            const originalHtml = sendBtn.innerHTML;
+            sendBtn.disabled = true;
+            skipBtn.disabled = true;
+            sendBtn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Sending...';
+
+            try {
+                // If the approver changed the number, save it on the PO
+                // record too, so what's stored matches what was sent.
+                if (numberToSend !== currentPoNumber) {
+                    const { error: updateError } = await withAuthRetry(() => supabaseClient
+                        .from('purchase_orders')
+                        .update({ po_number: numberToSend })
+                        .eq('id', poId));
+                    if (updateError) {
+                        console.error('Could not update PO number before sending:', updateError);
+                        showToast('Could not save the edited PO number -- sending with the original number instead.', 'warning');
+                    } else {
+                        const localOrder = (state.orders || []).find(o => o.id === poId);
+                        if (localOrder) localOrder.po_number = numberToSend;
+                    }
+                }
+
+                const { data: order, error: fetchError } = await supabaseClient
+                    .from('purchase_orders')
+                    .select(`*, suppliers:supplier_id (name, phone), purchase_order_lines (*)`)
+                    .eq('id', poId)
+                    .single();
+                if (fetchError) throw fetchError;
+
+                const result = await sendPOPdfToSupplier(order, numberToSend);
+                showToast(result.message, result.ok ? 'success' : 'error');
+                overlay.remove();
+            } catch (err) {
+                console.error('Error sending PO via WhatsApp:', err);
+                showToast('Error sending PO via WhatsApp: ' + err.message, 'error');
+                sendBtn.disabled = false;
+                skipBtn.disabled = false;
+                sendBtn.innerHTML = originalHtml;
+            }
+        });
+    }
+
+    async function createNewPO(poData, totalQty) {
+        const { data, error } = await withAuthRetry(() => supabaseClient
+            .from('purchase_orders')
+            .insert([{
+                po_number: poData.po_number,
+                supplier_id: poData.supplier_id,
+                currency: poData.currency,
+                exchange_rate: poData.exchange_rate,
+                expected_delivery_date: poData.expected_delivery_date,
+                status: poData.status,
+                notes: poData.notes,
+                total_amount: poData.total_amount,
+                total_quantity: totalQty,
+                remaining_quantity: totalQty,
+                total_received_quantity: 0,
+                total_received_amount: 0,
+                total_cancelled_quantity: 0,
+                total_cancelled_amount: 0,
+                remaining_amount: poData.total_amount,
+                fully_received: false
+            }])
+            .select());
+
+        if (error) throw error;
+
+        if (data && data.length > 0 && poData.lines.length > 0) {
+            await insertPOLines(data[0].id, poData.lines, poData.currency);
+        }
+
+        // 🔥 CHANGED: only prompt to send if this brand-new PO was saved
+        // directly as Approved (skipping Draft/Pending Approval) -- see
+        // promptSendPOIfApproved()'s comment above.
+        if (data && data.length > 0) {
+            promptSendPOIfApproved(poData, null, data[0].id);
+        }
+    }
+
+    async function insertPOLines(poId, lines, currency) {
+        const linesToInsert = lines.map(line => ({
+            purchase_order_id: poId,
+            product_id: line.product_id,
+            product_name: line.product_name,
+            generic_name: line.generic_name || '',
+            pack_size: line.pack_size || 1,
+            order_quantity: line.order_quantity,
+            purchase_rate: line.purchase_rate,
+            total_amount: line.total_amount,
+            currency: currency,
+            received_quantity: 0,
+            remaining_quantity: line.order_quantity,
+            fully_received: false,
+            cancelled_quantity: 0
+        }));
+
+        const { error: lineError } = await withAuthRetry(() => supabaseClient
+            .from('purchase_order_lines')
+            .insert(linesToInsert));
+
+        if (lineError) throw lineError;
+    }
+
+    function getPOData() {
+        const supplierId = document.getElementById('poSupplier')?.value;
+        if (!supplierId) {
+            showToast('Please select a supplier', 'error');
+            return null;
+        }
+
+        const currency = document.getElementById('poCurrency')?.value || 'USD';
+        const exchangeRate = parseFloat(document.getElementById('poExchangeRate')?.value) || 1;
+        const total = state.poLines.reduce((sum, line) => sum + (line.total_amount || 0), 0);
+        
+        const isEditing = document.getElementById('editPOId')?.value !== '';
+        const poNumber = isEditing ? 
+            (state.orders.find(o => o.id === document.getElementById('editPOId').value)?.po_number || generatePONumber()) :
+            generatePONumber();
+
+        return {
+            po_number: poNumber,
+            supplier_id: supplierId,
+            currency: currency,
+            exchange_rate: exchangeRate,
+            expected_delivery_date: document.getElementById('poDeliveryDate')?.value || null,
+            notes: document.getElementById('poNotes')?.value || '',
+            total_amount: total,
+            lines: state.poLines.map(l => ({
+                product_id: l.product_id,
+                product_name: l.product_name,
+                generic_name: l.generic_name || '',
+                pack_size: l.pack_size || 1,
+                order_quantity: l.order_quantity || 0,
+                purchase_rate: l.purchase_rate || 0,
+                total_amount: l.total_amount || 0
+            }))
+        };
+    }
+
+    function generatePONumber() {
+        return `${companySettings.purchase_order_prefix}-${new Date().getFullYear()}-${String(Math.floor(Math.random() * 10000)).padStart(4, '0')}`;
+    }
+
+    function validatePO() {
+        if (!document.getElementById('poSupplier')?.value) {
+            showToast('Please select a supplier', 'error');
+            return false;
+        }
+        if (state.poLines.length === 0) {
+            showToast('Please add at least one product', 'error');
+            return false;
+        }
+        const invalidLines = state.poLines.filter(l => (l.order_quantity || 0) <= 0 || (l.purchase_rate || 0) <= 0);
+        if (invalidLines.length > 0) {
+            showToast('Please ensure all line items have valid quantity and rate', 'error');
+            return false;
+        }
+        return true;
+    }
+
+    // ============================================
+    // CANCEL FULL PO FUNCTIONS
+    // ============================================
+
+    function openCancelPOFromModal() {
+        const poId = document.getElementById('editPOId').value;
+        if (!poId) {
+            showToast('No PO selected to cancel', 'error');
+            return;
+        }
+        closeModal('poModal');
+        setTimeout(() => {
+            openCancelPO(poId);
+        }, 300);
+    }
+
+    function openCancelPO(orderId) {
+        const order = state.orders.find(o => o.id === orderId);
+        if (!order) {
+            showToast('Order not found', 'error');
+            return;
+        }
+
+        if (order.status === 'Cancelled') {
+            showToast('PO is already cancelled', 'warning');
+            return;
+        }
+
+        if (order.status === 'Closed' || order.status === 'Goods Received') {
+            showToast('PO is already completed', 'warning');
+            return;
+        }
+
+        // Check if any items were received
+        const hasReceived = (order.total_received_quantity || 0) > 0;
+
+        let cancelReceivedEl = document.getElementById('cancelAlreadyReceived');
+        if (!cancelReceivedEl) {
+            const cancelPONumber = document.getElementById('cancelPONumber');
+            if (cancelPONumber) {
+                const parentDiv = cancelPONumber.closest('.modal-body');
+                if (parentDiv) {
+                    const infoDiv = parentDiv.querySelector('div[style*="background: #f8fafc"]');
+                    if (infoDiv) {
+                        const receivedP = document.createElement('p');
+                        receivedP.style.cssText = 'margin: 5px 0 0 0; font-size: 0.9rem;';
+                        receivedP.innerHTML = '<strong>Already Received:</strong> <span id="cancelAlreadyReceived">0</span>';
+                        infoDiv.appendChild(receivedP);
+                    }
+                }
+            }
+        }
+
+        document.getElementById('cancelPONumber').textContent = order.po_number || 'N/A';
+        document.getElementById('cancelPOSupplier').textContent = order.suppliers?.name || 'Unknown';
+        const receivedEl = document.getElementById('cancelAlreadyReceived');
+        if (receivedEl) receivedEl.textContent = order.total_received_quantity || 0;
+        
+        // Update cancel message based on scenario
+        const cancelMessage = document.getElementById('cancelPOModal').querySelector('p');
+        if (cancelMessage) {
+            if (hasReceived) {
+                cancelMessage.textContent = 'This will cancel the remaining quantity only. Received items will be kept and a payable will be created.';
+                cancelMessage.style.color = '#dc2626';
+            } else {
+                cancelMessage.textContent = 'This action cannot be undone. All items will be marked as cancelled.';
+                cancelMessage.style.color = '#64748b';
+            }
+        }
+        
+        document.getElementById('cancelPOModal').classList.add('show');
+        document.getElementById('cancelPOModal').dataset.orderId = orderId;
+    }
+
+    async function confirmCancelPO() {
+        const poId = document.getElementById('cancelPOModal').dataset.orderId;
+        let reason = document.getElementById('cancelReason').value;
+        const reasonOther = document.getElementById('cancelReasonOther').value.trim();
+
+        if (reason === 'Other' && !reasonOther) {
+            showToast('Please specify the cancellation reason', 'error');
+            return;
+        }
+
+        if (reason === 'Other') {
+            reason = reasonOther;
+        }
+
+        try {
+            const { data: order, error: orderError } = await supabaseClient
+                .from('purchase_orders')
+                .select('*')
+                .eq('id', poId)
+                .single();
+
+            if (orderError) throw orderError;
+
+            const hasReceived = (order.total_received_quantity || 0) > 0;
+
+            // Determine new status per workflow
+            let newStatus;
+            if (hasReceived) {
+                // Scenario 2: Partial receipt - mark as Closed
+                newStatus = 'Closed';
+            } else {
+                // Scenario 1: Nothing received - mark as Cancelled
+                newStatus = 'Cancelled';
+            }
+
+            // Update PO header
+            const { error: updateError } = await supabaseClient
+                .from('purchase_orders')
+                .update({
+                    status: newStatus,
+                    cancelled_at: new Date().toISOString(),
+                    cancellation_reason: reason,
+                    updated_at: new Date().toISOString(),
+                    fully_received: hasReceived ? true : false
+                })
+                .eq('id', poId);
+
+            if (updateError) throw updateError;
+
+            // Update PO lines - cancel remaining quantities only
+            const { data: lines, error: linesError } = await supabaseClient
+                .from('purchase_order_lines')
+                .select('id, order_quantity, received_quantity, cancelled_quantity')
+                .eq('purchase_order_id', poId);
+
+            if (linesError) throw linesError;
+
+            for (const line of lines) {
+                const currentReceived = line.received_quantity || 0;
+                const currentOrdered = line.order_quantity || 0;
+                const currentCancelled = line.cancelled_quantity || 0;
+                // Only cancel the remaining quantity
+                const remainingToCancel = Math.max(0, currentOrdered - currentReceived - currentCancelled);
+                
+                let newCancelled = currentCancelled + remainingToCancel;
+                let newRemaining = currentOrdered - currentReceived - newCancelled;
+
+                await supabaseClient
+                    .from('purchase_order_lines')
+                    .update({
+                        cancelled_quantity: newCancelled,
+                        remaining_quantity: Math.max(0, newRemaining),
+                        fully_received: newRemaining <= 0 && currentReceived > 0,
+                        cancellation_reason: reason,
+                        cancelled_at: new Date().toISOString()
+                    })
+                    .eq('id', line.id);
+            }
+
+            // If there were received items, create supplier payable
+            if (hasReceived && order.total_received_amount > 0) {
+                const { data: existingPayable } = await supabaseClient
+                    .from('supplier_payables')
+                    .select('id')
+                    .eq('po_id', poId)
+                    .maybeSingle();
+
+                if (!existingPayable) {
+                    const payableData = {
+                        supplier_id: order.supplier_id,
+                        po_id: poId,
+                        invoice_number: `CLOSED-${order.po_number}`,
+                        invoice_date: new Date().toISOString().split('T')[0],
+                        due_date: new Date(new Date().setDate(new Date().getDate() + 30)).toISOString().split('T')[0],
+                        total_amount: order.total_received_amount || 0,
+                        amount_paid: 0,
+                        amount_remaining: order.total_received_amount || 0,
+                        currency: order.currency || 'USD',
+                        exchange_rate: order.exchange_rate || 1,
+                        status: 'Pending',
+                        payment_terms: 'Net 30',
+                        notes: `PO cancelled. Received amount: ${order.total_received_amount}`
+                    };
+
+                    const { error: payableError } = await supabaseClient
+                        .from('supplier_payables')
+                        .insert([payableData]);
+
+                    if (payableError) {
+                        console.error('Error creating payable for received items:', payableError);
+                    } else {
+                        showToast(`✅ Payable created for received amount: ${order.currency} ${formatNumber(order.total_received_amount)}`, 'success');
+                    }
+                }
+            }
+
+            const statusMessage = hasReceived 
+                ? `PO closed with ${order.total_received_quantity} items received. Payable created for received amount.`
+                : 'PO cancelled successfully. No items received.';
+
+            showToast(statusMessage, 'success');
+            closeModal('cancelPOModal');
+            await loadPurchaseOrders();
+
+        } catch (error) {
+            console.error('Error cancelling PO:', error);
+            showToast('Error cancelling PO: ' + error.message, 'error');
+        }
+    }
+
+    // ============================================
+    // CANCEL REMAINING PO FUNCTIONS - NEW
+    // ============================================
+
+    function openCancelRemainingPO(orderId) {
+        const order = state.orders.find(o => o.id === orderId);
+        if (!order) {
+            showToast('Order not found', 'error');
+            return;
+        }
+
+        // Calculate remaining quantities
+        const remainingQty = (order.total_quantity || 0) - (order.total_received_quantity || 0) - (order.total_cancelled_quantity || 0);
+        
+        if (remainingQty <= 0) {
+            showToast('No remaining items to cancel', 'warning');
+            return;
+        }
+
+        // Close any open modals first
+        closeModal('poModal');
+        closeModal('grnModal');
+        
+        // Populate the cancel remaining modal
+        document.getElementById('cancelRemainingPONumber').textContent = order.po_number || 'N/A';
+        document.getElementById('cancelRemainingPOSupplier').textContent = order.suppliers?.name || 'Unknown';
+        document.getElementById('cancelRemainingTotalQty').textContent = order.total_quantity || 0;
+        document.getElementById('cancelRemainingReceivedQty').textContent = order.total_received_quantity || 0;
+        document.getElementById('cancelRemainingCancelledQty').textContent = order.total_cancelled_quantity || 0;
+        document.getElementById('cancelRemainingQty').textContent = remainingQty;
+        
+        // Reset reason fields
+        document.getElementById('cancelRemainingReason').value = '';
+        document.getElementById('cancelRemainingReasonOther').style.display = 'none';
+        document.getElementById('cancelRemainingReasonOther').value = '';
+        
+        // Store the order ID for confirmation
+        document.getElementById('cancelRemainingModal').dataset.orderId = orderId;
+        
+        // Show the modal
+        document.getElementById('cancelRemainingModal').classList.add('show');
+    }
+
+    async function confirmCancelRemainingPO() {
+        const poId = document.getElementById('cancelRemainingModal').dataset.orderId;
+        let reason = document.getElementById('cancelRemainingReason').value;
+        const reasonOther = document.getElementById('cancelRemainingReasonOther').value.trim();
+
+        if (!reason) {
+            showToast('Please select a cancellation reason', 'error');
+            return;
+        }
+
+        if (reason === 'Other' && !reasonOther) {
+            showToast('Please specify the cancellation reason', 'error');
+            return;
+        }
+
+        if (reason === 'Other') {
+            reason = reasonOther;
+        }
+
+        try {
+            // Get current order data
+            const { data: order, error: orderError } = await supabaseClient
+                .from('purchase_orders')
+                .select('*')
+                .eq('id', poId)
+                .single();
+
+            if (orderError) throw orderError;
+
+            const hasReceived = (order.total_received_quantity || 0) > 0;
+
+            // Determine new status
+            let newStatus;
+            if (hasReceived) {
+                // If some items were received, mark as Closed (completed)
+                newStatus = 'Closed';
+            } else {
+                // If nothing received, mark as Cancelled
+                newStatus = 'Cancelled';
+            }
+
+            // Update PO header
+            const { error: updateError } = await supabaseClient
+                .from('purchase_orders')
+                .update({
+                    status: newStatus,
+                    cancelled_at: new Date().toISOString(),
+                    cancellation_reason: reason,
+                    updated_at: new Date().toISOString(),
+                    fully_received: hasReceived ? true : false
+                })
+                .eq('id', poId);
+
+            if (updateError) throw updateError;
+
+            // Update PO lines - cancel remaining quantities only
+            const { data: lines, error: linesError } = await supabaseClient
+                .from('purchase_order_lines')
+                .select('id, order_quantity, received_quantity, cancelled_quantity')
+                .eq('purchase_order_id', poId);
+
+            if (linesError) throw linesError;
+
+            for (const line of lines) {
+                const currentReceived = line.received_quantity || 0;
+                const currentOrdered = line.order_quantity || 0;
+                const currentCancelled = line.cancelled_quantity || 0;
+                
+                // Only cancel the remaining quantity
+                const remainingToCancel = Math.max(0, currentOrdered - currentReceived - currentCancelled);
+                
+                let newCancelled = currentCancelled + remainingToCancel;
+                let newRemaining = currentOrdered - currentReceived - newCancelled;
+
+                await supabaseClient
+                    .from('purchase_order_lines')
+                    .update({
+                        cancelled_quantity: newCancelled,
+                        remaining_quantity: Math.max(0, newRemaining),
+                        fully_received: newRemaining <= 0 && currentReceived > 0,
+                        cancellation_reason: reason,
+                        cancelled_at: new Date().toISOString()
+                    })
+                    .eq('id', line.id);
+            }
+
+            // If there were received items, create supplier payable for received amount
+            if (hasReceived && order.total_received_amount > 0) {
+                // Check if payable already exists
+                const { data: existingPayable } = await supabaseClient
+                    .from('supplier_payables')
+                    .select('id')
+                    .eq('po_id', poId)
+                    .maybeSingle();
+
+                if (!existingPayable) {
+                    // Create payable for received amount
+                    const payableData = {
+                        supplier_id: order.supplier_id,
+                        po_id: poId,
+                        invoice_number: `CLOSED-${order.po_number}`,
+                        invoice_date: new Date().toISOString().split('T')[0],
+                        due_date: new Date(new Date().setDate(new Date().getDate() + 30)).toISOString().split('T')[0],
+                        total_amount: order.total_received_amount || 0,
+                        amount_paid: 0,
+                        amount_remaining: order.total_received_amount || 0,
+                        currency: order.currency || 'USD',
+                        exchange_rate: order.exchange_rate || 1,
+                        status: 'Pending',
+                        payment_terms: 'Net 30',
+                        notes: `PO cancelled. Received amount: ${order.total_received_amount}`
+                    };
+
+                    const { error: payableError } = await supabaseClient
+                        .from('supplier_payables')
+                        .insert([payableData]);
+
+                    if (payableError) {
+                        console.error('Error creating payable for received items:', payableError);
+                    } else {
+                        showToast(`✅ Payable created for received amount: ${order.currency} ${formatNumber(order.total_received_amount)}`, 'success');
+                    }
+                }
+            }
+
+            // Update PO totals
+            await updatePOHeader(poId);
+
+            const statusMessage = hasReceived 
+                ? `PO closed with ${order.total_received_quantity} items received. Payable created for received amount.`
+                : 'PO cancelled successfully. No items received.';
+
+            showToast(statusMessage, 'success');
+            closeModal('cancelRemainingModal');
+            await loadPurchaseOrders();
+
+        } catch (error) {
+            console.error('Error cancelling remaining PO:', error);
+            showToast('Error cancelling remaining PO: ' + error.message, 'error');
+        }
+    }
+
+    // ============================================
+    // GRN FUNCTIONS - REMOVED CANCELLATION
+    // ============================================
+
+    async function openGRN(orderId) {
+        try {
+            const orderCheck = await getOrderStatus(orderId);
+            
+            if (!['Approved', 'Partially Received'].includes(orderCheck.status)) {
+                showToast(`Cannot receive goods. Current status: ${orderCheck.status}`, 'error');
+                return;
+            }
+
+            const fullCheck = await getOrderReceiptStatus(orderId);
+            
+            if (fullCheck.fully_received) {
+                showToast('This PO is already fully received.', 'warning');
+                return;
+            }
+
+            const order = await getOrderWithLines(orderId);
+            
+            if (!hasRemainingItems(order)) {
+                const hasCancelled = order.purchase_order_lines.some(line => (line.cancelled_quantity || 0) > 0);
+                showToast(hasCancelled ? 'All remaining items have been cancelled. No items to receive.' : 'No items remaining to receive.', 'warning');
+                return;
+            }
+
+            await initializeGRN(order);
+            showModal('grnModal');
+        } catch (error) {
+            console.error('Error opening GRN:', error);
+            showToast('Error opening GRN: ' + error.message, 'error');
+        }
+    }
+
+    async function getOrderStatus(orderId) {
+        const { data, error } = await supabaseClient
+            .from('purchase_orders')
+            .select('status')
+            .eq('id', orderId)
+            .single();
+
+        if (error) throw error;
+        return data;
+    }
+
+    async function getOrderReceiptStatus(orderId) {
+        const { data, error } = await supabaseClient
+            .from('purchase_orders')
+            .select('fully_received, remaining_quantity')
+            .eq('id', orderId)
+            .single();
+
+        if (error) throw error;
+        return data;
+    }
+
+    async function getOrderWithLines(orderId) {
+        const { data, error } = await supabaseClient
+            .from('purchase_orders')
+            .select(`
+                *,
+                suppliers:supplier_id (name),
+                purchase_order_lines (*)
+            `)
+            .eq('id', orderId)
+            .single();
+
+        if (error) throw error;
+        return data;
+    }
+
+    function hasRemainingItems(order) {
+        return order.purchase_order_lines.some(line => 
+            (line.order_quantity || 0) > ((line.received_quantity || 0) + (line.cancelled_quantity || 0))
+        );
+    }
+
+    async function initializeGRN(order) {
+        state.currentGRNOrderId = order.id;
+        state.currentGRNOrderData = order;
+        state.currentGRNCurrency = order.currency || 'USD';
+        state.currentGRNExchangeRate = order.exchange_rate || 1;
+        
+        state.grnLines = (order.purchase_order_lines || [])
+            .filter(line => (line.order_quantity || 0) > ((line.received_quantity || 0) + (line.cancelled_quantity || 0)))
+            .map(line => ({
+                ...line,
+                received_quantity: 0,
+                batch_number: '',
+                expiry_date: '',
+                total_amount: 0,
+                max_receivable: (line.order_quantity || 0) - (line.received_quantity || 0) - (line.cancelled_quantity || 0),
+                cancel_remaining: false,
+                cancel_reason: '',
+                cancelled_quantity: line.cancelled_quantity || 0
+            }));
+
+        // 🔥 FIX (issue #2): load existing batches for every product on
+        // this GRN, so the batch number field can offer them as a
+        // dropdown -- pick one to reuse its expiry, or type a new batch
+        // number that doesn't exist yet.
+        await loadExistingBatchesForGRN();
+        populateGRNModal(order);
+        renderGRNLines();
+        updateGRNTotal();
+    }
+
+    async function loadExistingBatchesForGRN() {
+        state.existingBatchesByProduct = {};
+        const productIds = [...new Set(state.grnLines.map(l => l.product_id).filter(Boolean))];
+        if (productIds.length === 0) return;
+
+        try {
+            const { data: batches, error } = await supabaseClient
+                .from('batches')
+                .select('product_id, batch_number, expiry_date')
+                .in('product_id', productIds)
+                .order('expiry_date', { ascending: true });
+
+            if (error) throw error;
+
+            (batches || []).forEach(b => {
+                if (!state.existingBatchesByProduct[b.product_id]) {
+                    state.existingBatchesByProduct[b.product_id] = [];
+                }
+                // Avoid duplicate batch numbers for the same product in the list.
+                if (!state.existingBatchesByProduct[b.product_id].some(x => x.batch_number === b.batch_number)) {
+                    state.existingBatchesByProduct[b.product_id].push(b);
+                }
+            });
+        } catch (error) {
+            console.error('Error loading existing batches for GRN:', error);
+        }
+    }
+
+    // 🔥 ADDED (issue #4): red if expiry is under 3 months away, yellow
+    // if under 6 months, otherwise normal. Returns style strings for the
+    // expiry input's border/background.
+    function getExpiryUrgencyStyle(dateStr) {
+        if (!dateStr) return { border: '#e2e8f0', background: 'white' };
+        const expiry = new Date(dateStr);
+        if (isNaN(expiry.getTime())) return { border: '#e2e8f0', background: 'white' };
+
+        const today = new Date();
+        const threeMonths = new Date(today);
+        threeMonths.setMonth(threeMonths.getMonth() + 3);
+        const sixMonths = new Date(today);
+        sixMonths.setMonth(sixMonths.getMonth() + 6);
+
+        if (expiry <= threeMonths) return { border: '#dc2626', background: '#fef2f2' };
+        if (expiry <= sixMonths) return { border: '#f59e0b', background: '#fffbeb' };
+        return { border: '#e2e8f0', background: 'white' };
+    }
+
+    function populateGRNModal(order) {
+        const poRef = document.getElementById('grnPOReference');
+        const supplier = document.getElementById('grnSupplier');
+        const entryDate = document.getElementById('grnEntryDate');
+        const invoiceNumber = document.getElementById('grnInvoiceNumber');
+        const invoiceDate = document.getElementById('grnInvoiceDate');
+        const freight = document.getElementById('grnFreight');
+        const insurance = document.getElementById('grnInsurance');
+        const notes = document.getElementById('grnNotes');
+        const invoiceTotal = document.getElementById('grnInvoiceTotal');
+        const currencyDisplay = document.getElementById('grnCurrencyDisplay');
+        const exchangeRateDisplay = document.getElementById('grnExchangeRateDisplay');
+        const remainingInfo = document.getElementById('grnRemainingInfo');
+        // 🔥 ADDED: default GRN payment type to Credit. Most stock is
+        // received on supplier credit, not paid cash on the spot -- Cash
+        // is still one click away in the dropdown, but the common case no
+        // longer needs to be re-selected on every single GRN.
+        const paymentType = document.getElementById('grnPaymentType');
+
+        if (poRef) poRef.textContent = order.po_number || 'N/A';
+        if (supplier) supplier.textContent = order.suppliers?.name || 'Unknown';
+        if (entryDate) entryDate.value = new Date().toISOString().split('T')[0];
+        if (invoiceNumber) invoiceNumber.value = '';
+        if (invoiceDate) invoiceDate.value = new Date().toISOString().split('T')[0];
+        if (freight) freight.value = 0;
+        if (insurance) insurance.value = 0;
+        if (notes) notes.value = '';
+        if (invoiceTotal) invoiceTotal.value = '';
+        if (paymentType) paymentType.value = 'Credit';
+
+        if (currencyDisplay) {
+            currencyDisplay.textContent = state.currentGRNCurrency;
+        }
+        if (exchangeRateDisplay) {
+            exchangeRateDisplay.textContent = state.currentGRNExchangeRate;
+        }
+        
+        if (remainingInfo) {
+            const totalRemaining = order.purchase_order_lines.reduce((sum, l) => 
+                sum + ((l.order_quantity || 0) - (l.received_quantity || 0) - (l.cancelled_quantity || 0)), 0);
+            const totalCancelled = order.purchase_order_lines.reduce((sum, l) => 
+                sum + (l.cancelled_quantity || 0), 0);
+            remainingInfo.textContent = `Remaining to receive: ${totalRemaining} packs | Already cancelled: ${totalCancelled} packs`;
+        }
+    }
+
+    // ============================================
+    // VIEW FUNCTIONS
+    // ============================================
+
+    async function viewPO(orderId) {
+        try {
+            const { data: order, error } = await supabaseClient
+                .from('purchase_orders')
+                .select(`
+                    *,
+                    suppliers:supplier_id (name),
+                    purchase_order_lines (*)
+                `)
+                .eq('id', orderId)
+                .single();
+
+            if (error) throw error;
+
+            const content = document.getElementById('viewPOContent');
+            if (!content) return;
+
+            // 🔥 ADDED: a PO "becomes" a GRN once it's fully received --
+            // same condition already used elsewhere in this file to show
+            // the dedicated "View GRN" button (renderOrderActions above).
+            // Drives whether this modal's Print button prints the
+            // Purchase Order or the Goods Receipt Note, instead of always
+            // printing "PURCHASE ORDER" even after receiving. A
+            // Partially Received order still prints as a PO here (it's
+            // still open, with remaining items) -- its GRN-so-far can be
+            // viewed/printed via the green receipt icon.
+            const hasGRN = order.status === 'Goods Received' || order.status === 'Closed';
+            state.currentViewOrderId = orderId;
+            state.currentViewHasGRN = hasGRN;
+            const printLabel = document.getElementById('viewPOPrintBtnLabel');
+            if (printLabel) printLabel.textContent = hasGRN ? 'Print GRN' : 'Print PO';
+
+            const supplierName = order.suppliers?.name || 'Unknown';
+            const symbol = order.currency === 'ZMW' ? 'ZK' : '$';
+            const lines = order.purchase_order_lines || [];
+            
+            const totalOrderQty = lines.reduce((sum, l) => sum + (l.order_quantity || 0), 0);
+            const totalReceivedQty = lines.reduce((sum, l) => sum + (l.received_quantity || 0), 0);
+            const totalCancelledQty = lines.reduce((sum, l) => sum + (l.cancelled_quantity || 0), 0);
+            const remainingQty = totalOrderQty - totalReceivedQty - totalCancelledQty;
+            
+            const isOverdue = checkIfOverdue(order);
+            
+            content.innerHTML = `
+                <div class="view-po-details">
+                    <div class="detail-row">
+                        <span class="label">PO Number</span>
+                        <span class="value"><strong>${order.po_number}</strong></span>
+                    </div>
+                    <div class="detail-row">
+                        <span class="label">Supplier</span>
+                        <span class="value">${supplierName}</span>
+                    </div>
+                    <div class="detail-row">
+                        <span class="label">Currency</span>
+                        <span class="value">${order.currency || 'USD'}</span>
+                    </div>
+                    <div class="detail-row">
+                        <span class="label">Exchange Rate</span>
+                        <span class="value">${order.exchange_rate || 1}</span>
+                    </div>
+                    <div class="detail-row">
+                        <span class="label">Expected Delivery</span>
+                        <span class="value">
+                            ${formatDate(order.expected_delivery_date)}
+                            ${isOverdue ? `<span style="color: #dc2626; margin-left: 8px;">⚠️ ${getDaysOverdue(order)} days overdue</span>` : ''}
+                        </span>
+                    </div>
+                    <div class="detail-row">
+                        <span class="label">Status</span>
+                        <span class="value">
+                            <span class="status-badge status-${(order.status || 'Draft').toLowerCase().replace(/ /g, '-')}">${order.status}</span>
+                            ${order.status === 'Partially Received' ? 
+                                `<span style="font-size: 0.75rem; color: #f59e0b; margin-left: 8px;">
+                                    (${totalReceivedQty}/${totalOrderQty} items received)
+                                </span>` : ''}
+                            ${totalCancelledQty > 0 ? 
+                                `<span style="font-size: 0.75rem; color: #dc2626; margin-left: 8px;">
+                                    (${totalCancelledQty} items cancelled)
+                                </span>` : ''}
+                            ${order.fully_received && order.status !== 'Cancelled' ? 
+                                `<span style="font-size: 0.75rem; color: #10b981; margin-left: 8px;">✅ Fully Received</span>` : ''}
+                            ${order.status === 'Cancelled' && order.cancellation_reason ?
+                                `<span style="font-size: 0.75rem; color: #64748b; margin-left: 8px;">Reason: ${order.cancellation_reason}</span>` : ''}
+                        </span>
+                    </div>
+                    <div class="detail-row">
+                        <span class="label">Total Amount</span>
+                        <span class="value" style="font-weight: bold; font-size: 1.1rem; color: #2563eb;">
+                            ${symbol} ${formatNumber(order.total_amount)}
+                            ${order.total_received_amount > 0 ? 
+                                `<br><span style="font-size: 0.85rem; color: #10b981;">Received: ${symbol} ${formatNumber(order.total_received_amount)}</span>` : ''}
+                            ${order.total_cancelled_amount > 0 ? 
+                                `<br><span style="font-size: 0.85rem; color: #dc2626;">Cancelled: ${symbol} ${formatNumber(order.total_cancelled_amount)}</span>` : ''}
+                            ${order.remaining_amount > 0 && order.status !== 'Draft' && order.status !== 'Cancelled' ? 
+                                `<br><span style="font-size: 0.85rem; color: #f59e0b;">Remaining: ${symbol} ${formatNumber(order.remaining_amount)}</span>` : ''}
+                        </span>
+                    </div>
+                    ${order.notes ? `
+                    <div class="detail-row">
+                        <span class="label">Notes</span>
+                        <span class="value">${order.notes}</span>
+                    </div>
+                    ` : ''}
+                    <div style="margin-top: 20px;">
+                        <h5>Order Lines</h5>
+                        <div class="table-responsive">
+                            <table class="table-minimal">
+                                <thead>
+                                    <tr>
+                                        <th>#</th>
+                                        <th>Product</th>
+                                        <th>Pack Size</th>
+                                        <th>Ordered</th>
+                                        <th>Received</th>
+                                        <th>Cancelled</th>
+                                        <th>Remaining</th>
+                                        <th style="text-align: right;">Rate</th>
+                                        <th style="text-align: right;">Total</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    ${lines.length === 0 ? `
+                                        <tr><td colspan="9" style="text-align: center; padding: 20px; color: #94a3b8;">No items in this order</td></tr>
+                                    ` : lines.map((line, idx) => {
+                                        const remaining = (line.order_quantity || 0) - (line.received_quantity || 0) - (line.cancelled_quantity || 0);
+                                        const isFullyReceived = remaining <= 0 && (line.received_quantity || 0) > 0;
+                                        const isFullyCancelled = remaining <= 0 && (line.received_quantity || 0) === 0 && (line.cancelled_quantity || 0) > 0;
+                                        return `
+                                        <tr>
+                                            <td>${idx + 1}</td>
+                                            <td>${line.product_name}</td>
+                                            <td>${line.pack_size || 1}</td>
+                                            <td>${line.order_quantity}</td>
+                                            <td style="color: #10b981;">${line.received_quantity || 0}</td>
+                                            <td style="color: #dc2626;">${line.cancelled_quantity || 0}</td>
+                                            <td style="color: ${isFullyReceived ? '#10b981' : isFullyCancelled ? '#dc2626' : '#f59e0b'};">${isFullyReceived ? '✅' : isFullyCancelled ? '❌' : remaining}</td>
+                                            <td style="text-align: right;">${symbol} ${formatNumber(line.purchase_rate)}</td>
+                                            <td style="text-align: right;">${symbol} ${formatNumber(line.total_amount)}</td>
+                                        </tr>
+                                    `}).join('')}
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            `;
+            
+            showModal('viewPOModal');
+        } catch (error) {
+            console.error('Error viewing PO:', error);
+            showToast('Error loading PO details: ' + error.message, 'error');
+        }
+    }
+
+    async function deletePO(orderId) {
+        if (!confirm('Are you sure you want to delete this purchase order?')) return;
+        
+        try {
+            const { error } = await supabaseClient
+                .from('purchase_orders')
+                .delete()
+                .eq('id', orderId);
+
+            if (error) throw error;
+            
+            showToast('Purchase order deleted successfully', 'success');
+            await loadPurchaseOrders();
+        } catch (error) {
+            console.error('Error deleting PO:', error);
+            showToast('Error deleting PO: ' + error.message, 'error');
+        }
+    }
+
+    async function viewGRN(orderId) {
+        try {
+            const { data: grns, error } = await supabaseClient
+                .from('goods_receipt_notes')
+                .select(`
+                    *,
+                    goods_receipt_lines (*),
+                    purchase_orders:purchase_order_id (
+                        po_number,
+                        suppliers:supplier_id (name),
+                        currency,
+                        exchange_rate
+                    )
+                `)
+                .eq('purchase_order_id', orderId)
+                .order('created_at', { ascending: true });
+
+            if (error) {
+                console.error('GRN query error:', error);
+                showToast('Error loading GRN: ' + error.message, 'error');
+                return;
+            }
+
+            if (!grns || grns.length === 0) {
+                showToast('No GRN found for this order', 'error');
+                return;
+            }
+
+            if (grns.length === 1) {
+                viewSingleGRN(grns[0]);
+            } else {
+                showGRNList(grns);
+            }
+        } catch (error) {
+            console.error('Error viewing GRN:', error);
+            showToast('Error loading GRN: ' + error.message, 'error');
+        }
+    }
+
+    function viewSingleGRN(grn) {
+        const content = document.getElementById('viewPOContent');
+        if (!content) return;
+
+        const symbol = grn.currency === 'ZMW' ? 'ZK' : '$';
+        const lines = grn.goods_receipt_lines || [];
+        const supplierName = grn.purchase_orders?.suppliers?.name || 'Unknown';
+
+        content.innerHTML = `
+            <div class="view-po-details">
+                ${renderGRNInfo(grn, supplierName, symbol)}
+                ${renderGRNTable(lines, symbol, grn)}
+            </div>
+        `;
+
+        // 🔥 ADDED: this is a specific, already-posted GRN -- the Print
+        // button should print this Goods Receipt Note, not the PO.
+        state.currentViewOrderId = grn.purchase_order_id;
+        state.currentViewHasGRN = true;
+        const printLabel = document.getElementById('viewPOPrintBtnLabel');
+        if (printLabel) printLabel.textContent = 'Print GRN';
+
+        // 🔥 ADDED: Credit Note feature -- keep the full GRN object around
+        // (with its lines + PO/supplier context) so the Credit Note modal
+        // doesn't need to re-fetch it, and show the "Create Credit Note"
+        // button now that a single GRN is actually in view.
+        state.currentViewGRNData = grn;
+        const cnBtn = document.getElementById('viewPOCreditNoteBtn');
+        if (cnBtn) cnBtn.style.display = '';
+
+        showModal('viewPOModal');
+    }
+
+    function renderGRNInfo(grn, supplierName, symbol) {
+        return `
+            <div class="detail-row">
+                <span class="label">GRN Number</span>
+                <span class="value"><strong>${grn.grn_number}</strong></span>
+            </div>
+            <div class="detail-row">
+                <span class="label">PO Reference</span>
+                <span class="value">${grn.purchase_orders?.po_number || 'N/A'}</span>
+            </div>
+            <div class="detail-row">
+                <span class="label">Supplier</span>
+                <span class="value">${supplierName}</span>
+            </div>
+            <div class="detail-row">
+                <span class="label">Entry Date</span>
+                <span class="value">${formatDate(grn.entry_date)}</span>
+            </div>
+            <div class="detail-row">
+                <span class="label">Invoice Number</span>
+                <span class="value">${grn.invoice_number || 'N/A'}</span>
+            </div>
+            <div class="detail-row">
+                <span class="label">Invoice Date</span>
+                <span class="value">${formatDate(grn.invoice_date)}</span>
+            </div>
+            <div class="detail-row">
+                <span class="label">Currency</span>
+                <span class="value">${grn.currency || 'USD'}</span>
+            </div>
+            <div class="detail-row">
+                <span class="label">Total Amount</span>
+                <span class="value" style="font-weight: bold; font-size: 1.1rem; color: #2563eb;">
+                    ${symbol} ${formatNumber(grn.total_amount || 0)}
+                </span>
+            </div>
+            ${grn.notes ? `
+            <div class="detail-row">
+                <span class="label">Notes</span>
+                <span class="value">${grn.notes}</span>
+            </div>
+            ` : ''}
+        `;
+    }
+
+    function renderGRNTable(lines, symbol, grn) {
+        return `
+            <div style="margin-top: 20px;">
+                <h5>Received Items</h5>
+                <div class="table-responsive">
+                    <table class="table-minimal">
+                        <thead>
+                            <tr>
+                                <th>#</th>
+                                <th>Product</th>
+                                <th>Pack Size</th>
+                                <th>Ordered</th>
+                                <th>Received</th>
+                                <th>Batch</th>
+                                <th>Expiry</th>
+                                <th style="text-align: right;">Rate</th>
+                                <th style="text-align: right;">Total</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            ${lines.length === 0 ? `
+                                <tr><td colspan="9" style="text-align: center; padding: 20px; color: #94a3b8;">No items received</td></tr>
+                            ` : lines.map((line, idx) => `
+                                <tr>
+                                    <td>${idx + 1}</td>
+                                    <td>${line.product_name}</td>
+                                    <td>${line.pack_size || 1}</td>
+                                    <td>${line.ordered_quantity || 0}</td>
+                                    <td style="color: #10b981;">${line.received_quantity || 0}</td>
+                                    <td>${line.batch_number || 'N/A'}</td>
+                                    <td>${formatDate(line.expiry_date)}</td>
+                                    <td style="text-align: right;">${symbol} ${formatNumber(line.purchase_rate)}</td>
+                                    <td style="text-align: right;">${symbol} ${formatNumber(line.total_amount)}</td>
+                                </tr>
+                            `).join('')}
+                        </tbody>
+                        <tfoot>
+                            ${renderGRNFooters(grn, symbol)}
+                        </tfoot>
+                    </table>
+                </div>
+            </div>
+        `;
+    }
+
+    function renderGRNFooters(grn, symbol) {
+        let html = '';
+        if (grn.freight) {
+            html += `
+                <tr>
+                    <td colspan="8" style="text-align: right;">Freight:</td>
+                    <td style="text-align: right;">${symbol} ${formatNumber(grn.freight)}</td>
+                </tr>
+            `;
+        }
+        if (grn.insurance) {
+            html += `
+                <tr>
+                    <td colspan="8" style="text-align: right;">Insurance:</td>
+                    <td style="text-align: right;">${symbol} ${formatNumber(grn.insurance)}</td>
+                </tr>
+            `;
+        }
+        html += `
+            <tr class="total-row">
+                <td colspan="8" style="text-align: right;">Grand Total:</td>
+                <td style="text-align: right;">${symbol} ${formatNumber(grn.total_amount || 0)}</td>
+            </tr>
+        `;
+        return html;
+    }
+
+    function showGRNList(grns) {
+        const content = document.getElementById('viewPOContent');
+        if (!content) return;
+
+        const symbol = grns[0]?.currency === 'ZMW' ? 'ZK' : '$';
+        const supplierName = grns[0]?.purchase_orders?.suppliers?.name || 'Unknown';
+
+        content.innerHTML = `
+            <div class="view-po-details">
+                <div class="detail-row">
+                    <span class="label">PO Reference</span>
+                    <span class="value"><strong>${grns[0]?.purchase_orders?.po_number || 'N/A'}</strong></span>
+                </div>
+                <div class="detail-row">
+                    <span class="label">Supplier</span>
+                    <span class="value">${supplierName}</span>
+                </div>
+                <div style="margin-top: 20px;">
+                    <h5>GRN History (${grns.length} receipts)</h5>
+                    <div class="table-responsive">
+                        <table class="table-minimal">
+                            <thead>
+                                <tr>
+                                    <th>GRN #</th>
+                                    <th>Date</th>
+                                    <th>Invoice #</th>
+                                    <th style="text-align: right;">Amount</th>
+                                    <th>Status</th>
+                                    <th style="text-align: center;">Action</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                ${grns.map(grn => `
+                                    <tr>
+                                        <td><strong>${grn.grn_number}</strong></td>
+                                        <td>${formatDate(grn.entry_date)}</td>
+                                        <td>${grn.invoice_number || 'N/A'}</td>
+                                        <td style="text-align: right;">${symbol} ${formatNumber(grn.total_amount || 0)}</td>
+                                        <td><span class="status-badge status-goods-received">Posted</span></td>
+                                        <td style="text-align: center;">
+                                            <button class="btn btn-sm btn-outline" onclick="viewSingleGRNById('${grn.id}')">
+                                                <i class="fa-regular fa-eye"></i> View
+                                            </button>
+                                        </td>
+                                    </tr>
+                                `).join('')}
+                            </tbody>
+                            <tfoot>
+                                <tr class="total-row">
+                                    <td colspan="3" style="text-align: right;">Total Received:</td>
+                                    <td style="text-align: right;">${symbol} ${formatNumber(grns.reduce((sum, g) => sum + (g.total_amount || 0), 0))}</td>
+                                    <td colspan="2"></td>
+                                </tr>
+                            </tfoot>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        `;
+
+        // 🔥 ADDED: this is a summary of multiple GRNs against one PO --
+        // there's no single receipt to print here (use "View" on a row
+        // for that), so the Print button falls back to printing the
+        // underlying PO as a whole.
+        state.currentViewOrderId = grns[0]?.purchase_order_id || null;
+        state.currentViewHasGRN = false;
+        const printLabel = document.getElementById('viewPOPrintBtnLabel');
+        if (printLabel) printLabel.textContent = 'Print PO';
+
+        // 🔥 ADDED: this is a multi-GRN summary, not one specific receipt --
+        // Create Credit Note needs a single GRN (use "View" on a row, which
+        // routes through viewSingleGRNById -> viewSingleGRN instead).
+        state.currentViewGRNData = null;
+        const cnBtn = document.getElementById('viewPOCreditNoteBtn');
+        if (cnBtn) cnBtn.style.display = 'none';
+
+        showModal('viewPOModal');
+    }
+
+    async function viewSingleGRNById(grnId) {
+        try {
+            const { data: grn, error } = await supabaseClient
+                .from('goods_receipt_notes')
+                .select(`
+                    *,
+                    goods_receipt_lines (*),
+                    purchase_orders:purchase_order_id (
+                        po_number,
+                        suppliers:supplier_id (name),
+                        currency,
+                        exchange_rate
+                    )
+                `)
+                .eq('id', grnId)
+                .single();
+
+            if (error) throw error;
+            viewSingleGRN(grn);
+        } catch (error) {
+            console.error('Error loading GRN:', error);
+            showToast('Error loading GRN: ' + error.message, 'error');
+        }
+    }
+
+    // ============================================
+    // GRN HELPER FUNCTIONS
+    // ============================================
+
+    function receiveAllItems() {
+        let receivedCount = 0;
+        state.grnLines.forEach((line) => {
+            const maxQty = line.max_receivable || line.order_quantity || 0;
+            if (maxQty > 0 && !line.cancel_remaining) {
+                line.received_quantity = maxQty;
+                line.total_amount = (line.received_quantity || 0) * (line.purchase_rate || 0);
+                receivedCount++;
+            }
+        });
+        renderGRNLines();
+        updateGRNTotal();
+        showToast(`${receivedCount} items marked for receiving. Please enter batch and expiry for each item.`, 'success');
+    }
+
+    function clearReceivedItems() {
+        let clearedCount = 0;
+        state.grnLines.forEach(line => {
+            if (line.received_quantity > 0 && !line.cancel_remaining) {
+                line.received_quantity = 0;
+                line.total_amount = 0;
+                line.batch_number = '';
+                line.expiry_date = '';
+                clearedCount++;
+            }
+        });
+        renderGRNLines();
+        updateGRNTotal();
+        showToast(`${clearedCount} items cleared`, 'info');
+    }
+
+    // ============================================
+    // UPDATE GRN LINE
+    // ============================================
+
+    function updateGRNLine(index, field, value) {
+        const line = state.grnLines[index];
+        if (!line) return;
+        
+        if (field === 'received_quantity') {
+            // 🔥 FIX: GRN is allowed to receive MORE than the ordered qty --
+            // suppliers routinely over-ship, and the whole point of this
+            // screen is to record what actually arrived (and at what rate),
+            // not to enforce the PO as a ceiling. Previously this clamped
+            // any entry above order_quantity back down, silently discarding
+            // real received stock. Now it's a non-blocking heads-up only.
+            const maxQty = line.max_receivable || line.order_quantity || 0;
+            let qty = parseInt(value) || 0;
+            if (qty < 0) qty = 0;
+            if (maxQty > 0 && qty > maxQty) {
+                showToast(`Receiving ${qty} — more than the ${maxQty} ordered (over-delivery).`, 'info');
+            }
+            line.received_quantity = qty;
+            line.total_amount = (line.received_quantity || 0) * (line.purchase_rate || 0);
+        } else if (field === 'purchase_rate') {
+            line.purchase_rate = parseFloat(value) || 0;
+            line.total_amount = (line.received_quantity || 0) * line.purchase_rate;
+        } else if (field === 'batch_number') {
+            line.batch_number = value;
+            // 🔥 FIX (issue #2): if this batch number matches an existing
+            // batch for this product, reuse its expiry automatically --
+            // it's physically the same batch, so the expiry must match.
+            // If it doesn't match anything existing, nothing happens here
+            // and the typed value is simply treated as a new batch.
+            const existingMatch = (state.existingBatchesByProduct[line.product_id] || [])
+                .find(b => b.batch_number === value);
+            if (existingMatch && existingMatch.expiry_date) {
+                line.expiry_date = existingMatch.expiry_date;
+            }
+        } else if (field === 'expiry_date') {
+            line.expiry_date = value;
+        }
+        
+        renderGRNLines();
+        updateGRNTotal();
+    }
+
+    // 🔥 ADDED (issue #3): formats digits into YYYY-MM-DD as the user
+    // types, so entering a date is a plain, predictable typing experience
+    // instead of fighting a native date input's segment-jumping behavior
+    // (the most common cause of "can't type the year properly").
+    window.formatExpiryInput = function(el) {
+        const cursorWasAtEnd = el.selectionStart === el.value.length;
+        let digits = el.value.replace(/\D/g, '').slice(0, 8);
+        let formatted = digits;
+        if (digits.length > 4) formatted = digits.slice(0, 4) + '-' + digits.slice(4);
+        if (digits.length > 6) formatted = digits.slice(0, 4) + '-' + digits.slice(4, 6) + '-' + digits.slice(6);
+        el.value = formatted;
+        if (cursorWasAtEnd) {
+            el.setSelectionRange(formatted.length, formatted.length);
+        }
+    };
+
+    function toggleGRNLineReceive(index, checked) {
+        const line = state.grnLines[index];
+        if (!line) return;
+        
+        const maxQty = line.max_receivable || line.order_quantity || 0;
+        
+        if (checked && !line.cancel_remaining) {
+            line.received_quantity = maxQty;
+            line.total_amount = (line.received_quantity || 0) * (line.purchase_rate || 0);
+        } else {
+            line.received_quantity = 0;
+            line.total_amount = 0;
+            line.batch_number = '';
+            line.expiry_date = '';
+        }
+        
+        renderGRNLines();
+        updateGRNTotal();
+    }
+
+    function updateGRNTotal() {
+        const subtotal = state.grnLines.reduce((sum, line) => sum + (line.total_amount || 0), 0);
+        const freight = parseFloat(document.getElementById('grnFreight')?.value) || 0;
+        const insurance = parseFloat(document.getElementById('grnInsurance')?.value) || 0;
+        const total = subtotal + freight + insurance;
+        
+        const currency = state.currentGRNCurrency || 'USD';
+        const symbol = currency === 'ZMW' ? 'ZK' : '$';
+        
+        const subtotalEl = document.getElementById('grnSubtotal');
+        const freightEl = document.getElementById('grnFreightDisplay');
+        const insuranceEl = document.getElementById('grnInsuranceDisplay');
+        const grandTotalEl = document.getElementById('grnGrandTotal');
+        
+        if (subtotalEl) subtotalEl.textContent = `${symbol} ${formatNumber(subtotal)}`;
+        if (freightEl) freightEl.textContent = `${symbol} ${formatNumber(freight)}`;
+        if (insuranceEl) insuranceEl.textContent = `${symbol} ${formatNumber(insurance)}`;
+        if (grandTotalEl) grandTotalEl.textContent = `${symbol} ${formatNumber(total)}`;
+        
+        validateInvoice();
+    }
+
+    function validateInvoice() {
+        const invoiceTotal = parseFloat(document.getElementById('grnInvoiceTotal')?.value) || 0;
+        const grnTotal = parseFloat(document.getElementById('grnGrandTotal')?.textContent?.replace(/[^0-9.]/g, '')) || 0;
+        const variance = invoiceTotal - grnTotal;
+        const varianceDisplay = document.getElementById('grnVariance');
+        const displayDiv = document.getElementById('grnVarianceDisplay');
+        const symbol = state.currentGRNCurrency === 'ZMW' ? 'ZK' : '$';
+        
+        if (invoiceTotal > 0 && varianceDisplay && displayDiv) {
+            displayDiv.style.display = 'flex';
+            varianceDisplay.textContent = `${symbol} ${formatNumber(variance)}`;
+            if (Math.abs(variance) < 0.01) {
+                varianceDisplay.style.color = '#22c55e';
+                varianceDisplay.textContent = `✓ ${symbol} ${formatNumber(variance)}`;
+            } else {
+                varianceDisplay.style.color = '#ef4444';
+                varianceDisplay.textContent = `⚠ ${symbol} ${formatNumber(variance)}`;
+            }
+        } else if (displayDiv) {
+            displayDiv.style.display = 'none';
+        }
+    }
+
+        // ============================================
+    // 🔥 FIX: the five functions below (getSupplierId, createGRN,
+    // createGRNLines, updateInventory, updatePOLinesFromGRN) were being
+    // CALLED by postGRN() further down but were never DEFINED anywhere in
+    // this file. Posting any GRN would throw "ReferenceError: createGRN is
+    // not defined" and crash immediately -- a complete showstopper for the
+    // entire receiving workflow. Implemented here to match the exact
+    // schema already established elsewhere in this file (purchase_order_lines
+    // from insertPOLines, goods_receipt_notes/goods_receipt_lines from the
+    // existing view/render functions).
+    // ============================================
+
+    async function getSupplierId(orderId) {
+        const { data, error } = await supabaseClient
+            .from('purchase_orders')
+            .select('supplier_id')
+            .eq('id', orderId)
+            .single();
+        if (error) throw error;
+        return data.supplier_id;
+    }
+
+    async function generateGRNNumber(attempt = 0) {
+        const { count, error } = await supabaseClient
+            .from('goods_receipt_notes')
+            .select('id', { count: 'exact', head: true });
+        if (error) throw error;
+        const next = (count || 0) + 1 + attempt;
+        return `GRN-${new Date().getFullYear()}-${String(next).padStart(5, '0')}`;
+    }
+
+    // 🔥 FIX: GRN numbers were generated as COUNT(*)+1 and inserted
+    // outside any retry logic, same as the employee_code bug -- two GRNs
+    // created close together (or one double-click) could compute the
+    // same number and the second insert would fail with a raw
+    // "duplicate key value violates unique constraint
+    // goods_receipt_notes_grn_number_key" error. Now retries with the
+    // next number on that specific collision instead of surfacing the
+    // raw error (the old timestamp-based fallback only covered the count
+    // query itself failing, not this).
+    async function createGRN(orderId, supplierId, currency, exchangeRate, grnTotal, invoiceTotal, invoiceNumber, attempt = 0) {
+        const MAX_ATTEMPTS = 5;
+        const freight = parseFloat(document.getElementById('grnFreight')?.value) || 0;
+        const insurance = parseFloat(document.getElementById('grnInsurance')?.value) || 0;
+        const entryDate = document.getElementById('grnEntryDate')?.value || new Date().toISOString().split('T')[0];
+        const invoiceDate = document.getElementById('grnInvoiceDate')?.value || new Date().toISOString().split('T')[0];
+        const notes = document.getElementById('grnNotes')?.value || '';
+        const grnNumber = await generateGRNNumber(attempt);
+
+        const record = {
+            grn_number: grnNumber,
+            purchase_order_id: orderId,
+            supplier_id: supplierId,
+            entry_date: entryDate,
+            invoice_number: invoiceNumber,
+            invoice_date: invoiceDate,
+            currency: currency,
+            exchange_rate: exchangeRate,
+            total_amount: grnTotal,
+            invoice_total: invoiceTotal,
+            freight: freight,
+            insurance: insurance,
+            notes: notes,
+            created_at: new Date().toISOString()
+        };
+
+        const { data, error } = await supabaseClient
+            .from('goods_receipt_notes')
+            .insert([record])
+            .select();
+        if (error) {
+            const isNumberCollision = error.code === '23505'
+                && (error.message || '').includes('grn_number');
+            if (isNumberCollision && attempt < MAX_ATTEMPTS - 1) {
+                return createGRN(orderId, supplierId, currency, exchangeRate, grnTotal, invoiceTotal, invoiceNumber, attempt + 1);
+            }
+            throw error;
+        }
+        return { id: data[0].id, grn_number: grnNumber };
+    }
+
+    async function createGRNLines(grnId) {
+        // goods_receipt_lines columns confirmed from renderGRNTable() above:
+        // product_name, pack_size, ordered_quantity, received_quantity,
+        // batch_number, expiry_date, purchase_rate, total_amount.
+        const linesToInsert = state.grnLines
+            .filter(line => (line.received_quantity || 0) > 0)
+            .map(line => ({
+                grn_id: grnId,
+                purchase_order_line_id: line.id,
+                product_id: line.product_id,
+                product_name: line.product_name,
+                pack_size: line.pack_size || 1,
+                ordered_quantity: line.order_quantity || 0,
+                received_quantity: line.received_quantity || 0,
+                batch_number: line.batch_number,
+                expiry_date: line.expiry_date,
+                purchase_rate: line.purchase_rate || 0,
+                total_amount: line.total_amount || 0
+            }));
+
+        if (linesToInsert.length === 0) return;
+
+        const { error } = await supabaseClient
+            .from('goods_receipt_lines')
+            .insert(linesToInsert);
+        if (error) throw error;
+    }
+
+    async function updateInventory(grnId, currency, exchangeRate) {
+        // Inventory/COGS elsewhere in this system (retail.js, wholesale.js,
+        // donation.js) is ZMW-based -- batches.cost_price needs to be
+        // stored in ZMW, converting from USD at the PO's exchange rate.
+        // purchase_rate here is PER PACK (see the "(per pack)" label next
+        // to the rate input in the PO line UI); batches.cost_price
+        // elsewhere in the system is PER UNIT, so divide by pack size.
+        const receivedLines = state.grnLines.filter(line => (line.received_quantity || 0) > 0);
+
+        for (const line of receivedLines) {
+            const packSize = line.pack_size || 1;
+            const qtyToAdd = (line.received_quantity || 0) * packSize;
+            const ratePerPack = line.purchase_rate || 0;
+            const ratePerUnit = ratePerPack / packSize;
+            const costPriceZmw = currency === 'USD' ? ratePerUnit * (exchangeRate || 1) : ratePerUnit;
+
+            const { error } = await supabaseClient
+                .from('batches')
+                .insert([{
+                    product_id: line.product_id,
+                    batch_number: line.batch_number,
+                    expiry_date: line.expiry_date,
+                    total_qty: qtyToAdd,
+                    cost_price: costPriceZmw
+                }]);
+
+            if (error) {
+                console.error(`Error creating batch for ${line.product_name}:`, error);
+                throw error;
+            }
+        }
+    }
+
+    async function updatePOLinesFromGRN(orderId) {
+        // Re-query the persisted received_quantity for each line right
+        // before updating, rather than trusting local state -- the local
+        // state.grnLines objects reset received_quantity to 0 for this GRN
+        // SESSION only (see initializeGRN), so the persisted prior total
+        // isn't reliably available locally.
+        const receivedLines = state.grnLines.filter(line => (line.received_quantity || 0) > 0);
+
+        for (const line of receivedLines) {
+            const { data: currentLine, error: fetchError } = await supabaseClient
+                .from('purchase_order_lines')
+                .select('received_quantity')
+                .eq('id', line.id)
+                .single();
+
+            if (fetchError) {
+                console.error(`Error fetching current line for ${line.product_name}:`, fetchError);
+                continue;
+            }
+
+            const newReceivedQty = (currentLine.received_quantity || 0) + (line.received_quantity || 0);
+            const remainingQty = Math.max(0, (line.order_quantity || 0) - newReceivedQty - (line.cancelled_quantity || 0));
+
+            const { error: updateError } = await supabaseClient
+                .from('purchase_order_lines')
+                .update({
+                    received_quantity: newReceivedQty,
+                    remaining_quantity: remainingQty,
+                    fully_received: remainingQty <= 0
+                })
+                .eq('id', line.id);
+
+            if (updateError) {
+                console.error(`Error updating line for ${line.product_name}:`, updateError);
+                throw updateError;
+            }
+        }
+    }
+
+    // ============================================
+    // POST GRN
+    // ============================================
+
+    async function postGRN() {
+        // 🔥 FIX: no click-guard here at all before -- clicking "Post GRN"
+        // more than once (e.g. a slow connection making the first click
+        // look like nothing happened) fired this whole function again
+        // before the first run finished. Since createGRN() inserts the
+        // goods_receipt_notes header before doing anything else, two
+        // overlapping clicks could each insert their OWN header row for
+        // the same delivery; only one of those runs (whichever actually
+        // reaches createGRNLines()/the rest of the flow without erroring)
+        // ends up complete, leaving the other(s) as empty, orphaned GRN
+        // records with a total but no line items, no accounting entry,
+        // and no supplier payable -- exactly what GRN-2026-00022 and
+        // GRN-2026-00023 turned out to be (duplicates of GRN-2026-00024,
+        // since deleted). Those orphans also silently corrupted the Daily
+        // Report: with no payable to point to, its cash-vs-credit guess
+        // (see pages/report/daily-report/index.js's computeTodayPurchaseBreakdown/
+        // computeCashBreakdown) read them as CASH purchases that never
+        // actually happened. Disabling the button for the duration of
+        // this whole function -- including every validation check below,
+        // via the try/finally -- makes a second click while the first is
+        // still running a no-op instead of a second full run.
+        const postBtn = document.getElementById('postGrnBtn');
+        if (postBtn?.disabled) return;
+        if (postBtn) {
+            postBtn.disabled = true;
+            postBtn.dataset.originalHtml = postBtn.innerHTML;
+            postBtn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Posting...';
+        }
+
+        try {
+            await postGRNInner();
+        } finally {
+            if (postBtn) {
+                postBtn.disabled = false;
+                postBtn.innerHTML = postBtn.dataset.originalHtml || '<i class="fa-solid fa-check-circle"></i> Post GRN';
+            }
+        }
+    }
+
+    async function postGRNInner() {
+        const orderId = state.currentGRNOrderId;
+        if (!orderId) {
+            showToast('No order selected', 'error');
+            return;
+        }
+
+        const hasReceived = state.grnLines.some(line => (line.received_quantity || 0) > 0);
+
+        if (!hasReceived) {
+            showToast('Please receive at least one item', 'error');
+            return;
+        }
+
+        // Validate received items have batch and expiry
+        const invalidBatch = state.grnLines.filter(line => 
+            (line.received_quantity || 0) > 0 && (!line.batch_number || line.batch_number.trim() === '')
+        );
+        if (invalidBatch.length > 0) {
+            showToast(`Please enter batch number for: ${invalidBatch.map(l => l.product_name).join(', ')}`, 'error');
+            return;
+        }
+
+        const invalidExpiry = state.grnLines.filter(line => 
+            (line.received_quantity || 0) > 0 && (!line.expiry_date || line.expiry_date === '')
+        );
+        if (invalidExpiry.length > 0) {
+            showToast(`Please enter expiry date for: ${invalidExpiry.map(l => l.product_name).join(', ')}`, 'error');
+            return;
+        }
+
+        // 🔥 FIX: removed the old block that rejected posting whenever a
+        // line's received_quantity exceeded (order_quantity - cancelled).
+        // Over-receiving is a normal, legitimate GRN scenario (supplier
+        // ships more than ordered) -- the GRN's job is to record what was
+        // actually received and at what rate, not to cap it at the PO.
+
+        const totalReceived = state.grnLines.reduce((sum, l) => sum + (l.received_quantity || 0), 0);
+        const grnTotal = parseFloat(document.getElementById('grnGrandTotal')?.textContent?.replace(/[^0-9.]/g, '')) || 0;
+        const invoiceNumber = document.getElementById('grnInvoiceNumber')?.value || null;
+
+        if (!invoiceNumber && totalReceived > 0) {
+            showToast('Please enter invoice number', 'error');
+            return;
+        }
+
+        // 🔥 FIX (issue #5): Invoice Total is the actual amount on the
+        // supplier's invoice -- it's what should be owed/booked, not GRN
+        // Total (which is just what our own line items compute to, and
+        // can legitimately differ from the invoice due to rounding,
+        // freight/insurance the supplier billed differently, etc.).
+        // Previously the field was editable but not actually required,
+        // and the payable/accounting entries used grnTotal instead of it.
+        const invoiceTotal = parseFloat(document.getElementById('grnInvoiceTotal')?.value) || 0;
+        if (totalReceived > 0 && invoiceTotal <= 0) {
+            showToast("Please enter the Invoice Total (the actual amount on the supplier's invoice) before posting.", 'error');
+            return;
+        }
+
+        let confirmMessage = `Confirm receiving ${totalReceived} items with invoice ${invoiceNumber || 'N/A'}?`;
+
+        if (!confirm(confirmMessage)) {
+            return;
+        }
+
+        // 🔥 FIX: Cash vs Credit now actually matters. Previously a payable
+        // was created for EVERY GRN unconditionally (see the old comment
+        // "ALWAYS CREATE PAYABLE"), even for cash purchases where the
+        // supplier was already paid in full -- that would have shown a
+        // false debt for every cash purchase ever made.
+        const paymentType = document.getElementById('grnPaymentType')?.value || 'Cash';
+
+        try {
+            const currency = state.currentGRNCurrency || 'USD';
+            const exchangeRate = state.currentGRNExchangeRate || 1;
+            const supplierId = await getSupplierId(orderId);
+
+            let grnId = null;
+
+            if (totalReceived > 0) {
+                const grn = await createGRN(orderId, supplierId, currency, exchangeRate, grnTotal, invoiceTotal, invoiceNumber);
+                grnId = grn.id;
+                await createGRNLines(grnId);
+                await updateInventory(grnId, currency, exchangeRate);
+
+                // Only Credit purchases create a payable -- Cash purchases
+                // were already paid, so there's nothing owed to record.
+                // Uses invoiceTotal, not grnTotal -- see fix note above.
+                if (paymentType === 'Credit') {
+                    await createSupplierPayable(supplierId, grnId, orderId, currency, exchangeRate, invoiceTotal, invoiceNumber);
+                }
+
+                // Post the accounting entry either way: Debit Inventory,
+                // Credit Cash (Cash purchase) or Credit Accounts Payable
+                // (Credit purchase) -- also uses invoiceTotal, since that's
+                // the actual amount owed/paid, not our own computed total.
+                await createGRNAccountingEntries(grn.grn_number, invoiceTotal, currency, exchangeRate, paymentType);
+            }
+
+            // Update PO lines
+            await updatePOLinesFromGRN(orderId);
+            
+            // Update PO header
+            await updatePOHeader(orderId);
+
+            // Show summary
+            showPostGRNSummary(totalReceived, invoiceNumber, currency, invoiceTotal);
+
+            closeModal('grnModal');
+            await loadPurchaseOrders();
+
+        } catch (error) {
+            console.error('Error posting GRN:', error);
+            showToast('Error posting GRN: ' + error.message, 'error');
+        }
+    }
+
+    // ============================================
+    // CREATE SUPPLIER PAYABLE - ALWAYS CALLED
+    // ============================================
+
+    async function createSupplierPayable(supplierId, grnId, orderId, currency, exchangeRate, grnTotal, invoiceNumber) {
+        if (!supplierId || grnTotal <= 0) return;
+
+        const payableData = {
+            supplier_id: supplierId,
+            grn_id: grnId,
+            po_id: orderId,
+            invoice_number: invoiceNumber,
+            invoice_date: document.getElementById('grnInvoiceDate')?.value || new Date().toISOString().split('T')[0],
+            due_date: new Date(new Date().setDate(new Date().getDate() + 30)).toISOString().split('T')[0],
+            total_amount: grnTotal,
+            amount_paid: 0,
+            amount_remaining: grnTotal,
+            currency: currency,
+            exchange_rate: exchangeRate,
+            status: 'Pending',
+            payment_terms: 'Net 30',
+            notes: `GRN: ${grnId}`,
+            created_at: new Date().toISOString()
+        };
+
+        const { error: payableError } = await supabaseClient
+            .from('supplier_payables')
+            .insert([payableData]);
+
+        if (payableError) {
+            console.error('Error creating supplier payable:', payableError);
+            showToast('⚠️ GRN posted but payable creation failed. Please check manually.', 'warning');
+        } else {
+            showToast(`✅ Supplier payable created for invoice ${invoiceNumber}`, 'success');
+        }
+    }
+
+    // ============================================
+    // UPDATE PO HEADER - FIXED STATUS LOGIC
+    // ============================================
+
+    async function updatePOHeader(orderId) {
+        const { data: allLines, error: linesError } = await supabaseClient
+            .from('purchase_order_lines')
+            .select('order_quantity, received_quantity, cancelled_quantity, purchase_rate')
+            .eq('purchase_order_id', orderId);
+
+        if (linesError) throw linesError;
+
+        let totalReceivedQty = 0;
+        let totalReceivedAmount = 0;
+        let totalOrderQty = 0;
+        let totalOrderAmount = 0;
+        let totalCancelledQty = 0;
+        let totalCancelledAmount = 0;
+
+        allLines.forEach(l => {
+            const orderQty = l.order_quantity || 0;
+            const receivedQty = l.received_quantity || 0;
+            const cancelledQty = l.cancelled_quantity || 0;
+            const rate = l.purchase_rate || 0;
+            
+            totalOrderQty += orderQty;
+            totalReceivedQty += receivedQty;
+            totalCancelledQty += cancelledQty;
+            totalOrderAmount += orderQty * rate;
+            totalReceivedAmount += receivedQty * rate;
+            totalCancelledAmount += cancelledQty * rate;
+        });
+
+        const remainingQty = totalOrderQty - totalReceivedQty - totalCancelledQty;
+        const remainingAmount = totalOrderAmount - totalReceivedAmount - totalCancelledAmount;
+        const isFullyProcessed = remainingQty <= 0;
+        
+        // Determine status - show "Partially Received" if there are both received AND cancelled items
+        let status;
+        if (totalReceivedQty > 0 && totalCancelledQty > 0) {
+            // Both received and cancelled items exist
+            status = 'Partially Received';
+        } else if (!isFullyProcessed && totalReceivedQty > 0) {
+            status = 'Partially Received';
+        } else if (isFullyProcessed && totalReceivedQty > 0 && totalCancelledQty === 0) {
+            status = 'Goods Received';
+        } else if (isFullyProcessed && totalReceivedQty === 0 && totalCancelledQty > 0) {
+            status = 'Cancelled';
+        } else if (isFullyProcessed && totalReceivedQty > 0 && totalCancelledQty > 0) {
+            status = 'Partially Received';
+        } else {
+            // Keep existing status
+            const { data: existing } = await supabaseClient
+                .from('purchase_orders')
+                .select('status')
+                .eq('id', orderId)
+                .single();
+            status = existing?.status || 'Approved';
+        }
+
+        await supabaseClient
+            .from('purchase_orders')
+            .update({
+                total_received_quantity: totalReceivedQty,
+                total_received_amount: totalReceivedAmount,
+                total_cancelled_quantity: totalCancelledQty,
+                total_cancelled_amount: totalCancelledAmount,
+                remaining_quantity: Math.max(0, remainingQty),
+                remaining_amount: Math.max(0, remainingAmount),
+                fully_received: isFullyProcessed,
+                status: status,
+                updated_at: new Date().toISOString()
+            })
+            .eq('id', orderId);
+    }
+
+    // ============================================
+    // SHOW POST GRN SUMMARY - UPDATED
+    // ============================================
+
+    // 🔥 FIX (issue #6): this used to be a plain native alert() -- the
+    // unstyled browser-default popup with no CSS at all. Replaced with a
+    // proper modal matching the same .modal-content-box convention
+    // already used elsewhere in this file (e.g. ensureAddSupplierModal).
+    function showPostGRNSummary(totalReceived, invoiceNumber, currency, invoiceTotal) {
+        const totalRemaining = state.grnLines.reduce((sum, l) =>
+            sum + ((l.order_quantity || 0) - (l.received_quantity || 0) - (l.cancelled_quantity || 0)), 0);
+        const totalCancelled = state.grnLines.reduce((sum, l) => sum + (l.cancelled_quantity || 0), 0);
+
+        let statusLine = '';
+        if (totalRemaining <= 0 && totalCancelled > 0) {
+            statusLine = `<div style="color:#15803d;"><i class="fa-solid fa-circle-check"></i> PO is partially received with some items cancelled.</div>`;
+        } else if (totalRemaining <= 0 && totalCancelled === 0) {
+            statusLine = `<div style="color:#15803d;"><i class="fa-solid fa-circle-check"></i> PO is fully received.</div>`;
+        }
+        if (totalRemaining > 0) {
+            statusLine += `<div style="color:#b45309;margin-top:6px;"><i class="fa-solid fa-triangle-exclamation"></i> ${totalRemaining} item(s) still pending -- use "Cancel Remaining" or receive more later.</div>`;
+        }
+        if (totalCancelled > 0) {
+            statusLine += `<div style="color:#dc2626;margin-top:6px;"><i class="fa-solid fa-ban"></i> ${totalCancelled} item(s) cancelled from this PO.</div>`;
+        }
+
+        const existing = document.getElementById('grnSummaryModal');
+        if (existing) existing.remove();
+
+        const overlay = document.createElement('div');
+        overlay.id = 'grnSummaryModal';
+        overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(15,23,42,0.6);backdrop-filter:blur(4px);z-index:1200;display:flex;justify-content:center;align-items:center;';
+        overlay.innerHTML = `
+            <div class="modal-content-box" style="background:white;padding:30px;border-radius:12px;width:90%;max-width:440px;box-shadow:0 20px 50px rgba(0,0,0,0.5);text-align:center;">
+                <div style="margin-bottom:14px;"><i class="fa-solid fa-circle-check" style="font-size:3rem;color:#22c55e;"></i></div>
+                <h3 style="margin:0 0 16px 0;color:#0f172a;">GRN Processed Successfully</h3>
+                <div style="background:#f8fafc;border-radius:8px;padding:14px;text-align:left;font-size:0.9rem;color:#334155;margin-bottom:12px;">
+                    <div style="display:flex;justify-content:space-between;padding:4px 0;"><span>Received</span><strong>${totalReceived} item(s)</strong></div>
+                    <div style="display:flex;justify-content:space-between;padding:4px 0;"><span>Invoice #</span><strong>${invoiceNumber || 'N/A'}</strong></div>
+                    <div style="display:flex;justify-content:space-between;padding:4px 0;"><span>Invoice Amount</span><strong>${currency} ${formatNumber(invoiceTotal || 0)}</strong></div>
+                    <div style="display:flex;justify-content:space-between;padding:4px 0;"><span>Payable</span><strong>Created for this invoice</strong></div>
+                </div>
+                <div style="text-align:left;font-size:0.85rem;">${statusLine}</div>
+                <button id="grnSummaryCloseBtn" style="margin-top:20px;background:#2563eb;color:white;border:none;padding:10px 28px;border-radius:6px;cursor:pointer;">
+                    <i class="fa-solid fa-check"></i> Done
+                </button>
+            </div>
+        `;
+        document.body.appendChild(overlay);
+        overlay.querySelector('.modal-content-box').addEventListener('click', e => e.stopPropagation());
+        document.getElementById('grnSummaryCloseBtn').addEventListener('click', () => overlay.remove());
+        overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
+    }
+
+    // ============================================
+    // 🔥 ADDED: CREDIT NOTES -- "give something back and adjust the
+    // invoice again". A credit note always ties back to one specific GRN
+    // (physical returns only -- see openCreditNoteModal): it reduces the
+    // matching batch(es)' stock, and adjusts the money side either by
+    // reducing that GRN's supplier_payables row (if it was received on
+    // Credit) or by crediting suppliers.credit_balance (if it was Cash --
+    // there's no payable to reduce, so the amount is tracked as a balance
+    // the supplier owes back to us, drawable against future purchases).
+    // Deliberately does NOT touch purchase_order_lines/purchase_orders --
+    // those represent receipt history and feed updatePOHeader()'s status
+    // machine; a credit note is a separate, cross-referenced adjustment.
+    // ============================================
+
+    function closeCreditNoteModal() {
+        closeModal('creditNoteModal');
+    }
+
+    async function openCreditNoteModal() {
+        const grn = state.currentViewGRNData;
+        if (!grn) {
+            showToast('No GRN in view to create a credit note for', 'error');
+            return;
+        }
+
+        const lines = grn.goods_receipt_lines || [];
+        if (lines.length === 0) {
+            showToast('This GRN has no received lines to return', 'error');
+            return;
+        }
+
+        closeModal('viewPOModal');
+
+        document.getElementById('cnGRNNumber').textContent = grn.grn_number;
+        document.getElementById('cnPONumber').textContent = grn.purchase_orders?.po_number || 'N/A';
+        document.getElementById('cnSupplierName').textContent = grn.purchase_orders?.suppliers?.name || 'Unknown';
+        document.getElementById('cnInvoiceNumber').textContent = grn.invoice_number || 'N/A';
+        document.getElementById('cnCurrency').textContent = grn.currency || 'USD';
+        document.getElementById('cnPaymentType').textContent = 'Checking...';
+        const reasonField = document.getElementById('cnReason');
+        if (reasonField) reasonField.value = '';
+
+        const linesBody = document.getElementById('cnLinesBody');
+        if (linesBody) linesBody.innerHTML = `<tr><td colspan="10" class="text-center text-muted" style="padding: 30px;"><i class="fa-solid fa-spinner fa-spin"></i> Loading returnable items...</td></tr>`;
+
+        const printBtn = document.getElementById('printCreditNoteBtn');
+        if (printBtn) printBtn.style.display = 'none';
+        state.lastSavedCreditNoteId = null;
+
+        showModal('creditNoteModal');
+
+        try {
+            // A supplier_payables row only ever exists for a Credit GRN
+            // (createSupplierPayable() is only called when paymentType ===
+            // 'Credit') -- so its presence/absence IS the cash-vs-credit
+            // signal, with no separate payment_type column needed.
+            const { data: payable, error: payableError } = await supabaseClient
+                .from('supplier_payables')
+                .select('*')
+                .eq('grn_id', grn.id)
+                .maybeSingle();
+            if (payableError) console.error('Error checking supplier payable:', payableError);
+            state.creditNoteSupplierPayable = payable || null;
+            document.getElementById('cnPaymentType').textContent = payable
+                ? 'Credit (reduces outstanding payable first)'
+                : 'Cash (tracked as supplier credit balance)';
+
+            // Resolve the batch(es) each line was actually received into.
+            // goods_receipt_lines has no batch_id FK, so match on
+            // product_id + batch_number + expiry_date, same identity
+            // updateInventory() used to create the batch in the first place.
+            const productIds = [...new Set(lines.map(l => l.product_id).filter(Boolean))];
+            const { data: batchRows, error: batchError } = await supabaseClient
+                .from('batches')
+                .select('id, product_id, batch_number, expiry_date, total_qty')
+                .in('product_id', productIds.length ? productIds : ['00000000-0000-0000-0000-000000000000']);
+            if (batchError) throw batchError;
+
+            // Prior credit notes against these exact GRN lines, so a second
+            // return on the same GRN can't double-return the same stock.
+            const lineIds = lines.map(l => l.id);
+            const { data: priorReturns, error: priorError } = await supabaseClient
+                .from('purchase_credit_note_lines')
+                .select('goods_receipt_line_id, quantity_returned')
+                .in('goods_receipt_line_id', lineIds.length ? lineIds : ['00000000-0000-0000-0000-000000000000']);
+            if (priorError) throw priorError;
+
+            const priorReturnedByLine = {};
+            (priorReturns || []).forEach(r => {
+                priorReturnedByLine[r.goods_receipt_line_id] = (priorReturnedByLine[r.goods_receipt_line_id] || 0) + (r.quantity_returned || 0);
+            });
+
+            state.creditNoteLines = lines.map(line => {
+                const matches = (batchRows || []).filter(b =>
+                    b.product_id === line.product_id &&
+                    (b.batch_number || '') === (line.batch_number || '') &&
+                    (b.expiry_date || '') === (line.expiry_date || '')
+                );
+                const availableUnits = matches.reduce((sum, b) => sum + (b.total_qty || 0), 0);
+                const packSize = line.pack_size || 1;
+                const receivedQty = line.received_quantity || 0;
+                const alreadyReturnedQty = priorReturnedByLine[line.id] || 0;
+                // Capped by BOTH what's left of what we originally received
+                // (some may already have been returned via an earlier
+                // credit note) AND what's still physically in stock (some
+                // may already have been sold) -- whichever is smaller.
+                const maxReturnable = matches.length === 0
+                    ? 0
+                    : Math.max(0, Math.min(receivedQty - alreadyReturnedQty, Math.floor(availableUnits / packSize)));
+
+                return {
+                    goods_receipt_line_id: line.id,
+                    product_id: line.product_id,
+                    product_name: line.product_name,
+                    batch_number: line.batch_number,
+                    expiry_date: line.expiry_date,
+                    pack_size: packSize,
+                    purchase_rate: line.purchase_rate || 0,
+                    receivedQty,
+                    alreadyReturnedQty,
+                    batchMatches: matches.map(b => ({ id: b.id, total_qty: b.total_qty || 0 })),
+                    noBatchFound: matches.length === 0,
+                    maxReturnable,
+                    returnQty: 0
+                };
+            });
+
+            renderCreditNoteLines();
+        } catch (error) {
+            console.error('Error preparing credit note:', error);
+            showToast('Error loading GRN items for return: ' + error.message, 'error');
+            if (linesBody) linesBody.innerHTML = `<tr><td colspan="10" class="text-center text-muted" style="padding: 30px; color: #dc2626;">Failed to load items -- close and try again.</td></tr>`;
+        }
+    }
+
+    function renderCreditNoteLines() {
+        const grn = state.currentViewGRNData;
+        const symbol = grn?.currency === 'ZMW' ? 'ZK' : '$';
+        const linesBody = document.getElementById('cnLinesBody');
+        const countLabel = document.getElementById('cnLineCount');
+        if (!linesBody) return;
+
+        if (state.creditNoteLines.length === 0) {
+            linesBody.innerHTML = `<tr><td colspan="10" class="text-center text-muted" style="padding: 30px;">No items on this GRN</td></tr>`;
+            if (countLabel) countLabel.textContent = '0 lines available';
+            return;
+        }
+
+        linesBody.innerHTML = state.creditNoteLines.map((line, idx) => `
+            <tr>
+                <td>${idx + 1}</td>
+                <td>${line.product_name}${line.noBatchFound ? '<div style="color: #dc2626; font-size: 0.75rem;"><i class="fa-solid fa-triangle-exclamation"></i> Batch not found in stock -- cannot return</div>' : ''}</td>
+                <td>${line.batch_number || 'N/A'}</td>
+                <td>${formatDate(line.expiry_date)}</td>
+                <td>${line.receivedQty}</td>
+                <td>${line.alreadyReturnedQty}</td>
+                <td>${line.maxReturnable}</td>
+                <td>${symbol} ${formatNumber(line.purchase_rate)}</td>
+                <td>
+                    <input type="number" class="form-control cn-return-qty" data-idx="${idx}" min="0" max="${line.maxReturnable}" step="1"
+                        value="${line.returnQty}" ${line.maxReturnable <= 0 ? 'disabled' : ''}
+                        style="width: 75px; padding: 4px 6px;">
+                </td>
+                <td class="cn-line-total" style="text-align: right;">${symbol} ${formatNumber(line.returnQty * line.purchase_rate)}</td>
+            </tr>
+        `).join('');
+
+        if (countLabel) countLabel.textContent = `${state.creditNoteLines.length} line(s) available`;
+        recalcCreditNoteTotals();
+    }
+
+    function recalcCreditNoteTotals() {
+        const grn = state.currentViewGRNData;
+        const currency = grn?.currency || 'USD';
+        const exchangeRate = grn?.exchange_rate || 1;
+        const symbol = currency === 'ZMW' ? 'ZK' : '$';
+
+        const totalAmount = state.creditNoteLines.reduce((sum, l) => sum + (l.returnQty * l.purchase_rate), 0);
+
+        const payable = state.creditNoteSupplierPayable;
+        const payableRemaining = payable ? (payable.amount_remaining || 0) : 0;
+        const payableApplied = payable ? Math.min(totalAmount, payableRemaining) : 0;
+        const creditBalanceApplied = totalAmount - payableApplied;
+
+        const totalEl = document.getElementById('cnTotalAmount');
+        const payableEl = document.getElementById('cnPayableApplied');
+        const creditEl = document.getElementById('cnCreditBalanceApplied');
+        if (totalEl) totalEl.textContent = `${symbol} ${formatNumber(totalAmount)}`;
+        if (payableEl) payableEl.textContent = `${symbol} ${formatNumber(payableApplied)}`;
+        if (creditEl) creditEl.textContent = `${symbol} ${formatNumber(creditBalanceApplied)}`;
+
+        return { totalAmount, payableApplied, creditBalanceApplied, currency, exchangeRate };
+    }
+
+    async function generateCreditNoteNumber(attempt = 0) {
+        const { count, error } = await supabaseClient
+            .from('purchase_credit_notes')
+            .select('id', { count: 'exact', head: true });
+        if (error) throw error;
+        const next = (count || 0) + 1 + attempt;
+        return `CN-${new Date().getFullYear()}-${String(next).padStart(5, '0')}`;
+    }
+
+    async function saveCreditNote() {
+        const grn = state.currentViewGRNData;
+        if (!grn) {
+            showToast('No GRN in view', 'error');
+            return;
+        }
+
+        const reason = document.getElementById('cnReason')?.value?.trim() || '';
+        if (!reason) {
+            showToast('Please enter a reason for the return', 'error');
+            return;
+        }
+
+        const returnedLines = state.creditNoteLines.filter(l => (l.returnQty || 0) > 0);
+        if (returnedLines.length === 0) {
+            showToast('Please enter a return quantity for at least one item', 'error');
+            return;
+        }
+
+        for (const line of returnedLines) {
+            if (line.returnQty > line.maxReturnable) {
+                showToast(`${line.product_name}: return quantity exceeds what can be returned`, 'error');
+                return;
+            }
+        }
+
+        const saveBtn = document.getElementById('saveCreditNoteBtn');
+        if (saveBtn?.disabled) return;
+        if (saveBtn) {
+            saveBtn.disabled = true;
+            saveBtn.dataset.originalHtml = saveBtn.innerHTML;
+            saveBtn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Saving...';
+        }
+
+        try {
+            const currency = grn.currency || 'USD';
+            const exchangeRate = grn.exchange_rate || 1;
+            const supplierId = grn.supplier_id;
+            const symbol = currency === 'ZMW' ? 'ZK' : '$';
+
+            // Re-fetch the payable fresh right before writing -- the copy
+            // in state.creditNoteSupplierPayable could be a little stale if
+            // the modal was left open a while (e.g. someone else recorded a
+            // payment against it meanwhile).
+            let payable = null;
+            if (state.creditNoteSupplierPayable) {
+                const { data, error } = await supabaseClient
+                    .from('supplier_payables')
+                    .select('*')
+                    .eq('id', state.creditNoteSupplierPayable.id)
+                    .maybeSingle();
+                if (error) throw error;
+                payable = data || null;
+            }
+
+            const totalAmount = returnedLines.reduce((sum, l) => sum + (l.returnQty * l.purchase_rate), 0);
+            const zmwAmount = currency === 'USD' ? totalAmount * exchangeRate : totalAmount;
+            const payableRemaining = payable ? (payable.amount_remaining || 0) : 0;
+            const payableApplied = payable ? Math.min(totalAmount, payableRemaining) : 0;
+            const creditBalanceApplied = totalAmount - payableApplied;
+            const creditBalanceAppliedZmw = currency === 'USD' ? creditBalanceApplied * exchangeRate : creditBalanceApplied;
+            const payableAppliedZmw = currency === 'USD' ? payableApplied * exchangeRate : payableApplied;
+
+            const creditNoteNumber = await generateCreditNoteNumber();
+
+            const header = {
+                credit_note_number: creditNoteNumber,
+                po_id: grn.purchase_order_id,
+                grn_id: grn.id,
+                supplier_id: supplierId,
+                reason: reason,
+                currency: currency,
+                exchange_rate: exchangeRate,
+                total_amount: totalAmount,
+                zmw_amount: zmwAmount,
+                payable_applied: payableApplied,
+                credit_balance_applied: creditBalanceApplied,
+                status: 'Posted',
+                created_at: new Date().toISOString()
+            };
+
+            const { data: cnData, error: cnError } = await withAuthRetry(() => supabaseClient
+                .from('purchase_credit_notes')
+                .insert([header])
+                .select());
+            if (cnError) throw cnError;
+            const creditNoteId = cnData[0].id;
+
+            const lineRows = returnedLines.map(l => ({
+                credit_note_id: creditNoteId,
+                goods_receipt_line_id: l.goods_receipt_line_id,
+                product_id: l.product_id,
+                product_name: l.product_name,
+                batch_id: l.batchMatches[0]?.id || null,
+                batch_number: l.batch_number,
+                pack_size: l.pack_size,
+                quantity_returned: l.returnQty,
+                purchase_rate: l.purchase_rate,
+                total_amount: l.returnQty * l.purchase_rate,
+                created_at: new Date().toISOString()
+            }));
+
+            const { error: linesError } = await withAuthRetry(() => supabaseClient
+                .from('purchase_credit_note_lines')
+                .insert(lineRows));
+            if (linesError) throw linesError;
+
+            // Reduce stock: walk each line's matching batch row(s), taking
+            // units out of whichever has stock first, never below zero.
+            for (const line of returnedLines) {
+                let unitsToRemove = line.returnQty * line.pack_size;
+                for (const batch of line.batchMatches) {
+                    if (unitsToRemove <= 0) break;
+                    const take = Math.min(batch.total_qty, unitsToRemove);
+                    if (take <= 0) continue;
+                    const newQty = Math.max(0, batch.total_qty - take);
+                    const { error: batchUpdateError } = await withAuthRetry(() => supabaseClient
+                        .from('batches')
+                        .update({ total_qty: newQty })
+                        .eq('id', batch.id));
+                    if (batchUpdateError) {
+                        console.error(`Error reducing stock for batch ${batch.id}:`, batchUpdateError);
+                    } else {
+                        batch.total_qty = newQty;
+                        unitsToRemove -= take;
+                    }
+                }
+            }
+
+            // Adjust the payable (if one exists) for the portion applied to it.
+            if (payable && payableApplied > 0) {
+                // amount_paid is left untouched -- this reduces what's
+                // owed, it isn't a cash payment against it.
+                const newRemaining = Math.max(0, (payable.amount_remaining || 0) - payableApplied);
+                const newTotal = Math.max(0, (payable.total_amount || 0) - payableApplied);
+                const { error: payableUpdateError } = await withAuthRetry(() => supabaseClient
+                    .from('supplier_payables')
+                    .update({
+                        total_amount: newTotal,
+                        amount_remaining: newRemaining,
+                        status: newRemaining <= 0 ? 'Paid' : (payable.status === 'Pending' ? 'Pending' : payable.status),
+                        notes: `${payable.notes || ''} | Credit note ${creditNoteNumber}: -${currency} ${formatNumber(payableApplied)}`.trim()
+                    })
+                    .eq('id', payable.id));
+                if (payableUpdateError) console.error('Error adjusting supplier payable:', payableUpdateError);
+            }
+
+            // Credit the supplier's balance for the portion not covered by
+            // the payable (the whole amount, for a Cash GRN).
+            if (creditBalanceApplied > 0) {
+                const { data: supplierRow, error: supplierFetchError } = await supabaseClient
+                    .from('suppliers')
+                    .select('credit_balance')
+                    .eq('id', supplierId)
+                    .maybeSingle();
+                if (supplierFetchError) console.error('Error fetching supplier credit balance:', supplierFetchError);
+                const newBalance = (supplierRow?.credit_balance || 0) + creditBalanceAppliedZmw;
+                const { error: supplierUpdateError } = await withAuthRetry(() => supabaseClient
+                    .from('suppliers')
+                    .update({ credit_balance: newBalance })
+                    .eq('id', supplierId));
+                if (supplierUpdateError) console.error('Error updating supplier credit balance:', supplierUpdateError);
+            }
+
+            // Reversing GL entry: Credit Inventory for the full ZMW amount;
+            // Debit Accounts Payable for the portion that reduced the
+            // payable, Debit Advances to Suppliers for the portion tracked
+            // as a credit balance -- mirrors createGRNAccountingEntries()
+            // in reverse.
+            await createCreditNoteAccountingEntries(creditNoteNumber, zmwAmount, payableAppliedZmw, creditBalanceAppliedZmw);
+
+            state.lastSavedCreditNoteId = creditNoteId;
+            closeModal('creditNoteModal');
+            showCreditNoteSavedSummary(creditNoteNumber, creditNoteId, symbol, totalAmount, payableApplied, creditBalanceApplied);
+        } catch (error) {
+            console.error('Error saving credit note:', error);
+            showToast('Error saving credit note: ' + error.message, 'error');
+        } finally {
+            if (saveBtn) {
+                saveBtn.disabled = false;
+                saveBtn.innerHTML = saveBtn.dataset.originalHtml || '<i class="fa-solid fa-check-circle"></i> Save Credit Note';
+            }
+        }
+    }
+
+    async function createCreditNoteAccountingEntries(creditNoteNumber, zmwAmount, payableAppliedZmw, creditBalanceAppliedZmw) {
+        try {
+            await ensureChartOfAccounts();
+            const accountCodes = await getAccountCodesFromChartOfAccounts();
+
+            const journal = {
+                entry_date: new Date().toISOString().split('T')[0],
+                reference: creditNoteNumber,
+                description: `Goods returned to supplier - ${creditNoteNumber}`,
+                journal_number: `CN-${new Date().getFullYear()}-${String(Math.floor(Math.random() * 10000)).padStart(4, '0')}`,
+                status: 'Posted',
+                created_at: new Date().toISOString()
+            };
+
+            const { data: journalData, error: jError } = await withAuthRetry(() => supabaseClient
+                .from('journal_entries')
+                .insert([journal])
+                .select());
+            if (jError) throw jError;
+
+            const lines = [
+                { journal_entry_id: journalData[0].id, account_code: accountCodes.inventory, description: `Inventory returned - ${creditNoteNumber}`, debit: 0, credit: zmwAmount }
+            ];
+            if (payableAppliedZmw > 0) {
+                lines.push({ journal_entry_id: journalData[0].id, account_code: accountCodes.accounts_payable, description: `Payable reduced by return - ${creditNoteNumber}`, debit: payableAppliedZmw, credit: 0 });
+            }
+            if (creditBalanceAppliedZmw > 0) {
+                lines.push({ journal_entry_id: journalData[0].id, account_code: accountCodes.advances_to_suppliers, description: `Supplier credit balance from return - ${creditNoteNumber}`, debit: creditBalanceAppliedZmw, credit: 0 });
+            }
+
+            const { error: jlError } = await withAuthRetry(() => supabaseClient.from('journal_lines').insert(lines));
+            if (jlError) throw jlError;
+
+            console.log(`✅ Credit note accounting entries created for ${creditNoteNumber} (ZK${zmwAmount.toFixed(2)})`);
+        } catch (error) {
+            console.error('Error creating credit note accounting entries:', error);
+            showToast('Credit note saved, but the accounting entry failed -- please check manually.', 'warning');
+        }
+    }
+
+    function printSavedCreditNote() {
+        const printBtn = document.getElementById('printCreditNoteBtn');
+        const creditNoteId = printBtn?.dataset.creditNoteId || state.lastSavedCreditNoteId;
+        if (!creditNoteId) {
+            showToast('No saved credit note to print', 'error');
+            return;
+        }
+        printCreditNoteById(creditNoteId);
+    }
+
+    function printCreditNoteById(creditNoteId) {
+        if (!creditNoteId) {
+            showToast('No saved credit note to print', 'error');
+            return;
+        }
+
+        supabaseClient
+            .from('purchase_credit_notes')
+            .select(`
+                *,
+                purchase_credit_note_lines (*),
+                suppliers:supplier_id (name),
+                purchase_orders:po_id (po_number)
+            `)
+            .eq('id', creditNoteId)
+            .single()
+            .then(({ data, error }) => {
+                if (error || !data) {
+                    showToast('Credit note data not found', 'error');
+                    return;
+                }
+                generateCreditNotePrint(data);
+            });
+    }
+
+    // 🔥 ADDED: success confirmation shown after a credit note saves,
+    // mirroring showPostGRNSummary()'s convention -- with its own Print
+    // button (this GRN's credit-note modal is already closed by the time
+    // this shows, so it doesn't depend on that modal's own print button).
+    function showCreditNoteSavedSummary(creditNoteNumber, creditNoteId, symbol, totalAmount, payableApplied, creditBalanceApplied) {
+        const existing = document.getElementById('cnSummaryModal');
+        if (existing) existing.remove();
+
+        const overlay = document.createElement('div');
+        overlay.id = 'cnSummaryModal';
+        overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(15,23,42,0.6);backdrop-filter:blur(4px);z-index:1200;display:flex;justify-content:center;align-items:center;';
+        overlay.innerHTML = `
+            <div class="modal-content-box" style="background:white;padding:30px;border-radius:12px;width:90%;max-width:440px;box-shadow:0 20px 50px rgba(0,0,0,0.5);text-align:center;">
+                <div style="margin-bottom:14px;"><i class="fa-solid fa-circle-check" style="font-size:3rem;color:#22c55e;"></i></div>
+                <h3 style="margin:0 0 16px 0;color:#0f172a;">Credit Note Saved</h3>
+                <div style="background:#f8fafc;border-radius:8px;padding:14px;text-align:left;font-size:0.9rem;color:#334155;margin-bottom:12px;">
+                    <div style="display:flex;justify-content:space-between;padding:4px 0;"><span>Credit Note #</span><strong>${creditNoteNumber}</strong></div>
+                    <div style="display:flex;justify-content:space-between;padding:4px 0;"><span>Total Credit</span><strong>${symbol} ${formatNumber(totalAmount)}</strong></div>
+                    ${payableApplied > 0 ? `<div style="display:flex;justify-content:space-between;padding:4px 0;"><span>Applied to Payable</span><strong style="color:#2563eb;">${symbol} ${formatNumber(payableApplied)}</strong></div>` : ''}
+                    ${creditBalanceApplied > 0 ? `<div style="display:flex;justify-content:space-between;padding:4px 0;"><span>Supplier Credit Balance</span><strong style="color:#15803d;">${symbol} ${formatNumber(creditBalanceApplied)}</strong></div>` : ''}
+                </div>
+                <div style="display:flex; gap:10px; justify-content:center; margin-top:20px;">
+                    <button id="cnSummaryPrintBtn" style="background:#2563eb;color:white;border:none;padding:10px 20px;border-radius:6px;cursor:pointer;">
+                        <i class="fa-solid fa-print"></i> Print
+                    </button>
+                    <button id="cnSummaryCloseBtn" style="background:#e2e8f0;color:#0f172a;border:none;padding:10px 20px;border-radius:6px;cursor:pointer;">
+                        <i class="fa-solid fa-check"></i> Done
+                    </button>
+                </div>
+            </div>
+        `;
+        document.body.appendChild(overlay);
+        overlay.querySelector('.modal-content-box').addEventListener('click', e => e.stopPropagation());
+        document.getElementById('cnSummaryPrintBtn').addEventListener('click', () => printCreditNoteById(creditNoteId));
+        document.getElementById('cnSummaryCloseBtn').addEventListener('click', () => overlay.remove());
+        overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
+    }
+
+    function generateCreditNotePrint(creditNote) {
+        const printWindow = window.open('', '_blank', 'width=800,height=600');
+        if (!printWindow) {
+            showToast('Please allow popups to print', 'error');
+            return;
+        }
+
+        const symbol = creditNote.currency === 'ZMW' ? 'ZK' : '$';
+        const lines = creditNote.purchase_credit_note_lines || [];
+
+        printWindow.document.write(`
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <title>Credit Note - ${creditNote.credit_note_number}</title>
+                <style>
+                    ${getPrintStyles()}
+                </style>
+            </head>
+            <body>
+                ${getPrintHeader()}
+                <h2 style="text-align: center;">CREDIT NOTE (GOODS RETURNED TO SUPPLIER)</h2>
+                ${getCreditNoteInfoTable(creditNote)}
+                ${getCreditNoteLinesTable(lines, creditNote, symbol)}
+                ${getPrintFooter()}
+                ${getPrintButton()}
+            </body>
+            </html>
+        `);
+        printWindow.document.close();
+        setTimeout(() => printWindow.focus(), 500);
+    }
+
+    function getCreditNoteInfoTable(cn) {
+        return `
+            <div class="info">
+                <table>
+                    <tr><td class="label">Credit Note #:</td><td><strong>${cn.credit_note_number}</strong></td></tr>
+                    <tr><td class="label">PO Reference:</td><td>${cn.purchase_orders?.po_number || 'N/A'}</td></tr>
+                    <tr><td class="label">Supplier:</td><td>${cn.suppliers?.name || 'Unknown'}</td></tr>
+                    <tr><td class="label">Date:</td><td>${formatDate(cn.created_at)}</td></tr>
+                    <tr><td class="label">Currency:</td><td>${cn.currency || 'USD'}</td></tr>
+                    <tr><td class="label">Reason:</td><td>${cn.reason || 'N/A'}</td></tr>
+                </table>
+            </div>
+        `;
+    }
+
+    function getCreditNoteLinesTable(lines, cn, symbol) {
+        return `
+            <h3>Returned Items</h3>
+            <table>
+                <thead>
+                    <tr>
+                        <th>#</th>
+                        <th>Product</th>
+                        <th>Batch</th>
+                        <th class="text-right">Qty Returned</th>
+                        <th class="text-right">Rate</th>
+                        <th class="text-right">Total</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    ${lines.length === 0 ? `
+                        <tr><td colspan="6" style="text-align: center; padding: 20px; color: #94a3b8;">No items</td></tr>
+                    ` : lines.map((line, idx) => `
+                        <tr>
+                            <td>${idx + 1}</td>
+                            <td>${line.product_name}</td>
+                            <td>${line.batch_number || 'N/A'}</td>
+                            <td class="text-right">${line.quantity_returned}</td>
+                            <td class="text-right">${symbol} ${formatNumber(line.purchase_rate)}</td>
+                            <td class="text-right">${symbol} ${formatNumber(line.total_amount)}</td>
+                        </tr>
+                    `).join('')}
+                </tbody>
+                <tfoot>
+                    <tr class="total-row">
+                        <td colspan="5" class="text-right">Total Credit Amount:</td>
+                        <td class="text-right">${symbol} ${formatNumber(cn.total_amount || 0)}</td>
+                    </tr>
+                    ${cn.payable_applied > 0 ? `
+                    <tr>
+                        <td colspan="5" class="text-right">Applied to Outstanding Payable:</td>
+                        <td class="text-right" style="color: #2563eb;">${symbol} ${formatNumber(cn.payable_applied)}</td>
+                    </tr>
+                    ` : ''}
+                    ${cn.credit_balance_applied > 0 ? `
+                    <tr>
+                        <td colspan="5" class="text-right">Added to Supplier Credit Balance:</td>
+                        <td class="text-right" style="color: #15803d;">${symbol} ${formatNumber(cn.credit_balance_applied)}</td>
+                    </tr>
+                    ` : ''}
+                </tfoot>
+            </table>
+        `;
+    }
+
+    // ============================================
+    // DETERMINE PO STATUS - HELPER (optional)
+    // ============================================
+
+    function determinePOStatus(totalReceivedQty, totalCancelledQty, totalOrderQty) {
+        const remainingQty = totalOrderQty - totalReceivedQty - totalCancelledQty;
+        
+        // If both received and cancelled exist -> Partially Received
+        if (totalReceivedQty > 0 && totalCancelledQty > 0) {
+            return 'Partially Received';
+        }
+        
+        // If fully processed
+        if (remainingQty <= 0) {
+            if (totalReceivedQty > 0 && totalCancelledQty === 0) {
+                return 'Goods Received';
+            } else if (totalReceivedQty === 0 && totalCancelledQty > 0) {
+                return 'Cancelled';
+            } else if (totalReceivedQty > 0 && totalCancelledQty > 0) {
+                return 'Partially Received';
+            }
+        }
+        
+        // Partially received
+        if (totalReceivedQty > 0 && remainingQty > 0) {
+            return 'Partially Received';
+        }
+        
+        return 'Approved';
+    }
+
+    // ============================================
+    // STATS AND OVERDUE FUNCTIONS
+    // ============================================
+
+    function updateStats(orders) {
+        const total = orders.length;
+        const pending = orders.filter(o => o.status === 'Pending Approval').length;
+        const received = orders.filter(o => o.status === 'Goods Received' || o.status === 'Closed').length;
+        const partial = orders.filter(o => o.status === 'Partially Received').length;
+        const cancelled = orders.filter(o => o.status === 'Cancelled').length;
+
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+        const overdue = orders.filter(o => {
+            // Overdue is a flag - exclude completed/cancelled
+            if (['Cancelled', 'Closed', 'Goods Received'].includes(o.status)) return false;
+            if (o.fully_received === true) return false;
+            if (!o.expected_delivery_date) return false;
+            const expectedDate = new Date(o.expected_delivery_date);
+            expectedDate.setHours(0, 0, 0, 0);
+            // Only overdue if remaining > 0
+            const remaining = (o.total_quantity || 0) - (o.total_received_quantity || 0) - (o.total_cancelled_quantity || 0);
+            if (remaining <= 0) return false;
+            return expectedDate < today;
+        });
+
+        document.getElementById('totalOrders').textContent = total;
+        document.getElementById('pendingOrders').textContent = pending;
+        document.getElementById('receivedOrders').textContent = received;
+        document.getElementById('partialOrders').textContent = partial;
+        document.getElementById('cancelledOrders').textContent = cancelled;
+        document.getElementById('overdueOrders').textContent = overdue.length;
+
+        const overdueEl = document.getElementById('overdueOrders');
+        if (overdue.length > 0) {
+            overdueEl.style.color = '#dc2626';
+        } else {
+            overdueEl.style.color = '#0f172a';
+        }
+    }
+
+    function checkOverduePOs(orders) {
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+
+        const overdueList = [];
+        const overdueAlert = document.getElementById('overdueAlert');
+        const overdueListEl = document.getElementById('overdueList');
+
+        orders.forEach(order => {
+            // EXCLUDE ALL COMPLETED/CANCELLED STATUSES
+            const completedStatuses = ['Cancelled', 'Closed', 'Goods Received', 'Received', 'Completed', 'Fully Received'];
+            if (completedStatuses.includes(order.status)) {
+                return;
+            }
+
+            if (order.fully_received === true) {
+                return;
+            }
+
+            // Check remaining quantity
+            const remaining = (order.total_quantity || 0) - (order.total_received_quantity || 0) - (order.total_cancelled_quantity || 0);
+            if (remaining <= 0) {
+                return;
+            }
+
+            if (order.expected_delivery_date) {
+                const expectedDate = new Date(order.expected_delivery_date);
+                expectedDate.setHours(0, 0, 0, 0);
+
+                if (expectedDate < today) {
+                    const daysOverdue = Math.floor((today - expectedDate) / (1000 * 60 * 60 * 24));
+                    overdueList.push({
+                        po_number: order.po_number,
+                        supplier: order.suppliers?.name || 'Unknown',
+                        days: daysOverdue,
+                        status: order.status,
+                        received: order.total_received_quantity || 0,
+                        total: order.total_quantity || 0,
+                        remaining: remaining
+                    });
+                }
+            }
+        });
+
+        if (overdueList.length > 0) {
+            overdueAlert.style.display = 'block';
+            overdueListEl.innerHTML = overdueList.map(o => 
+                `<span style="background: #fee2e2; padding: 2px 10px; border-radius: 12px; margin: 0 4px; display: inline-block;">
+                    ${o.po_number} (${o.supplier}) - ${o.days} days overdue | Remaining: ${o.remaining}
+                </span>`
+            ).join(' ');
+        } else {
+            overdueAlert.style.display = 'none';
+        }
+
+        return overdueList;
+    }
+
+       // ============================================
+    // PRINT FUNCTIONS
+    // ============================================
+
+    function printPO() {
+        const orderId = document.getElementById('editPOId')?.value;
+        if (!orderId) {
+            showToast('Please open a PO to print', 'error');
+            return;
+        }
+        
+        const order = state.orders.find(o => o.id === orderId);
+        if (!order) {
+            showToast('Order not found', 'error');
+            return;
+        }
+        
+        generatePOPrint(order);
+    }
+
+    function printPOFromView() {
+        const content = document.getElementById('viewPOContent');
+        if (!content) return;
+
+        const poNumberEl = content.querySelector('.detail-row .value strong');
+        if (!poNumberEl) {
+            showToast('PO not found', 'error');
+            return;
+        }
+
+        const order = state.orders.find(o => o.po_number === poNumberEl.textContent);
+        if (!order) {
+            showToast('Order not found', 'error');
+            return;
+        }
+
+        generatePOPrint(order);
+    }
+
+    // 🔥 ADDED: the "View PO Details" modal's Print button now dispatches
+    // to whichever document this order actually is right now -- still a
+    // Purchase Order (nothing received yet), or already a Goods Receipt
+    // Note (goods have been received against it), per the hasGRN check
+    // done in viewPO().
+    function printFromView() {
+        if (state.currentViewHasGRN && state.currentViewOrderId) {
+            printGRN(state.currentViewOrderId);
+        } else {
+            printPOFromView();
+        }
+    }
+
+    function generatePOPrint(order) {
+        const printWindow = window.open('', '_blank', 'width=800,height=600');
+        if (!printWindow) {
+            showToast('Please allow popups to print', 'error');
+            return;
+        }
+        
+        const symbol = order.currency === 'ZMW' ? 'ZK' : '$';
+        const lines = order.purchase_order_lines || [];
+
+        printWindow.document.write(`
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <title>Purchase Order - ${order.po_number}</title>
+                <style>
+                    ${getPrintStyles()}
+                </style>
+            </head>
+            <body>
+                ${getPrintHeader()}
+                <h2 style="text-align: center;">PURCHASE ORDER</h2>
+                ${getPOInfoTable(order)}
+                ${getPOLinesTable(lines, order, symbol)}
+                ${getPrintFooter()}
+                ${getPrintButton()}
+            </body>
+            </html>
+        `);
+        printWindow.document.close();
+        setTimeout(() => printWindow.focus(), 500);
+    }
+
+    function getPrintStyles() {
+        return `
+            body { font-family: Arial, sans-serif; padding: 20px; max-width: 800px; margin: 0 auto; }
+            .header { text-align: center; border-bottom: 2px solid #333; padding-bottom: 10px; margin-bottom: 20px; }
+            .header h1 { margin: 0; color: #0f172a; font-size: 1.5rem; }
+            .header p { margin: 3px 0; color: #475569; font-size: 0.9rem; }
+            .info { margin-bottom: 20px; padding: 10px; background: #f8fafc; border-radius: 4px; }
+            .info table { width: 100%; }
+            .info td { padding: 5px; }
+            .info .label { font-weight: 600; width: 120px; }
+            table { width: 100%; border-collapse: collapse; margin: 20px 0; font-size: 0.9rem; }
+            th { background: #f1f5f9; padding: 10px; text-align: left; border: 1px solid #e2e8f0; }
+            td { padding: 10px; border: 1px solid #e2e8f0; }
+            .text-right { text-align: right; }
+            .total-row { font-weight: bold; background: #f8fafc; }
+            .footer { text-align: center; margin-top: 30px; padding-top: 20px; border-top: 1px solid #e2e8f0; color: #64748b; font-size: 0.9rem; }
+            .status-badge { padding: 2px 10px; border-radius: 12px; font-size: 0.8rem; display: inline-block; }
+            .received-status { font-size: 0.8rem; color: #10b981; }
+            @media print {
+                body { margin: 0; padding: 10px; }
+                .no-print { display: none; }
+            }
+        `;
+    }
+
+    function getPrintHeader() {
+        return `
+            <div class="header">
+                <h1>${companySettings.company_name}</h1>
+                <p>${companySettings.address} | Phone: ${companySettings.phone}</p>
+                <p>ZAMRA #: ${companySettings.zamra_number}</p>
+            </div>
+        `;
+    }
+
+    function getPrintFooter() {
+        return `
+            <div class="footer">
+                <p>This is a computer-generated purchase order.</p>
+                <p>Generated on: ${new Date().toLocaleString()}</p>
+            </div>
+        `;
+    }
+
+    function getPrintButton() {
+        return `
+            <div class="no-print" style="text-align: center; margin-top: 20px;">
+                <button onclick="window.print()" style="background: #2563eb; color: white; border: none; padding: 10px 30px; border-radius: 6px; cursor: pointer; font-size: 1rem;">
+                    <i class="fa-solid fa-print"></i> Print
+                </button>
+            </div>
+        `;
+    }
+
+    function getPOInfoTable(order) {
+        const statusBg = order.status === 'Approved' ? '#dcfce7' : order.status === 'Goods Received' ? '#dcfce7' : '#fef3c7';
+        const statusColor = order.status === 'Approved' ? '#15803d' : order.status === 'Goods Received' ? '#15803d' : '#b45309';
+        
+        return `
+            <div class="info">
+                <table>
+                    <tr><td class="label">PO Number:</td><td><strong>${order.po_number}</strong></td></tr>
+                    <tr><td class="label">Supplier:</td><td>${order.suppliers?.name || 'Unknown'}</td></tr>
+                    <tr><td class="label">Currency:</td><td>${order.currency || 'USD'}</td></tr>
+                    <tr><td class="label">Exchange Rate:</td><td>${order.exchange_rate || 1}</td></tr>
+                    <tr><td class="label">Expected Delivery:</td><td>${formatDate(order.expected_delivery_date)}</td></tr>
+                    <tr><td class="label">Status:</td><td>
+                        <span class="status-badge" style="background: ${statusBg}; color: ${statusColor};">${order.status || 'Draft'}</span>
+                        ${order.fully_received ? '<span class="received-status">✅ Fully Received</span>' : ''}
+                        ${order.status === 'Partially Received' ? `<span class="received-status" style="color: #f59e0b;">⚠️ Partially Received (${order.total_received_quantity || 0}/${order.total_quantity || 0})</span>` : ''}
+                        ${order.status === 'Cancelled' ? `<span class="received-status" style="color: #64748b;">❌ Cancelled</span>` : ''}
+                        ${order.total_cancelled_quantity > 0 && order.status !== 'Cancelled' ? `<span class="received-status" style="color: #dc2626;">⚠️ ${order.total_cancelled_quantity} items cancelled</span>` : ''}
+                        ${order.remaining_quantity > 0 && order.status !== 'Draft' && order.status !== 'Cancelled' ? `<span class="received-status" style="color: #f59e0b;">Remaining: ${order.remaining_quantity}</span>` : ''}
+                    </td></tr>
+                    ${order.notes ? `<tr><td class="label">Notes:</td><td>${order.notes}</td></tr>` : ''}
+                    ${order.cancellation_reason ? `<tr><td class="label">Cancellation Reason:</td><td>${order.cancellation_reason}</td></tr>` : ''}
+                </table>
+            </div>
+        `;
+    }
+
+    function getPOLinesTable(lines, order, symbol) {
+        if (lines.length === 0) {
+            return `
+                <h3>Order Lines</h3>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>#</th>
+                            <th>Product</th>
+                            <th>Pack Size</th>
+                            <th class="text-right">Qty</th>
+                            <th class="text-right">Rate</th>
+                            <th class="text-right">Total</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr><td colspan="6" style="text-align: center; padding: 20px; color: #94a3b8;">No items in this order</td></tr>
+                    </tbody>
+                </table>
+            `;
+        }
+
+        return `
+            <h3>Order Lines</h3>
+            <table>
+                <thead>
+                    <tr>
+                        <th>#</th>
+                        <th>Product</th>
+                        <th>Pack Size</th>
+                        <th class="text-right">Qty</th>
+                        <th class="text-right">Received</th>
+                        <th class="text-right">Cancelled</th>
+                        <th class="text-right">Remaining</th>
+                        <th class="text-right">Rate</th>
+                        <th class="text-right">Total</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    ${lines.map((line, idx) => {
+                        const remaining = (line.order_quantity || 0) - (line.received_quantity || 0) - (line.cancelled_quantity || 0);
+                        const isFullyReceived = remaining <= 0 && (line.received_quantity || 0) > 0;
+                        const isFullyCancelled = remaining <= 0 && (line.received_quantity || 0) === 0 && (line.cancelled_quantity || 0) > 0;
+                        return `
+                        <tr>
+                            <td>${idx + 1}</td>
+                            <td>${line.product_name}</td>
+                            <td>${line.pack_size || 1}</td>
+                            <td class="text-right">${line.order_quantity}</td>
+                            <td class="text-right" style="color: #10b981;">${line.received_quantity || 0}</td>
+                            <td class="text-right" style="color: #dc2626;">${line.cancelled_quantity || 0}</td>
+                            <td class="text-right" style="color: ${isFullyReceived ? '#10b981' : isFullyCancelled ? '#dc2626' : '#f59e0b'};">${isFullyReceived ? '✅' : isFullyCancelled ? '❌' : remaining}</td>
+                            <td class="text-right">${symbol} ${formatNumber(line.purchase_rate)}</td>
+                            <td class="text-right">${symbol} ${formatNumber(line.total_amount)}</td>
+                        </tr>
+                    `}).join('')}
+                </tbody>
+                <tfoot>
+                    ${getPOFooterRows(order, symbol)}
+                </tfoot>
+            </table>
+        `;
+    }
+
+    function getPOFooterRows(order, symbol) {
+        let html = `
+            <tr class="total-row">
+                <td colspan="8" class="text-right">Grand Total:</td>
+                <td class="text-right">${symbol} ${formatNumber(order.total_amount || 0)}</td>
+            </tr>
+        `;
+        if (order.total_received_amount > 0) {
+            html += `
+                <tr>
+                    <td colspan="8" class="text-right">Total Received:</td>
+                    <td class="text-right" style="color: #10b981;">${symbol} ${formatNumber(order.total_received_amount)}</td>
+                </tr>
+            `;
+        }
+        if (order.total_cancelled_amount > 0) {
+            html += `
+                <tr>
+                    <td colspan="8" class="text-right">Total Cancelled:</td>
+                    <td class="text-right" style="color: #dc2626;">${symbol} ${formatNumber(order.total_cancelled_amount)}</td>
+                </tr>
+            `;
+        }
+        if (order.remaining_amount > 0 && order.status !== 'Draft' && order.status !== 'Cancelled') {
+            html += `
+                <tr>
+                    <td colspan="8" class="text-right">Remaining:</td>
+                    <td class="text-right" style="color: #f59e0b;">${symbol} ${formatNumber(order.remaining_amount)}</td>
+                </tr>
+            `;
+        }
+        return html;
+    }
+
+    // 🔥 CHANGED: now accepts an optional orderId so it can be called from
+    // the "View PO Details" modal (any received order) as well as from the
+    // GRN receiving modal itself (which still just passes nothing and
+    // relies on state.currentGRNOrderId, unchanged).
+    function printGRN(orderIdOverride) {
+        const orderId = orderIdOverride || state.currentGRNOrderId;
+        if (!orderId) {
+            showToast('No GRN open to print', 'error');
+            return;
+        }
+        
+        supabaseClient
+            .from('goods_receipt_notes')
+            .select(`
+                *,
+                goods_receipt_lines (*),
+                purchase_orders:purchase_order_id (
+                    po_number,
+                    suppliers:supplier_id (name),
+                    currency,
+                    exchange_rate
+                )
+            `)
+            // 🔥 FIX: this was missing the purchase_orders join that
+            // viewGRN()/viewSingleGRNById() already use -- without it,
+            // grn.purchase_orders was always undefined, so every printed
+            // GRN showed "PO Reference: N/A" and "Supplier: Unknown"
+            // regardless of what was actually on the order (caught via the
+            // new View PO -> Print GRN path, but this pre-existed on the
+            // GRN receiving modal's own Print button too).
+            .eq('purchase_order_id', orderId)
+            .order('created_at', { ascending: false })
+            .limit(1)
+            .then(({ data, error }) => {
+                if (error || !data || data.length === 0) {
+                    showToast('GRN data not found', 'error');
+                    return;
+                }
+                generateGRNPrint(data[0]);
+            });
+    }
+
+    function generateGRNPrint(grn) {
+        const printWindow = window.open('', '_blank', 'width=800,height=600');
+        if (!printWindow) {
+            showToast('Please allow popups to print', 'error');
+            return;
+        }
+        
+        const symbol = grn.currency === 'ZMW' ? 'ZK' : '$';
+        const lines = grn.goods_receipt_lines || [];
+
+        printWindow.document.write(`
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <title>Goods Receipt Note - ${grn.grn_number}</title>
+                <style>
+                    ${getPrintStyles()}
+                </style>
+            </head>
+            <body>
+                ${getPrintHeader()}
+                <h2 style="text-align: center;">GOODS RECEIPT NOTE</h2>
+                ${getGRNInfoTable(grn)}
+                ${getGRNLinesTable(lines, grn, symbol)}
+                ${getPrintFooter()}
+                ${getPrintButton()}
+            </body>
+            </html>
+        `);
+        printWindow.document.close();
+        setTimeout(() => printWindow.focus(), 500);
+    }
+
+    function getGRNInfoTable(grn) {
+        return `
+            <div class="info">
+                <table>
+                    <tr><td class="label">GRN Number:</td><td><strong>${grn.grn_number}</strong></td></tr>
+                    <tr><td class="label">PO Reference:</td><td>${grn.purchase_orders?.po_number || 'N/A'}</td></tr>
+                    <tr><td class="label">Supplier:</td><td>${grn.purchase_orders?.suppliers?.name || 'Unknown'}</td></tr>
+                    <tr><td class="label">Entry Date:</td><td>${formatDate(grn.entry_date)}</td></tr>
+                    <tr><td class="label">Invoice Number:</td><td>${grn.invoice_number || 'N/A'}</td></tr>
+                    <tr><td class="label">Invoice Date:</td><td>${formatDate(grn.invoice_date)}</td></tr>
+                    <tr><td class="label">Currency:</td><td>${grn.currency || 'USD'}</td></tr>
+                    ${grn.notes ? `<tr><td class="label">Notes:</td><td>${grn.notes}</td></tr>` : ''}
+                </table>
+            </div>
+        `;
+    }
+
+    function getGRNLinesTable(lines, grn, symbol) {
+        return `
+            <h3>Received Items</h3>
+            <table>
+                <thead>
+                    <tr>
+                        <th>#</th>
+                        <th>Product</th>
+                        <th>Batch</th>
+                        <th>Expiry</th>
+                        <th class="text-right">Ordered</th>
+                        <th class="text-right">Received</th>
+                        <th class="text-right">Rate</th>
+                        <th class="text-right">Total</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    ${lines.length === 0 ? `
+                        <tr><td colspan="8" style="text-align: center; padding: 20px; color: #94a3b8;">No items received</td></tr>
+                    ` : lines.map((line, idx) => `
+                        <tr>
+                            <td>${idx + 1}</td>
+                            <td>${line.product_name}</td>
+                            <td>${line.batch_number || 'N/A'}</td>
+                            <td>${formatDate(line.expiry_date)}</td>
+                            <td class="text-right">${line.ordered_quantity || 0}</td>
+                            <td class="text-right" style="color: #10b981;">${line.received_quantity || 0}</td>
+                            <td class="text-right">${symbol} ${formatNumber(line.purchase_rate)}</td>
+                            <td class="text-right">${symbol} ${formatNumber(line.total_amount)}</td>
+                        </tr>
+                    `).join('')}
+                </tbody>
+                <tfoot>
+                    ${getGRNFooterRows(grn, symbol)}
+                </tfoot>
+            </table>
+        `;
+    }
+
+    function getGRNFooterRows(grn, symbol) {
+        let html = '';
+        if (grn.freight) {
+            html += `
+                <tr>
+                    <td colspan="7" class="text-right">Freight:</td>
+                    <td class="text-right">${symbol} ${formatNumber(grn.freight)}</td>
+                </tr>
+            `;
+        }
+        if (grn.insurance) {
+            html += `
+                <tr>
+                    <td colspan="7" class="text-right">Insurance:</td>
+                    <td class="text-right">${symbol} ${formatNumber(grn.insurance)}</td>
+                </tr>
+            `;
+        }
+        html += `
+            <tr class="total-row">
+                <td colspan="7" class="text-right">Grand Total:</td>
+                <td class="text-right">${symbol} ${formatNumber(grn.total_amount || 0)}</td>
+            </tr>
+        `;
+        return html;
+    }
+
+    // ============================================
+    // UTILITY FUNCTIONS
+    // ============================================
+
+    function formatNumber(num) {
+        return (num || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    }
+
+    function formatDate(dateStr) {
+        if (!dateStr) return '-';
+        try {
+            const d = new Date(dateStr);
+            return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+        } catch {
+            return dateStr;
+        }
+    }
+
+    function getFutureDate(days) {
+        const date = new Date();
+        date.setDate(date.getDate() + days);
+        return date.toISOString().split('T')[0];
+    }
+
+    async function updateExchangeRate() {
+        const currency = document.getElementById('poCurrency')?.value;
+        const rateInput = document.getElementById('poExchangeRate');
+
+        // 🔒 LOCKED: this field is read-only now -- always the Dashboard's
+        // shared exchange rate for a USD PO (1 for ZMW), never a typed-in
+        // value. Prevents a typo'd rate (like the 0.07-instead-of-19.5 bug)
+        // from corrupting batch cost, inventory value and the GL entry.
+        // To change it, update the shared rate on the Dashboard first.
+        if (currency === 'ZMW' && rateInput) {
+            rateInput.value = 1;
+        } else if (rateInput) {
+            // 🔥 FIX: re-fetch live instead of trusting whatever
+            // sharedZmwPerUsd happened to hold already -- switching to USD
+            // is a natural moment to also pick up a rate someone just
+            // corrected on the Dashboard, not just whatever was current at
+            // page load or when this modal last opened.
+            try {
+                sharedZmwPerUsd = await getSharedExchangeRate();
+            } catch (e) {
+                console.warn('Could not refresh shared exchange rate, using last known value:', e);
+            }
+            rateInput.value = sharedZmwPerUsd;
+        }
+        updatePOTotal();
+    }
+
+    function refreshPurchaseList() {
+        const searchTerm = document.getElementById('searchPurchase')?.value?.toLowerCase() || '';
+        const statusFilter = document.getElementById('statusFilter')?.value || '';
+        const supplierFilter = document.getElementById('supplierFilter')?.value || '';
+        
+        let filtered = state.orders || [];
+        
+        if (searchTerm) {
+            filtered = filtered.filter(o => 
+                (o.po_number || '').toLowerCase().includes(searchTerm) ||
+                (o.suppliers?.name || '').toLowerCase().includes(searchTerm)
+            );
+        }
+        if (statusFilter) {
+            filtered = filtered.filter(o => o.status === statusFilter);
+        }
+        if (supplierFilter) {
+            filtered = filtered.filter(o => o.supplier_id === supplierFilter);
+        }
+        
+        renderPurchaseOrders(filtered);
+    }
+
+    function showToast(message, type = 'success') {
+        const existing = document.querySelector('#customToast');
+        if (existing) existing.remove();
+
+        const toast = document.createElement('div');
+        toast.id = 'customToast';
+        const bgColor = type === 'success' ? '#059669' : type === 'error' ? '#dc2626' : type === 'warning' ? '#f59e0b' : '#2563eb';
+        toast.style.cssText = `
+            position: fixed; top: 20px; right: 20px; 
+            padding: 16px 24px; border-radius: 8px; 
+            color: white; font-weight: 500; z-index: 9999;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+            animation: slideIn 0.3s ease;
+            background: ${bgColor};
+            max-width: 400px;
+        `;
+        toast.textContent = message;
+        document.body.appendChild(toast);
+
+        setTimeout(() => {
+            toast.style.animation = 'slideOut 0.3s ease';
+            setTimeout(() => toast.remove(), 300);
+        }, 3000);
+    }
+
+    // ============================================
+    // EVENT LISTENERS
+    // ============================================
+
+    function setupEventListeners() {
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape') {
+                document.querySelectorAll('.modal.show').forEach(modal => {
+                    modal.classList.remove('show');
+                });
+            }
+        });
+
+        document.querySelectorAll('.modal').forEach(modal => {
+            modal.addEventListener('click', (e) => {
+                if (e.target === modal) {
+                    modal.classList.remove('show');
+                }
+            });
+        });
+
+        // Cancel PO Reason - Other field
+        document.getElementById('cancelReason')?.addEventListener('change', function() {
+            const otherField = document.getElementById('cancelReasonOther');
+            if (this.value === 'Other') {
+                otherField.style.display = 'block';
+                otherField.setAttribute('required', '');
+            } else {
+                otherField.style.display = 'none';
+                otherField.removeAttribute('required');
+                otherField.value = '';
+            }
+        });
+
+        // Cancel Remaining Reason - Other field
+        document.getElementById('cancelRemainingReason')?.addEventListener('change', function() {
+            const otherField = document.getElementById('cancelRemainingReasonOther');
+            if (this.value === 'Other') {
+                otherField.style.display = 'block';
+                otherField.setAttribute('required', '');
+            } else {
+                otherField.style.display = 'none';
+                otherField.removeAttribute('required');
+                otherField.value = '';
+            }
+        });
+
+        // Product search
+        const searchInput = document.getElementById('poProductSearch');
+        if (searchInput) {
+            // 🔥 CHANGED: 'input' (not 'keyup') re-runs the search as you
+            // type -- keydown below now owns Enter/Tab/Arrow keys instead
+            // of keyup re-searching on every key including those.
+            searchInput.addEventListener('input', function() {
+                searchProducts();
+            });
+            // 🔥 FIX (issue #1): opening the dropdown no longer requires
+            // typing anything -- clicking/focusing the field now shows
+            // the product list immediately, same as a normal dropdown.
+            searchInput.addEventListener('focus', function() {
+                searchProducts();
+            });
+            // 🔥 ADDED: arrow keys navigate the results, Enter or Tab adds
+            // whichever one is highlighted -- same request as "arrow keys
+            // should be working to select and tab to add". Tab deliberately
+            // does NOT preventDefault: it adds the product AND lets focus
+            // continue moving to the next field, same as a native <select>.
+            searchInput.addEventListener('keydown', function(e) {
+                const results = document.getElementById('poSearchResults');
+                if (!results || results.style.display === 'none') return;
+
+                if (e.key === 'ArrowDown') {
+                    e.preventDefault();
+                    if (!productSearchResults.length) return;
+                    productSearchHighlightIndex = Math.min(productSearchHighlightIndex + 1, productSearchResults.length - 1);
+                    renderSearchResultsList();
+                    scrollProductHighlightIntoView();
+                } else if (e.key === 'ArrowUp') {
+                    e.preventDefault();
+                    if (!productSearchResults.length) return;
+                    productSearchHighlightIndex = Math.max(productSearchHighlightIndex - 1, 0);
+                    renderSearchResultsList();
+                    scrollProductHighlightIntoView();
+                } else if (e.key === 'Enter') {
+                    e.preventDefault();
+                    if (productSearchHighlightIndex >= 0 && productSearchResults[productSearchHighlightIndex]) {
+                        addProductToPO(productSearchResults[productSearchHighlightIndex].id);
+                    }
+                } else if (e.key === 'Tab') {
+                    if (productSearchHighlightIndex >= 0 && productSearchResults[productSearchHighlightIndex]) {
+                        addProductToPO(productSearchResults[productSearchHighlightIndex].id);
+                    }
+                } else if (e.key === 'Escape') {
+                    results.style.display = 'none';
+                }
+            });
+            document.addEventListener('click', function(e) {
+                const results = document.getElementById('poSearchResults');
+                if (results && !searchInput.contains(e.target) && !results.contains(e.target)) {
+                    results.style.display = 'none';
+                }
+            });
+        }
+
+        const searchBtn = document.querySelector('.search-input-group .btn');
+        if (searchBtn) {
+            searchBtn.addEventListener('click', function(e) {
+                e.preventDefault();
+                searchProducts();
+            });
+        }
+
+        // Filters
+        const searchPurchase = document.getElementById('searchPurchase');
+        const statusFilter = document.getElementById('statusFilter');
+        const supplierFilter = document.getElementById('supplierFilter');
+        const overdueFilter = document.getElementById('overdueFilter');
+        
+        if (searchPurchase) searchPurchase.addEventListener('input', refreshPurchaseList);
+        if (statusFilter) statusFilter.addEventListener('change', refreshPurchaseList);
+        if (supplierFilter) supplierFilter.addEventListener('change', refreshPurchaseList);
+        if (overdueFilter) overdueFilter.addEventListener('change', refreshPurchaseList);
+
+        // 🔥 ADDED: Credit Note return-quantity inputs -- delegated since
+        // the rows are re-rendered every time the modal opens.
+        const cnLinesBody = document.getElementById('cnLinesBody');
+        if (cnLinesBody) {
+            cnLinesBody.addEventListener('input', function(e) {
+                const input = e.target.closest('.cn-return-qty');
+                if (!input) return;
+                const idx = parseInt(input.dataset.idx, 10);
+                const line = state.creditNoteLines[idx];
+                if (!line) return;
+
+                let qty = parseInt(input.value, 10);
+                if (isNaN(qty) || qty < 0) qty = 0;
+                if (qty > line.maxReturnable) qty = line.maxReturnable;
+                line.returnQty = qty;
+                input.value = qty;
+
+                const row = input.closest('tr');
+                const grn = state.currentViewGRNData;
+                const symbol = grn?.currency === 'ZMW' ? 'ZK' : '$';
+                const totalCell = row?.querySelector('.cn-line-total');
+                if (totalCell) totalCell.textContent = `${symbol} ${formatNumber(qty * line.purchase_rate)}`;
+
+                recalcCreditNoteTotals();
+            });
+        }
+    }
+
+    // ============================================
+    // TOAST CSS
+    // ============================================
+
+    if (!document.getElementById('customToastStyles')) {
+        const style = document.createElement('style');
+        style.id = 'customToastStyles';
+        style.textContent = `
+            @keyframes slideIn {
+                from { transform: translateX(100%); opacity: 0; }
+                to { transform: translateX(0); opacity: 1; }
+            }
+            @keyframes slideOut {
+                from { transform: translateX(0); opacity: 1; }
+                to { transform: translateX(100%); opacity: 0; }
+            }
+        `;
+        document.head.appendChild(style);
+    }
+
+    // ============================================
+    // EXPOSE TO GLOBAL SCOPE
+    // ============================================
+    // IMPORTANT: Functions must be exposed before rendering
+    // so inline onclick handlers in HTML can access them
+    
+    window.openNewPurchaseOrder = openNewPurchaseOrder;
+    window.editPO = editPO;
+    window.viewPO = viewPO;
+    window.deletePO = deletePO;
+    window.openGRN = openGRN;
+    window.viewGRN = viewGRN;
+    window.viewSingleGRNById = viewSingleGRNById;
+    window.closeModal = closeModal;
+    window.searchProducts = searchProducts;
+    window.addProductToPO = addProductToPO;
+    window.removePOLine = removePOLine;
+    window.updatePOLine = updatePOLine;
+    window.updateGRNLine = updateGRNLine;
+    window.toggleGRNLineReceive = toggleGRNLineReceive;
+    window.savePODraft = savePODraft;
+    window.submitPOForApproval = submitPOForApproval;
+    window.approvePO = approvePO;
+    window.postGRN = postGRN;
+    window.updateExchangeRate = updateExchangeRate;
+    window.updatePOTotal = updatePOTotal;
+    window.updateGRNTotal = updateGRNTotal;
+    window.validateInvoice = validateInvoice;
+    window.refreshPurchaseList = refreshPurchaseList;
+    window.printPO = printPO;
+    window.printPOFromView = printPOFromView;
+    window.printGRN = printGRN;
+    window.printFromView = printFromView;
+    window.showToast = showToast;
+    window.openReorderReport = openReorderReport;
+    window.generateReorderReport = generateReorderReport;
+    window.toggleAllReorderItems = toggleAllReorderItems;
+    window.updateReorderSelection = updateReorderSelection;
+    window.addSelectedToPO = addSelectedToPO;
+    window.toggleReorderGenericGroup = toggleReorderGenericGroup;
+    window.openCancelPO = openCancelPO;
+    window.openCancelPOFromModal = openCancelPOFromModal;
+    window.confirmCancelPO = confirmCancelPO;
+    window.openCancelRemainingPO = openCancelRemainingPO;
+    window.confirmCancelRemainingPO = confirmCancelRemainingPO;
+    window.receiveAllItems = receiveAllItems;
+    window.clearReceivedItems = clearReceivedItems;
+    window.checkOverduePOs = checkOverduePOs;
+    window.updateStats = updateStats;
+    window.openCreditNoteModal = openCreditNoteModal;
+    window.closeCreditNoteModal = closeCreditNoteModal;
+    window.saveCreditNote = saveCreditNote;
+    window.printSavedCreditNote = printSavedCreditNote;
+
+    // ============================================
+    // INITIALIZE
+    // ============================================
+    // 🔥 ADDED: load today's shared exchange rate FIRST, before anything
+    // that might read sharedZmwPerUsd (new-PO/new-supplier forms) could
+    // possibly be opened.
+    sharedZmwPerUsd = await getSharedExchangeRate();
+    ensureAddSupplierModal();
+    await ensureChartOfAccounts();
+    await loadSuppliers();
+    await loadPurchaseOrders();
+    setupEventListeners();
+
+    // 🔥 ADDED: searchable Supplier dropdowns -- same pattern as NHIMA
+    // Number search in Retail POS. 'contains' matching (not 'prefix')
+    // since staff may remember any part of a supplier's name, not just
+    // how it starts.
+    initSearchableSelect({ searchInputId: 'poSupplierSearch', selectId: 'poSupplier', panelId: 'poSupplierSearchPanel', matchMode: 'contains', getLabel: opt => opt.textContent });
+    initSearchableSelect({ searchInputId: 'supplierFilterSearch', selectId: 'supplierFilter', panelId: 'supplierFilterSearchPanel', matchMode: 'contains', getLabel: opt => opt.textContent });
+    initSearchableSelect({ searchInputId: 'reorderSupplierSearch', selectId: 'reorderSupplier', panelId: 'reorderSupplierSearchPanel', matchMode: 'contains', getLabel: opt => opt.textContent });
+
+    // 🔥 ADDED: same searchable-dropdown treatment for the Reorder
+    // Report's Category filter -- this one has no matching search
+    // <input> in the HTML, so it uses the auto-injecting version
+    // instead (builds its own search box next to the real <select>).
+    // Category options load asynchronously (populateReorderFilters());
+    // wiring it here is safe either way since initSearchableSelect()
+    // re-reads the live <option> list every time the box is opened.
+    makeSelectSearchable('reorderCategory', { matchMode: 'contains', getLabel: opt => opt.textContent });
+
+    console.log("✅ Purchase module initialized successfully!");
+})();
