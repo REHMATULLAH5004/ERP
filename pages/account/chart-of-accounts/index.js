@@ -48,6 +48,46 @@
         }
     }
 
+    // 🔥 FIX: THE REAL BUG BEHIND "Chart of Accounts balances don't match
+    // Cash & Bank / the actual ledger" -- both getAccountBalance() and
+    // getAllAccountBalances() below used a bare `.select(...)` with no
+    // `.range()`. Supabase/PostgREST caps an unranged select at 1000 rows
+    // per request by default -- it does NOT error or warn, it just
+    // silently returns the first 1000 rows (in whatever order the table
+    // happens to return them, since neither query specified an
+    // `.order()`) and drops the rest. Confirmed directly against the
+    // data: `journal_lines` currently has 10,200 rows total (Accounts
+    // Receivable 1200 alone has 2,201 of them) -- so getAllAccountBalances()
+    // was silently summing only a fraction of the ledger for almost every
+    // account, which is exactly why this page's numbers didn't match
+    // Cash & Bank (whose query filters to just 3 account codes, well
+    // under 1000 rows, so it was never affected) or the real GL balance.
+    // This mirrors the identical 1000-row cliff already found and fixed
+    // in the Receipts, Trial Balance and Financial Statements pages this
+    // session -- pages through with `.range()` until a page comes back
+    // shorter than the page size, so every account's balance here is now
+    // computed from the COMPLETE ledger regardless of how large it grows.
+    async function fetchAllJournalLines(accountCode) {
+        const pageSize = 1000;
+        let allRows = [];
+        let from = 0;
+        while (true) {
+            let query = supabaseClient
+                .from('journal_lines')
+                .select('account_code, debit, credit')
+                .order('id', { ascending: true })
+                .range(from, from + pageSize - 1);
+            if (accountCode) query = query.eq('account_code', accountCode);
+            const { data, error } = await query;
+            if (error) throw error;
+            if (!data || data.length === 0) break;
+            allRows = allRows.concat(data);
+            if (data.length < pageSize) break;
+            from += pageSize;
+        }
+        return allRows;
+    }
+
     // ============================================
     // GET ACCOUNT BALANCE FROM JOURNAL LINES
     // ============================================
@@ -55,19 +95,11 @@
     async function getAccountBalance(accountCode) {
         try {
             // Sum all debits and credits for this account
-            const { data, error } = await supabaseClient
-                .from('journal_lines')
-                .select('debit, credit')
-                .eq('account_code', accountCode);
-
-            if (error) {
-                // If table doesn't exist or error, return 0
-                return 0;
-            }
+            const data = await fetchAllJournalLines(accountCode);
 
             let totalDebit = 0;
             let totalCredit = 0;
-            
+
             data.forEach(line => {
                 totalDebit += line.debit || 0;
                 totalCredit += line.credit || 0;
@@ -95,12 +127,11 @@
 
     async function getAllAccountBalances() {
         try {
-            // Get all journal lines
-            const { data: lines, error } = await supabaseClient
-                .from('journal_lines')
-                .select('account_code, debit, credit');
-
-            if (error) {
+            // Get all journal lines -- paginated, see fetchAllJournalLines() above.
+            let lines;
+            try {
+                lines = await fetchAllJournalLines(null);
+            } catch (error) {
                 console.warn('Could not fetch journal lines:', error);
                 return {};
             }
@@ -870,4 +901,4 @@
     console.log("✅ Chart of Accounts initialized successfully!");
     console.log(`📊 ${state.accounts.length} accounts loaded`);
     console.log(`💰 ${Object.keys(state.balances).length} accounts have balances`);
-})();
+})();

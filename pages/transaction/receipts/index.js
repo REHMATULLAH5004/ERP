@@ -491,6 +491,13 @@
             } catch { return dateStr; }
         }
     
+        // 🔥 ADDED: identifies the pre-1-Sept-2026 NHIMA opening balance,
+        // both on its ledger entry (journal_entries.reference) and on any
+        // customer_receipts/customer_receipt_invoices rows recording a
+        // payment against it (nhima_claim_number) -- see
+        // loadNhimaOpeningBalance() and processNhimaBulkSettlement().
+        const NHIMA_OPENING_BALANCE_REFERENCE = 'OPENING-NHIMA-AR-2026';
+
         // ============================================
         // GLOBAL STATE
         // ============================================
@@ -502,6 +509,10 @@
             receipts: [],
             sales: [],
             customerReceiptInvoices: [],
+            // 🔥 ADDED: the 51,242,061.49 pre-1-Sept-2026 NHIMA receivable
+            // backlog (posted as a one-time ledger opening entry, not tied
+            // to any real claim/sale) -- see loadNhimaOpeningBalance().
+            nhimaOpeningBalanceAmount: 0,
             currentStatementData: null,
             currentReceiptData: null,
             currentRetailCustomerId: null,
@@ -672,10 +683,47 @@
             }
         }
     
+        // 🔥 ADDED: reads the pre-1-Sept-2026 NHIMA opening receivable
+        // balance straight off its own ledger entry (journal_entries.reference
+        // = 'OPENING-NHIMA-AR-2026', posted 2026-08-31: Dr Accounts
+        // Receivable 1200 / Cr Opening Balance Equity 3000) instead of
+        // hardcoding the number here, so this page and the ledger can never
+        // silently drift apart on what the opening figure actually is. This
+        // backlog has no underlying sale/claim record -- it's a lump sum --
+        // so it's surfaced as one synthetic line in calculateNhimaReceivables()
+        // below rather than as an itemized claim.
+        async function loadNhimaOpeningBalance() {
+            try {
+                const { data: entries, error: entryError } = await supabaseClient
+                    .from('journal_entries')
+                    .select('id')
+                    .eq('reference', NHIMA_OPENING_BALANCE_REFERENCE)
+                    .limit(1);
+                if (entryError || !entries || entries.length === 0) {
+                    state.nhimaOpeningBalanceAmount = 0;
+                    return;
+                }
+                const { data: lines, error: lineError } = await supabaseClient
+                    .from('journal_lines')
+                    .select('debit')
+                    .eq('journal_entry_id', entries[0].id)
+                    .eq('account_code', '1200');
+                if (lineError || !lines || lines.length === 0) {
+                    state.nhimaOpeningBalanceAmount = 0;
+                    return;
+                }
+                state.nhimaOpeningBalanceAmount = lines.reduce((sum, l) => sum + (l.debit || 0), 0);
+                console.log(`✅ NHIMA opening balance loaded: ZK${state.nhimaOpeningBalanceAmount}`);
+            } catch (error) {
+                console.warn('Error loading NHIMA opening balance:', error);
+                state.nhimaOpeningBalanceAmount = 0;
+            }
+        }
+
         // ============================================
         // CALCULATE RECEIVABLES
         // ============================================
-    
+
         function calculateNhimaReceivables() {
             // 🔥 FIX: a QUOTATION was never excluded here -- a quotation is
             // not a sale at all (nothing has been billed or delivered yet),
@@ -720,10 +768,7 @@
             let totalSales = 0, totalReceived = 0;
             nhimaSales.forEach(s => totalSales += s.grand_total || 0);
             Object.values(paidBySaleId).forEach(amt => totalReceived += amt);
-    
-            // 🔥 FIX: Ensure outstanding never goes negative
-            const receivable = Math.max(0, totalSales - totalReceived);
-    
+
             const claimDetails = nhimaSales.map(sale => {
                 const paidAmount = paidBySaleId[sale.id] || 0;
                 const balance = Math.max(0, (sale.grand_total || 0) - paidAmount);
@@ -740,7 +785,46 @@
                     status: balance <= 0.01 ? 'Settled' : (sale.status || 'Pending')
                 };
             });
-    
+
+            // 🔥 ADDED: the pre-1-Sept-2026 opening balance has no
+            // underlying sale/claim record (it's a lump sum posted straight
+            // to the ledger -- see loadNhimaOpeningBalance()), so it's
+            // folded in here as one synthetic claim line rather than an
+            // itemized one. Payments against it are tracked via
+            // customer_receipt_invoices rows carrying
+            // nhima_claim_number = NHIMA_OPENING_BALANCE_REFERENCE and
+            // sale_id = null (see processNhimaBulkSettlement), NOT by
+            // creating a fake `sales` row -- a real sales row would also
+            // inflate the Dashboard/Daily Report/Sales Report by the same
+            // amount, which would be wrong since this isn't new revenue.
+            const openingBalanceOriginal = state.nhimaOpeningBalanceAmount || 0;
+            if (openingBalanceOriginal > 0.01) {
+                const openingBalancePaid = (state.customerReceiptInvoices || [])
+                    .filter(link => link.nhima_claim_number === NHIMA_OPENING_BALANCE_REFERENCE)
+                    .reduce((sum, link) => sum + (link.amount_paid || 0), 0);
+                const openingBalanceRemaining = Math.max(0, openingBalanceOriginal - openingBalancePaid);
+
+                totalSales += openingBalanceOriginal;
+                totalReceived += openingBalancePaid;
+
+                claimDetails.unshift({
+                    saleId: null,
+                    isOpeningBalance: true,
+                    claimNumber: 'Opening Balance (pre-Sept 2026)',
+                    nhimaNumber: 'N/A',
+                    customerName: 'NHIMA - aggregate pre-Sept 2026 backlog',
+                    date: '2026-08-31',
+                    amount: openingBalanceOriginal,
+                    paidAmount: openingBalancePaid,
+                    balance: openingBalanceRemaining,
+                    isSettled: openingBalanceRemaining <= 0.01,
+                    status: openingBalanceRemaining <= 0.01 ? 'Settled' : 'Pending'
+                });
+            }
+
+            // 🔥 FIX: Ensure outstanding never goes negative
+            const receivable = Math.max(0, totalSales - totalReceived);
+
             return {
                 totalSales, totalReceived, receivable,
                 hasReceivable: receivable > 0.01,
@@ -1073,9 +1157,10 @@
     
             tbody.innerHTML = pendingClaims.map((claim) => {
                 const statusColor = claim.isSettled ? '#10b981' : '#f59e0b';
+                const rowBg = claim.isOpeningBalance ? 'background:#fef9e7;' : '';
                 return `
-                <tr>
-                    <td><strong>${claim.claimNumber}</strong></td>
+                <tr style="${rowBg}">
+                    <td><strong>${claim.claimNumber}</strong>${claim.isOpeningBalance ? ' <span style="font-size:0.7rem;color:#b45309;">(aggregate, not an itemized claim)</span>' : ''}</td>
                     <td>${claim.customerName}</td>
                     <td>${claim.nhimaNumber}</td>
                     <td style="text-align:right;">ZK ${formatNumber(claim.amount)}</td>
@@ -1462,6 +1547,16 @@
                     const balance = parseFloat(cb.dataset.balance) || 0;
                     const customerName = cb.dataset.customer || 'Unknown';
                     const nhimaNumber = cb.dataset.nhima || 'N/A';
+                    // 🔥 ADDED: the aggregate pre-Sept-2026 opening-balance
+                    // line (see calculateNhimaReceivables()) has no real
+                    // sale/claim behind it, so it's settled through a
+                    // separate branch below that never touches `sales` or
+                    // does customer lookups -- it only records a payment
+                    // (customer_receipts + customer_receipt_invoices,
+                    // tagged with NHIMA_OPENING_BALANCE_REFERENCE) and posts
+                    // the same Dr Cash/Bank Cr 1200 GL entry as any other
+                    // NHIMA settlement.
+                    const isOpeningBalance = cb.dataset.isOpening === '1';
 
                     if (balance <= 0) continue;
 
@@ -1483,64 +1578,66 @@
                     if (payAmount > balance) payAmount = balance;
     
                     let customerId = null;
-                    
-                    if (nhimaNumber && nhimaNumber !== 'N/A') {
-                        const { data: existingCustomer, error: findError } = await supabaseClient
-                            .from('customers')
-                            .select('id, full_name, phone')
-                            .eq('nhima_number', nhimaNumber)
-                            .maybeSingle();
-                        
-                        if (!findError && existingCustomer) customerId = existingCustomer.id;
-                    }
-    
-                    if (!customerId) {
-                        const { data: saleData, error: saleError } = await supabaseClient
-                            .from('sales')
-                            .select('customer_data, customer_id')
-                            .eq('id', claimId)
-                            .maybeSingle();
-                        
-                        if (!saleError && saleData) {
-                            if (saleData.customer_id) {
-                                customerId = saleData.customer_id;
-                            } else {
-                                const phone = saleData.customer_data?.phone;
-                                if (phone) {
-                                    const { data: phoneCustomer } = await supabaseClient
-                                        .from('customers')
-                                        .select('id')
-                                        .eq('phone', phone)
-                                        .maybeSingle();
-                                    if (phoneCustomer) customerId = phoneCustomer.id;
+
+                    if (!isOpeningBalance) {
+                        if (nhimaNumber && nhimaNumber !== 'N/A') {
+                            const { data: existingCustomer, error: findError } = await supabaseClient
+                                .from('customers')
+                                .select('id, full_name, phone')
+                                .eq('nhima_number', nhimaNumber)
+                                .maybeSingle();
+
+                            if (!findError && existingCustomer) customerId = existingCustomer.id;
+                        }
+
+                        if (!customerId) {
+                            const { data: saleData, error: saleError } = await supabaseClient
+                                .from('sales')
+                                .select('customer_data, customer_id')
+                                .eq('id', claimId)
+                                .maybeSingle();
+
+                            if (!saleError && saleData) {
+                                if (saleData.customer_id) {
+                                    customerId = saleData.customer_id;
+                                } else {
+                                    const phone = saleData.customer_data?.phone;
+                                    if (phone) {
+                                        const { data: phoneCustomer } = await supabaseClient
+                                            .from('customers')
+                                            .select('id')
+                                            .eq('phone', phone)
+                                            .maybeSingle();
+                                        if (phoneCustomer) customerId = phoneCustomer.id;
+                                    }
                                 }
                             }
                         }
-                    }
-    
-                    if (!customerId) {
-                        const phone = `NHIMA-${nhimaNumber}`;
-                        const { data: newCustomer, error: createError } = await supabaseClient
-                            .from('customers')
-                            .insert([{
-                                full_name: customerName || 'NHIMA Customer',
-                                phone: phone,
-                                customer_type: 'NHIMA',
-                                nhima_number: nhimaNumber !== 'N/A' ? nhimaNumber : null,
-                                created_at: new Date().toISOString()
-                            }])
-                            .select();
-                        
-                        if (createError || !newCustomer || newCustomer.length === 0) {
-                            errors.push(`Claim ${claimNumber}: Failed to create customer`);
-                            failCount++;
-                            continue;
+
+                        if (!customerId) {
+                            const phone = `NHIMA-${nhimaNumber}`;
+                            const { data: newCustomer, error: createError } = await supabaseClient
+                                .from('customers')
+                                .insert([{
+                                    full_name: customerName || 'NHIMA Customer',
+                                    phone: phone,
+                                    customer_type: 'NHIMA',
+                                    nhima_number: nhimaNumber !== 'N/A' ? nhimaNumber : null,
+                                    created_at: new Date().toISOString()
+                                }])
+                                .select();
+
+                            if (createError || !newCustomer || newCustomer.length === 0) {
+                                errors.push(`Claim ${claimNumber}: Failed to create customer`);
+                                failCount++;
+                                continue;
+                            }
+                            customerId = newCustomer[0].id;
                         }
-                        customerId = newCustomer[0].id;
                     }
-    
+
                     const receiptNumber = `NHIMA-${new Date().getFullYear()}-${String(Math.floor(Math.random() * 10000)).padStart(4, '0')}`;
-                    
+
                     const receiptData = {
                         receipt_number: receiptNumber,
                         receipt_date: settlementDate,
@@ -1549,54 +1646,67 @@
                         status: 'Received',
                         customer_type: 'NHIMA',
                         customer_id: customerId,
-                        notes: `NHIMA Settlement - ${claimNumber} - ${customerName}${payAmount < balance ? ' (Partial)' : ''}`,
-                        nhima_claim_number: claimNumber
+                        notes: isOpeningBalance
+                            ? `NHIMA Opening Balance Settlement (pre-Sept 2026 backlog)${payAmount < balance ? ' (Partial)' : ''}`
+                            : `NHIMA Settlement - ${claimNumber} - ${customerName}${payAmount < balance ? ' (Partial)' : ''}`,
+                        nhima_claim_number: isOpeningBalance ? NHIMA_OPENING_BALANCE_REFERENCE : claimNumber
                     };
-                    if (nhimaNumber && nhimaNumber !== 'N/A') receiptData.nhima_number = nhimaNumber;
-    
+                    if (!isOpeningBalance && nhimaNumber && nhimaNumber !== 'N/A') receiptData.nhima_number = nhimaNumber;
+
                     const { data: receipt, error: receiptError } = await supabaseClient
                         .from('customer_receipts')
                         .insert([receiptData])
                         .select();
-    
+
                     if (receiptError || !receipt || receipt.length === 0) {
                         errors.push(`Claim ${claimNumber}: ${receiptError?.message || 'No receipt returned'}`);
                         failCount++;
                         continue;
                     }
-    
+
                     const receiptId = receipt[0].id;
-    
+
                     const linkData = {
                         receipt_id: receiptId,
-                        sale_id: claimId,
+                        // 🔥 the opening-balance line has no real sale --
+                        // sale_id stays null and is_opening_balance flags it,
+                        // the same convention already used for Retail/
+                        // Wholesale opening-balance payments elsewhere on
+                        // this page.
+                        sale_id: isOpeningBalance ? null : claimId,
                         amount_paid: payAmount,
                         payment_date: settlementDate,
                         payment_method: 'Bank Transfer',
                         status: payAmount >= balance ? 'paid' : 'partial',
                         customer_id: customerId,
-                        nhima_claim_number: claimNumber
+                        nhima_claim_number: isOpeningBalance ? NHIMA_OPENING_BALANCE_REFERENCE : claimNumber,
+                        is_opening_balance: isOpeningBalance
                     };
-                    if (nhimaNumber && nhimaNumber !== 'N/A') linkData.nhima_number = nhimaNumber;
-    
+                    if (!isOpeningBalance && nhimaNumber && nhimaNumber !== 'N/A') linkData.nhima_number = nhimaNumber;
+
                     const { error: linkError } = await supabaseClient
                         .from('customer_receipt_invoices')
                         .insert([linkData]);
-    
+
                     if (linkError) {
                         errors.push(`Claim ${claimNumber}: ${linkError.message}`);
                         await supabaseClient.from('customer_receipts').delete().eq('id', receiptId);
                         failCount++;
                         continue;
                     }
-    
+
                     // 🔥 FIX: only mark the claim fully 'Paid' when the
                     // pay amount actually covers the whole balance -- a
                     // partial payment leaves it as 'Partial' so it still
                     // shows up here with its remaining balance next time,
                     // matching the same convention used by the CSV bulk
-                    // settlement path above.
-                    await supabaseClient.from('sales').update({ status: payAmount >= balance ? 'Paid' : 'Partial' }).eq('id', claimId);
+                    // settlement path above. The opening-balance line has
+                    // no `sales` row to update at all -- its own remaining
+                    // balance is recomputed straight from
+                    // customer_receipt_invoices in calculateNhimaReceivables().
+                    if (!isOpeningBalance) {
+                        await supabaseClient.from('sales').update({ status: payAmount >= balance ? 'Paid' : 'Partial' }).eq('id', claimId);
+                    }
                     await createReceiptGLEntry({
                         receipt_number: receiptNumber,
                         receipt_date: settlementDate,
@@ -1716,12 +1826,19 @@
                         <tbody>
                             ${data.claimDetails.map((claim, index) => {
                                 const statusColor = claim.isSettled ? '#10b981' : '#f59e0b';
+                                // 🔥 ADDED: the aggregate pre-Sept-2026 opening-balance
+                                // line has no real sale_id (claim.saleId is null) -- give
+                                // it a distinct, stable marker via data-is-opening rather
+                                // than relying on the (null) claim-id string, and highlight
+                                // the row so it doesn't get mistaken for a normal claim.
+                                const rowBg = claim.isOpeningBalance ? 'background:#fef9e7;' : '';
                                 return `
-                                <tr style="border-bottom:1px solid #f1f5f9;${claim.isSettled ? 'opacity:0.6;' : ''}">
+                                <tr style="border-bottom:1px solid #f1f5f9;${rowBg}${claim.isSettled ? 'opacity:0.6;' : ''}">
                                     <td style="padding:8px 12px;text-align:center;">
                                         <input type="checkbox" class="nhima-claim-checkbox"
                                             data-index="${index}"
-                                            data-claim-id="${claim.saleId}"
+                                            data-claim-id="${claim.saleId || ''}"
+                                            data-is-opening="${claim.isOpeningBalance ? '1' : '0'}"
                                             data-claim-number="${claim.claimNumber}"
                                             data-amount="${claim.amount || 0}"
                                             data-balance="${claim.balance || 0}"
@@ -1730,7 +1847,7 @@
                                             ${claim.isSettled ? 'disabled' : ''}
                                             onchange="onNhimaClaimToggle(this)">
                                     </td>
-                                    <td style="padding:8px 12px;font-weight:500;">${claim.claimNumber}</td>
+                                    <td style="padding:8px 12px;font-weight:500;">${claim.claimNumber}${claim.isOpeningBalance ? ' <span style="font-size:0.7rem;color:#b45309;">(aggregate, not an itemized claim)</span>' : ''}</td>
                                     <td style="padding:8px 12px;">${claim.customerName}</td>
                                     <td style="padding:8px 12px;font-family:monospace;font-size:0.8rem;">${claim.nhimaNumber}</td>
                                     <td style="padding:8px 12px;text-align:right;">ZK ${formatNumber(claim.amount)}</td>
@@ -3173,9 +3290,10 @@
             await loadReceipts();
             await loadSales();
             await loadCustomerReceiptInvoices();
+            await loadNhimaOpeningBalance();
             renderAllTables();
         };
-    
+
         // ============================================
         // INITIALIZE
         // ============================================
@@ -3184,6 +3302,7 @@
         await loadReceipts();
         await loadSales();
         await loadCustomerReceiptInvoices();
+        await loadNhimaOpeningBalance();
         renderAllTables();
         setupCollapsibleReceivableSections();
 

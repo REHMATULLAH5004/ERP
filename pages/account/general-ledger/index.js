@@ -44,18 +44,42 @@
         }
     }
 
+    // 🔥 FIX: THE REAL BUG BEHIND "General Ledger is missing recent
+    // entries / doesn't match the real balance" -- this used a single
+    // unranged `.select()`. Supabase/PostgREST caps an unranged select at
+    // 1000 rows per request by default -- it does NOT error or warn, it
+    // just silently returns the first 1000 rows and drops the rest.
+    // Confirmed directly against the data: `journal_entries` currently
+    // has 5,099 rows -- ordered ascending by entry_date, that meant this
+    // page only ever loaded the OLDEST 1000 entries and silently
+    // truncated everything after that (i.e. most of the recent history,
+    // growing every day). This mirrors the identical 1000-row cliff
+    // already found and fixed in the Receipts, Trial Balance, Financial
+    // Statements and (this same session) Chart of Accounts pages -- pages
+    // through with `.range()` until a page comes back shorter than the
+    // page size, so this now reliably loads every journal entry
+    // regardless of how large the ledger grows.
     async function loadJournalEntries() {
         try {
-            const { data, error } = await supabaseClient
-                .from('journal_entries')
-                .select(`
-                    *,
-                    journal_lines (*)
-                `)
-                .order('entry_date', { ascending: true });
-
-            if (error) throw error;
-            state.journalEntries = data || [];
+            const pageSize = 1000;
+            let allEntries = [];
+            let from = 0;
+            while (true) {
+                const { data, error } = await supabaseClient
+                    .from('journal_entries')
+                    .select(`
+                        *,
+                        journal_lines (*)
+                    `)
+                    .order('entry_date', { ascending: true })
+                    .range(from, from + pageSize - 1);
+                if (error) throw error;
+                if (!data || data.length === 0) break;
+                allEntries = allEntries.concat(data);
+                if (data.length < pageSize) break;
+                from += pageSize;
+            }
+            state.journalEntries = allEntries;
             
             // Extract all journal lines
             state.journalLines = [];
@@ -480,4 +504,4 @@
     console.log("✅ General Ledger initialized successfully!");
     console.log(`📖 ${state.journalLines.length} journal lines loaded`);
     console.log(`📊 ${state.accounts.length} accounts loaded`);
-})();
+})();
