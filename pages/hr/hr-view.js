@@ -529,7 +529,19 @@
 
             let bg = 'white', color = '#94a3b8', border = '1px solid #e2e8f0';
 
-            if (record && record.check_in) {
+            // 🔥 FIX: THE REAL BUG BEHIND "backfilled Present days show up
+            // blank on this calendar" -- this only ever painted a day
+            // green when `record.check_in` was set, i.e. only for a real
+            // QR clock-in punch. A day marked Present administratively
+            // (no clock-in time attached -- e.g. the schedule-based
+            // attendance backfill, or any manual "mark present" edit)
+            // has a real `employee_attendance` row with status='Present'
+            // but check_in/check_out both null, so it matched NONE of
+            // the branches below and silently fell through to the plain
+            // white "unmarked" default -- even though it's a real,
+            // explicitly-recorded day. Now any non-Absent, non-Off status
+            // counts as Present too, not just an actual clock punch.
+            if (record && (record.check_in || (record.status && record.status !== 'Absent' && record.status !== 'Off'))) {
                 bg = '#22c55e'; color = 'white'; border = 'none';
             } else if (record && record.status === 'Absent') {
                 bg = '#ef4444'; color = 'white'; border = 'none';
@@ -537,7 +549,7 @@
                 bg = '#8b5cf6'; color = 'white'; border = 'none';
             } else if (holidayDates[dateStr]) {
                 bg = '#eab308'; color = 'white'; border = 'none';
-            } else if (isWeeklyOffDay(weeklyOffDay, dayOfWeek)) {
+            } else if ((record && record.status === 'Off') || isWeeklyOffDay(weeklyOffDay, dayOfWeek)) {
                 bg = '#cbd5e1'; color = 'white'; border = 'none';
             } else if (dateStr > todayStr) {
                 bg = '#f1f5f9'; color = '#94a3b8';
@@ -622,8 +634,13 @@
 
                 // 🔥 FIX: no record no longer defaults to Absent -- only
                 // an EXPLICIT status of 'Absent' counts as absent now.
+                // 🔥 FIX: same "Present without a clock-in gets dropped"
+                // bug as loadEmployeeMonthView() above -- a status of
+                // 'Present' (or Short Day / Overtime / Holiday / Holiday
+                // OT) with no check_in time used to match nothing here
+                // and print as a blank cell, undercounting presentCount.
                 let code = '', bg = 'white';
-                if (record && record.check_in) {
+                if (record && (record.check_in || (record.status && record.status !== 'Absent' && record.status !== 'Off'))) {
                     code = 'P'; bg = '#dcfce7'; presentCount++;
                 } else if (record && record.status === 'Absent') {
                     code = 'A'; bg = '#fee2e2'; absentCount++;
@@ -631,7 +648,7 @@
                     code = 'L'; bg = '#ede9fe'; leaveCount++;
                 } else if (holidayDates[dateStr]) {
                     code = 'H'; bg = '#fef9c3';
-                } else if (weeklyOff === DAY_NAMES[dayOfWeek]) {
+                } else if ((record && record.status === 'Off') || weeklyOff === DAY_NAMES[dayOfWeek]) {
                     code = 'O'; bg = '#f1f5f9';
                 } else if (dateStr > todayStr) {
                     code = ''; bg = 'white';
@@ -717,4 +734,4 @@
     await loadOutstandingAdvances();
 
     console.log("✅ HR Overview initialized successfully!");
-})();
+})();

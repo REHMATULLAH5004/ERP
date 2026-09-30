@@ -2985,7 +2985,15 @@
                         qtyInput.max = '';
                     }
 
-                    batches.forEach(b => {
+                    // 🔥 FIX (perf): same `innerHTML +=` pattern flagged
+                    // elsewhere in this file (see loadNhimaDropdown()'s
+                    // comment for the full explanation) -- batches-per-
+                    // product is normally small so this was never the main
+                    // cause of the POS hang, but building the options
+                    // string once instead of appending in a loop is free
+                    // and keeps it fast even for a product with a long
+                    // batch history.
+                    const batchOptionsHtml = batches.map(b => {
                         const expiry = new Date(b.expiry_date).toLocaleDateString();
                         const costPrice = b.cost_price || 0;
 
@@ -2994,7 +3002,7 @@
                             stockLabel = `⚠️ ${b.total_qty} units (Low Stock)`;
                         }
 
-                        batchSelect.innerHTML += `
+                        return `
                             <option value="${b.id}"
                                 data-cost="${costPrice}"
                                 data-nhima="${product.nhima_price_fixed || 0}"
@@ -3006,7 +3014,8 @@
                                 ${b.batch_number} (Exp: ${expiry}) - ${stockLabel} @ K${costPrice.toFixed(2)}
                             </option>
                         `;
-                    });
+                    }).join('');
+                    batchSelect.innerHTML += batchOptionsHtml;
 
                     if (batches.length > 0) {
                         setTimeout(() => {
@@ -3194,12 +3203,31 @@
                 is_bundle: !!p.is_bundle
             }));
 
+            // 🔥 FIX (perf): this used to append one <option> at a time via
+            // `select.innerHTML += ...` inside the loop below -- each `+=`
+            // re-serializes and re-parses EVERY option already added before
+            // it, so building a ~500-product list this way is O(n²) and
+            // visibly freezes the tab. Same root cause (and same fix) as
+            // loadNhimaDropdown()/loadPhoneDropdown() below, which are the
+            // much bigger offenders (1,200-1,300+ rows each, loaded on every
+            // POS page visit). Building the full HTML string once, in an
+            // array, and assigning innerHTML a single time produces the
+            // EXACT same markup, just without the repeated reflow.
+            const optionsHtml = products.map(p => {
+                // 🔥 ADDED: data-generic, so getSaleData() can capture the
+                // Generic Name straight off the selected option -- needed
+                // for the new A4 invoice's Generic Name column (see
+                // buildInvoiceHTML() below). Escaped for the attribute
+                // (a generic name is text content elsewhere in this file,
+                // but here it sits inside a double-quoted HTML attribute,
+                // which a literal " in the name would otherwise break).
+                const generic = (genericMap[p.generic_name_id] || '').replace(/"/g, '&quot;');
+                return `<option value="${p.id}" data-generic="${generic}">${p.product_name}${p.is_bundle ? ' 📦 (Bundle)' : ''}</option>`;
+            }).join('');
+
             selects.forEach(select => {
                 if (select) {
-                    select.innerHTML = `<option value="">Select Item</option>`;
-                    products.forEach(p => {
-                        select.innerHTML += `<option value="${p.id}">${p.product_name}${p.is_bundle ? ' 📦 (Bundle)' : ''}</option>`;
-                    });
+                    select.innerHTML = `<option value="">Select Item</option>` + optionsHtml;
                 }
             });
         } catch (e) {
@@ -3221,10 +3249,18 @@
                 await loadProductDropdowns();
             }
 
-            select.innerHTML = `<option value="">Select Item</option>`;
-            productCatalog.forEach(p => {
-                select.innerHTML += `<option value="${p.id}">${p.product_name}</option>`;
-            });
+            // 🔥 FIX (perf): build the full options string once instead of
+            // one `select.innerHTML += ...` per product -- see the matching
+            // comment in loadProductDropdowns() above. This runs every time
+            // a cashier adds a new line item to a sale, so it's worth
+            // keeping fast even though productCatalog is cached.
+            const optionsHtml = productCatalog.map(p => {
+                // 🔥 ADDED: data-generic -- see the matching comment in
+                // loadProductDropdowns() above.
+                const generic = (p.generic_name || '').replace(/"/g, '&quot;');
+                return `<option value="${p.id}" data-generic="${generic}">${p.product_name}</option>`;
+            }).join('');
+            select.innerHTML = `<option value="">Select Item</option>` + optionsHtml;
         } catch (e) {
             console.warn("Could not load products for row:", e);
         }
@@ -3436,10 +3472,20 @@
         try {
             const data = await fetchAllRows('nhima_members', 'nhima_number');
 
-            select.innerHTML = `<option value="">Select NHIMA</option>`;
-            data.forEach(m => {
-                select.innerHTML += `<option value="${m.nhima_number}">${m.nhima_number}</option>`;
-            });
+            // 🔥 FIX (perf): THE main cause of "POS hangs for a bit after
+            // opening" -- this used to append one <option> at a time via
+            // `select.innerHTML += ...`, and nhima_members already has
+            // 1,300+ rows (growing every day). Each `+=` re-serializes and
+            // re-parses EVERY option already added before it, so building
+            // this list was O(n²) -- roughly a million redundant operations
+            // at current row counts -- and froze the tab for a few seconds
+            // on every single POS visit (this runs unconditionally at
+            // init, see the Promise.all a few hundred lines up). Building
+            // the options string once, in an array, and assigning
+            // innerHTML a single time produces the EXACT same dropdown,
+            // same values, same order -- just without the repeated reflow.
+            const optionsHtml = data.map(m => `<option value="${m.nhima_number}">${m.nhima_number}</option>`).join('');
+            select.innerHTML = `<option value="">Select NHIMA</option>` + optionsHtml;
         } catch (e) {
             console.warn("Could not load NHIMA members:", e);
         }
@@ -3451,10 +3497,12 @@
         try {
             const data = await fetchAllRows('customers', 'phone');
 
-            select.innerHTML = `<option value="">Select Phone</option>`;
-            data.forEach(c => {
-                select.innerHTML += `<option value="${c.phone}">${c.phone}</option>`;
-            });
+            // 🔥 FIX (perf): same O(n²) `innerHTML +=` issue as
+            // loadNhimaDropdown() above, on the ~1,200+ row customers
+            // list -- see that comment for the full explanation. Same
+            // fix: build the options string once, assign it once.
+            const optionsHtml = data.map(c => `<option value="${c.phone}">${c.phone}</option>`).join('');
+            select.innerHTML = `<option value="">Select Phone</option>` + optionsHtml;
         } catch (e) {
             console.warn("Could not load customers:", e);
         }
@@ -4374,6 +4422,11 @@
                     items.push({
                         product_id: itemSelect.value,
                         product_name: itemSelect.options[itemSelect.selectedIndex]?.text || '',
+                        // 🔥 ADDED: for the new A4 invoice's Generic Name column
+                        // (see buildInvoiceHTML() below) -- carried on the
+                        // selected <option>'s data-generic attribute (see
+                        // loadProductDropdowns()/loadProductDropdownsForRow()).
+                        generic_name: itemSelect.options[itemSelect.selectedIndex]?.dataset.generic || '',
                         batch_id: batchSelect.value,
                         ...(isBundle ? { is_bundle: true, bundle_recipe: bundleRecipe } : {}),
                         // 🔥 FIX: this used to store the ENTIRE dropdown
@@ -5193,6 +5246,21 @@
     // Rate / Qty / Subtotal. "Pack" was dropped -- it's always "EACH"
     // for NHIMA, so printing it added nothing but width, which matters
     // a lot on a narrow receipt.
+    // 🔥 CHANGED (thermal 80mm receipt -> A4 sheet): by request, now that
+    // retail is printing on A4 paper instead of a thermal receipt roll.
+    // Restyled after the same black-and-white, print-friendly A4 table
+    // layout already proven out for wholesale's invoice (see
+    // buildWholesaleCopyHTML() in wholesale/index.js -- doc-header /
+    // doc-title-row / info-row / table structure, same CSS class names,
+    // same "pure black instead of a color" choice so a monochrome printer
+    // never dithers a fill into a muddy grey), adapted for retail's own
+    // columns: Item Name / Generic Name / Batch Number (Expiry Date) /
+    // Pack Size / Qty / Rate / Total / Days Supply / Dosage -- exactly the
+    // set requested, in that order. Pack Size doesn't need any special
+    // handling here to come out as "EACH" for NHIMA vs the saved value for
+    // everyone else -- updateRowRate() already sets item.pack_size that
+    // way at the point of sale (NHIMA always 'EACH', others get the
+    // batch's real pack size), so this just prints whatever was saved.
     function buildInvoiceHTML(saleData) {
         // 🔥 FIX: this used to always say "Invoice #:" even for a
         // quotation, which made no sense on a document that isn't an
@@ -5218,99 +5286,109 @@
                 <title>${companySettings.company_name} - ${docLabel} ${saleData.sale_id}</title>
                 <style>
                     * { box-sizing: border-box; }
-                    /* 🔥 FIX: printed on the real thermal printer, everything
-                       that wasn't already bold came out faint/hard to read --
-                       bold text has extra "weight" (thicker strokes), which is
-                       what actually shows up clearly on a thermal head; a
-                       normal-weight (400) character has thin strokes that
-                       print light no matter the font size. Fix: raise the
-                       BASELINE weight for the whole receipt to 600 (semibold)
-                       here on <body>, so everything inherits it unless
-                       overridden -- the item name, section headers, and grand
-                       total stay at 700/800 so they still stand out as
-                       clearly heavier than the rest, but nothing on the page
-                       is left at the too-thin default 400 anymore. */
-                    body { font-family: 'Courier New', Courier, monospace; padding: 10px; margin: 0; font-size: 11px; font-weight: 600; color: #000; }
-                    .header { text-align: center; border-bottom: 2px solid #000; padding-bottom: 6px; margin-bottom: 8px; }
-                    .header h1 { margin: 0; font-size: 15px; font-weight: 800; letter-spacing: 0.02em; }
-                    .header p { margin: 2px 0; font-size: 10.5px; }
-                    .doc-type-badge { display: inline-block; margin-top: 6px; padding: 2px 10px; border: 1px solid #000; font-size: 10px; font-weight: 800; }
-                    .meta-row { margin-bottom: 6px; font-size: 11px; }
-                    .meta-row div { margin: 1px 0; }
-                    .customer-info { margin-bottom: 8px; padding-bottom: 6px; border-bottom: 1px dashed #000; font-size: 11px; }
-                    .customer-info div { margin: 1px 0; }
-                    /* 🔥 CHANGED: the old layout packed # / Item / Batch /
-                       Tax% / Days / Rate / Qty / Subtotal into ONE fixed-width
-                       table row -- fine for a wide printer, but on an 80mm
-                       receipt each column got so narrow that the item name
-                       (usually the longest text on the line) wrapped onto 4-5
-                       lines and the whole thing read as a wall of squeezed
-                       text (confirmed from a real printed sample). Now each
-                       item gets its own block: the full-width item name on
-                       its own line first, then a second line with the batch
-                       and expiry, then a third line with the remaining stats
-                       (tax/days/rate/qty) on the left and the subtotal on the
-                       right. No column ever has to share its width with the
-                       item name, so nothing needs to wrap. */
-                    .items-list { margin-bottom: 8px; }
-                    .items-header { display: flex; justify-content: space-between; font-size: 10.5px; font-weight: 800; border-bottom: 2px solid #000; padding-bottom: 3px; margin-bottom: 2px; }
-                    .item-block { padding: 5px 0; border-bottom: 1px dashed #000; }
-                    .item-block:last-child { border-bottom: 1px solid #000; }
-                    .item-name { font-size: 11px; font-weight: 700; margin-bottom: 2px; word-wrap: break-word; }
-                    .item-batch { font-size: 10.5px; margin-bottom: 2px; color: #000; }
-                    .item-stats { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: baseline; font-size: 10.5px; gap: 2px 10px; }
-                    .item-stats .stat-group { display: flex; gap: 8px; flex-wrap: wrap; }
-                    .item-stats .item-subtotal { font-weight: 800; font-size: 11px; white-space: nowrap; }
-                    .totals { margin-top: 6px; padding-top: 6px; border-top: 1px dashed #000; font-size: 10.5px; }
-                    .totals-row { display: flex; justify-content: space-between; margin: 2px 0; }
-                    .grand-total { font-size: 13px; font-weight: 800; border-top: 1px solid #000; margin-top: 4px; padding-top: 4px; }
-                    .footer { text-align: center; margin-top: 12px; padding-top: 8px; border-top: 1px dashed #000; font-size: 10.5px; }
-                    @media print { @page { margin: 0; } body { padding: 6mm; } }
+                    body { font-family: Arial, Helvetica, sans-serif; padding: 30px; max-width: 800px; margin: 0 auto; color: #1e293b; }
+
+                    .doc-header { border-bottom: 3px solid #000000; padding-bottom: 14px; margin-bottom: 14px; }
+                    .company-block h1 { margin: 0; color: #000000; font-size: 1.4rem; letter-spacing: 0.02em; }
+                    .company-block p { margin: 3px 0 0; color: #64748b; font-size: 0.85rem; }
+
+                    .doc-title-row { margin-bottom: 16px; }
+                    .doc-title { font-size: 2rem; font-weight: 800; color: #000000; letter-spacing: 0.03em; }
+                    .quotation-badge { display: inline-block; background: #000000; color: white; padding: 3px 14px; border-radius: 10px; font-weight: bold; font-size: 0.8rem; margin-left: 12px; vertical-align: middle; }
+
+                    .info-row { display: flex; justify-content: space-between; gap: 20px; margin-bottom: 20px; }
+                    .info-box { background: #f1f5f9; border-radius: 6px; padding: 12px 16px; font-size: 0.85rem; line-height: 1.7; flex: 1; }
+                    .bill-to { text-align: right; font-size: 0.85rem; line-height: 1.6; flex: 1; }
+
+                    table { width: 100%; border-collapse: collapse; margin-bottom: 20px; font-size: 0.78rem; }
+                    th { background: #000000; color: white; padding: 8px 6px; text-align: left; font-weight: 600; }
+                    th.text-right { text-align: right; }
+                    th.text-center { text-align: center; }
+                    td { padding: 8px 6px; border-bottom: 1px solid #e2e8f0; vertical-align: top; }
+                    tbody tr:nth-child(even) { background: #f8fafc; }
+                    .text-right { text-align: right; }
+                    .text-center { text-align: center; }
+
+                    .totals-box { max-width: 300px; margin-left: auto; margin-bottom: 24px; }
+                    .totals-row { display: flex; justify-content: space-between; padding: 6px 12px; font-size: 0.9rem; }
+                    .totals-row.grand { background: #000000; color: white; font-weight: bold; font-size: 1rem; border-radius: 4px; margin-top: 4px; }
+
+                    .footer-note { border-top: 1px solid #e2e8f0; padding-top: 16px; font-size: 0.85rem; color: #334155; text-align: center; }
+                    .footer-note p { margin: 0 0 6px; line-height: 1.6; }
+
+                    @media print { @page { size: A4; margin: 12mm; } body { margin: 0; padding: 0; max-width: none; } }
                 </style>
             </head>
             <body>
-                <div class="header">
-                    <h1>${companySettings.company_name}</h1>
-                    <p>${companySettings.address}</p>
-                    <p>Phone: ${companySettings.phone} | ZAMRA: ${companySettings.zamra_number}</p>
-                    <div class="doc-type-badge">${isQuotation ? 'QUOTATION -- NOT A TAX INVOICE' : 'TAX INVOICE'}</div>
+                <div class="doc-header">
+                    <div class="company-block">
+                        <h1>${companySettings.company_name}</h1>
+                        <p>${companySettings.address}</p>
+                        <p>Phone: ${companySettings.phone} | ZAMRA: ${companySettings.zamra_number}</p>
+                    </div>
                 </div>
-                <div class="meta-row">
-                    <div><strong>${docLabel} #:</strong> ${saleData.sale_id}</div>
-                    <div><strong>Date:</strong> ${saleData.date}</div>
-                    ${!isQuotation ? `<div><strong>Payment:</strong> ${saleData.payment.type}</div>` : ''}
+
+                <div class="doc-title-row">
+                    <div class="doc-title">
+                        ${docLabel.toUpperCase()}
+                        ${isQuotation ? '<span class="quotation-badge">QUOTATION</span>' : ''}
+                    </div>
                 </div>
-                <div class="customer-info">
-                    <div><strong>Customer:</strong> ${saleData.customer.full_name || 'N/A'}</div>
-                    <div><strong>Phone:</strong> ${saleData.customer.phone || 'N/A'}</div>
-                    <div><strong>Address:</strong> ${saleData.customer.address || 'N/A'}</div>
-                    ${saleData.customer.nhima_number ? `<div><strong>NHIMA #:</strong> ${saleData.customer.nhima_number}</div>` : ''}
-                    ${saleData.customer.nrc ? `<div><strong>NRC:</strong> ${saleData.customer.nrc}</div>` : ''}
+
+                <div class="info-row">
+                    <div class="info-box">
+                        <div><strong>${docLabel} #:</strong> ${saleData.sale_id}</div>
+                        <div><strong>Date:</strong> ${saleData.date}</div>
+                        ${!isQuotation ? `<div><strong>Payment:</strong> ${saleData.payment.type}</div>` : ''}
+                    </div>
+                    <div class="bill-to">
+                        <strong>CUSTOMER:</strong><br>
+                        <strong>${saleData.customer.full_name || 'N/A'}</strong><br>
+                        ${saleData.customer.phone ? `Phone: ${saleData.customer.phone}<br>` : ''}
+                        ${saleData.customer.address || ''}<br>
+                        ${saleData.customer.nhima_number ? `NHIMA #: ${saleData.customer.nhima_number}<br>` : ''}
+                        ${saleData.customer.nrc ? `NRC: ${saleData.customer.nrc}` : ''}
+                    </div>
                 </div>
-                <div class="items-list">
-                    <div class="items-header"><span>ITEMS</span><span>SUBTOTAL</span></div>
-                    ${saleData.items.map((item, index) => `
-                        <div class="item-block">
-                            <div class="item-name">${index + 1}. ${item.product_name}</div>
-                            <div class="item-batch">Batch: ${cleanBatchDisplay(item.batch_number)}${item.expiry ? ` (Exp: ${item.expiry})` : ''}</div>
-                            <div class="item-stats">
-                                <span class="stat-group">
-                                    <span>Tax ${item.tax_rate}%</span>
-                                    <span>Days ${item.days_supplied || 0}</span>
-                                    <span>Rate K${item.rate.toFixed(2)}</span>
-                                    <span>Qty ${item.qty}</span>
-                                </span>
-                                <span class="item-subtotal">K${item.total.toFixed(2)}</span>
-                            </div>
-                        </div>
-                    `).join('')}
+
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Item Name</th>
+                            <th>Generic Name</th>
+                            <th>Batch Number (Expiry Date)</th>
+                            <th class="text-center">Pack Size</th>
+                            <th class="text-center">Qty</th>
+                            <th class="text-right">Rate</th>
+                            <th class="text-right">Total</th>
+                            <th class="text-center">Days Supply</th>
+                            <th>Dosage</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        ${saleData.items.map(item => `
+                            <tr>
+                                <td>${item.product_name}</td>
+                                <td>${item.generic_name || '-'}</td>
+                                <td>${cleanBatchDisplay(item.batch_number)}${item.expiry ? ` (${item.expiry})` : ''}</td>
+                                <td class="text-center">${item.pack_size}</td>
+                                <td class="text-center">${item.qty}</td>
+                                <td class="text-right">K${item.rate.toFixed(2)}</td>
+                                <td class="text-right">K${item.total.toFixed(2)}</td>
+                                <td class="text-center">${item.days_supplied || 0}</td>
+                                <td>${item.how_to_take || 'As directed'}</td>
+                            </tr>
+                        `).join('')}
+                    </tbody>
+                </table>
+
+                <div class="totals-box">
+                    <div class="totals-row"><span>Subtotal (Excl. Tax)</span><span>K${saleData.totals.subtotal.toFixed(2)}</span></div>
+                    <div class="totals-row"><span>Total Tax</span><span>K${saleData.totals.tax.toFixed(2)}</span></div>
+                    <div class="totals-row grand"><span>GRAND TOTAL</span><span>K${saleData.totals.grand_total.toFixed(2)}</span></div>
                 </div>
-                <div class="totals">
-                    <div class="totals-row"><span>Subtotal (Excl. Tax):</span><span>K${saleData.totals.subtotal.toFixed(2)}</span></div>
-                    <div class="totals-row"><span>Total Tax:</span><span>K${saleData.totals.tax.toFixed(2)}</span></div>
-                    <div class="totals-row grand-total"><span>GRAND TOTAL:</span><span>K${saleData.totals.grand_total.toFixed(2)}</span></div>
-                </div>
-                <div class="footer">
+
+                <div class="footer-note">
                     ${isQuotation
                         ? `<p>This is a quotation only and does not constitute a tax invoice.</p><p>Prices are valid at the time of issue and may change.</p>`
                         : `<p>Thank you for your business!</p><p>This is a computer-generated invoice.</p>`
@@ -5367,17 +5445,57 @@
         doc.close();
     }
 
-    function printSale() {
+    // 🔥 ADDED: backfill Generic Name for older sales -- mirrors
+    // wholesale/index.js's enrichItemsForDeliveryNote(). A sale saved
+    // before this A4 invoice change has items with no generic_name at all
+    // (it's a brand-new field, captured straight from getSaleData() only
+    // from now on), so reprinting an old invoice would otherwise show a
+    // blank Generic Name column for every line. This looks the product up
+    // live and fills it in; a no-op for any sale that already has it.
+    async function enrichItemsForPrint(items) {
+        const productIds = [...new Set((items || []).map(i => i.product_id).filter(Boolean))];
+        if (productIds.length === 0) return items;
+
+        try {
+            const { data: products } = await supabaseClient
+                .from('products').select('id, generic_name_id').in('id', productIds);
+            const genericIds = [...new Set((products || []).map(p => p.generic_name_id).filter(Boolean))];
+            let genericMap = {};
+            if (genericIds.length > 0) {
+                const { data: generics } = await supabaseClient
+                    .from('generic_names').select('id, name').in('id', genericIds);
+                (generics || []).forEach(g => { genericMap[g.id] = g.name; });
+            }
+            const genericByProduct = {};
+            (products || []).forEach(p => { genericByProduct[p.id] = genericMap[p.generic_name_id] || ''; });
+
+            return (items || []).map(item => ({
+                ...item,
+                generic_name: item.generic_name || genericByProduct[item.product_id] || ''
+            }));
+        } catch (e) {
+            console.warn('Could not backfill generic names for print:', e);
+            return items;
+        }
+    }
+
+    async function printSale() {
         const saleData = window.currentPrintData || currentSaleData;
         if (!saleData) {
             alert('No sale data to print.');
             return;
         }
+        // Only awaits the lookup when actually needed -- a brand-new sale
+        // already has generic_name on every item from getSaleData(), so
+        // the normal case skips this fetch entirely.
+        if ((saleData.items || []).some(i => !i.generic_name)) {
+            saleData.items = await enrichItemsForPrint(saleData.items);
+        }
         printHTMLViaHiddenFrame(buildInvoiceHTML(saleData));
     }
 
 
-    function pdfSale() {
+    async function pdfSale() {
         // "Save as PDF" is just a destination choice inside the same OS
         // print dialog -- same hidden-iframe path as printSale(), no
         // separate window needed here either.
@@ -5385,6 +5503,9 @@
         if (!saleData) {
             alert('No sale data to generate PDF.');
             return;
+        }
+        if ((saleData.items || []).some(i => !i.generic_name)) {
+            saleData.items = await enrichItemsForPrint(saleData.items);
         }
         printHTMLViaHiddenFrame(buildInvoiceHTML(saleData));
     }
@@ -6071,18 +6192,22 @@
 
         async function loadStockTakeProductDropdown(select) {
             if (!select) return;
-            select.innerHTML = `<option value="">Select Product</option>`;
             try {
                 const { data: products, error } = await supabaseClient
                     .from('products')
                     .select('id, product_name, sku')
                     .order('product_name', { ascending: true });
                 if (error) throw error;
-                (products || []).forEach(p => {
-                    select.innerHTML += `<option value="${p.id}">${p.product_name} (${p.sku || 'N/A'})</option>`;
-                });
+                // 🔥 FIX (perf): same `innerHTML +=` pattern flagged
+                // elsewhere in this file (see loadNhimaDropdown()'s
+                // comment for the full explanation) -- builds the full
+                // ~500-product options string once instead of appending
+                // one option at a time.
+                const optionsHtml = (products || []).map(p => `<option value="${p.id}">${p.product_name} (${p.sku || 'N/A'})</option>`).join('');
+                select.innerHTML = `<option value="">Select Product</option>` + optionsHtml;
             } catch (e) {
                 console.error('Error loading products for stock take:', e);
+                select.innerHTML = `<option value="">Select Product</option>`;
             }
         }
 

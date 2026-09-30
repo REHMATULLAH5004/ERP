@@ -1,10 +1,18 @@
 <div class="module-view-container" id="crmRegisterContainer" data-init="false">
 
+    <!-- 🔥 MOVED: "Patient Sales Lookup" now lives in the sidebar
+         (pages/crm/crm-menu.html) instead of here -- it's a general
+         lookup tool ("check any patient, registered today or not"),
+         genuinely independent of the registration form below, so it no
+         longer needs to compete for space in the main registration
+         page. See crmSidebarLookup* in crm-view.js. -->
+
     <div style="display: grid; grid-template-columns: 1.1fr 0.9fr; gap: 20px; align-items: start;">
 
         <!-- ============================= -->
-        <!-- LEFT: REGISTRATION FORM       -->
+        <!-- LEFT: REGISTRATION FORM + HISTORY -->
         <!-- ============================= -->
+        <div>
         <!-- 🔥 CHANGED: CRM registration is NHIMA-only now -- the earlier
              "Cash / Regular Patient" and "NRC Patient" tabs are gone, this
              is a single-purpose form. It still creates (or reuses) the
@@ -79,11 +87,50 @@
                     <label for="qregPriority" style="margin:0; cursor:pointer; font-weight:600; color:#9a3412;"><i class="fa-solid fa-star" style="color:#f59e0b;"></i> Priority patient -- call next, ahead of the line</label>
                 </div>
 
+                <!-- 🔥 ADDED: requires NHIMA authorization -- some medicines
+                     (mostly higher-cost/oncology items) need NHIMA to
+                     confirm an authorization code before the claim is
+                     valid. Previously the patient's token joined the
+                     normal queue anyway, so their number could come up
+                     for billing before authorization was confirmed --
+                     staff had to send them to "no show"/pending and call
+                     them back later once it came through. Checking this
+                     box instead creates the token in a separate
+                     "Awaiting NHIMA Authorization" hold (see the card
+                     below the queue) -- it does NOT enter the waiting
+                     line at all until someone confirms the code there,
+                     at which point it's pushed into the real queue. -->
+                <div class="form-group" style="display:flex; align-items:center; gap:8px; background:#fef2f2; border:1px solid #fecaca; border-radius:8px; padding:10px 12px;">
+                    <input type="checkbox" id="qregRequiresAuth" style="width:16px; height:16px; margin:0; cursor:pointer;">
+                    <label for="qregRequiresAuth" style="margin:0; cursor:pointer; font-weight:600; color:#991b1b;"><i class="fa-solid fa-lock"></i> Requires NHIMA authorization -- hold token until confirmed</label>
+                </div>
+
                 <button type="submit" id="qregSubmitBtn" class="btn btn-primary" style="width:100%; justify-content:center; padding:12px;">
                     <i class="fa-solid fa-ticket"></i> Register &amp; Issue Token
                 </button>
                 <div id="qregFormError" style="display:none; margin-top:10px; padding:10px 12px; background:#fef2f2; color:#dc2626; border-radius:6px; font-size:0.85rem;"></div>
             </form>
+        </div>
+
+        <!-- ============================= -->
+        <!-- 🔥 ADDED: PATIENT HISTORY      -->
+        <!-- ============================= -->
+        <!-- Appears once an existing patient is picked from the NRC-match
+             dropdown above (ensurePatientCustomer's selectedCustomerId).
+             Shows their past NHIMA sales so staff can see -- right here
+             during registration, before a token is even issued -- if the
+             patient still has medicine left from last time and isn't
+             actually due yet. See loadPatientHistory() in crm-view.js. -->
+        <div class="card" id="qregHistoryCard" style="padding: 16px 20px; margin-top:16px; display:none;">
+            <strong><i class="fa-solid fa-clock-rotate-left" style="color:#2563eb;"></i> Patient History</strong>
+            <div id="qregHistoryBanner" style="display:none; margin-top:10px; padding:10px 12px; border-radius:6px; font-size:0.85rem; font-weight:600;"></div>
+            <div id="qregHistoryList" style="margin-top:10px;"></div>
+            <!-- 🔥 ADDED: shows the last 5 sales by default (loadPatientHistoryInto()
+                 in crm-view.js fetches 6 to detect whether there's more); this
+                 button only appears when there actually is more, and loads the
+                 complete history on click. -->
+            <button type="button" id="qregHistoryMoreBtn" class="btn btn-outline btn-sm" style="display:none; margin-top:10px;"><i class="fa-solid fa-clock-rotate-left"></i> View Full History</button>
+        </div>
         </div>
 
         <!-- ============================= -->
@@ -117,6 +164,23 @@
                     <p class="helper-text" style="padding:16px;">Nothing yet today.</p>
                 </div>
             </div>
+        </div>
+    </div>
+
+    <!-- ============================= -->
+    <!-- 🔥 ADDED: AWAITING NHIMA AUTHORIZATION -->
+    <!-- ============================= -->
+    <!-- Tokens registered with "Requires NHIMA authorization" checked --
+         held here, OUT of the real queue, until staff confirm the code
+         came through. Confirming pushes the ticket into waiting_billing
+         (optionally as priority) via confirm_ticket_authorization() --
+         see confirmAuthorization() in crm-view.js. -->
+    <div class="card" style="padding:0; margin-top:20px;">
+        <div style="padding: 12px 20px; border-bottom: 1px solid #e8edf3;">
+            <strong><i class="fa-solid fa-lock" style="color:#dc2626;"></i> Awaiting NHIMA Authorization -- Not Yet In Queue</strong>
+        </div>
+        <div id="qregAuthHoldList" style="max-height: 260px; overflow-y:auto;">
+            <p class="helper-text" style="padding:16px;">No tokens are on hold for authorization right now.</p>
         </div>
     </div>
 

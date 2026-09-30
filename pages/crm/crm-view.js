@@ -44,6 +44,19 @@
         return;
     }
 
+    // 🔥 ADDED: small HTML-escaping helper used by the Patient History /
+    // Patient Sales Lookup renderers below, since patient names, claim
+    // numbers etc. are untrusted data being interpolated into innerHTML.
+    function escapeHtml(str) {
+        if (str === null || str === undefined) return '';
+        return String(str)
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;');
+    }
+
     // 🔥 ADDED: withAuthRetry -- same stale-session gap fixed in the Admin
     // Clients page and already present in Retail POS/Payments/Purchase/
     // Dashboard. ensurePatientCustomer() below writes straight to
@@ -97,9 +110,37 @@
     const newBtn = document.getElementById('qregNewBtn');
 
     const priorityCheckbox = document.getElementById('qregPriority');
+    // 🔥 ADDED: "Requires NHIMA authorization" checkbox -- see submit
+    // handler and loadAuthHold()/confirmAuthorization() below.
+    const requiresAuthCheckbox = document.getElementById('qregRequiresAuth');
 
     const recentList = document.getElementById('qregRecentList');
     const pendingList = document.getElementById('qregPendingList');
+    const authHoldList = document.getElementById('qregAuthHoldList');
+
+    // 🔥 ADDED: Patient History panel (registration side) -- shown once
+    // an existing patient is picked from the NRC-match dropdown below.
+    const historyCard = document.getElementById('qregHistoryCard');
+    const historyBanner = document.getElementById('qregHistoryBanner');
+    const historyList = document.getElementById('qregHistoryList');
+    const historyMoreBtn = document.getElementById('qregHistoryMoreBtn');
+
+    // 🔥 ADDED: Patient Sales Lookup now lives in the sidebar (see
+    // crm-menu.html) -- a general "check any patient" tool, deliberately
+    // NOT tied to the registration form (searching here doesn't touch
+    // selectedCustomerId or anything else the form uses). These come
+    // from a SEPARATE fetch (loadModule() in app.js loads crm-menu.html
+    // and crm-view.html/js independently, same pattern the Dashboard
+    // sidebar already relies on), so they can in principle not exist yet
+    // when this script first runs -- every use below is null-guarded.
+    const sidebarLookupInput = document.getElementById('crmSidebarLookupSearch');
+    const sidebarLookupBtn = document.getElementById('crmSidebarLookupBtn');
+    const sidebarLookupResults = document.getElementById('crmSidebarLookupResults');
+    const sidebarLookupHistoryWrap = document.getElementById('crmSidebarLookupHistoryWrap');
+    const sidebarLookupName = document.getElementById('crmSidebarLookupName');
+    const sidebarLookupBanner = document.getElementById('crmSidebarLookupBanner');
+    const sidebarLookupHistory = document.getElementById('crmSidebarLookupHistory');
+    const sidebarLookupMoreBtn = document.getElementById('crmSidebarLookupMoreBtn');
 
     let lastIssuedTicket = null;
 
@@ -224,6 +265,7 @@
     let nrcLookupTimer = null;
     nrcInput.addEventListener('input', function () {
         selectedCustomerId = null;
+        hidePatientHistory(); // 🔥 ADDED: stale history shouldn't linger once the NRC changes
         clearTimeout(nrcLookupTimer);
         nrcLookupTimer = setTimeout(checkNrcMatch, 400);
     });
@@ -285,6 +327,7 @@
             nrcMatchHint.textContent = 'New patient -- a record will be created.';
             nrcMatchHint.style.color = '#64748b';
             nrcMatchHint.style.display = 'block';
+            hidePatientHistory(); // 🔥 ADDED
             return;
         }
 
@@ -304,7 +347,210 @@
         nrcMatchHint.textContent = '✓ Existing patient loaded -- editing their record.';
         nrcMatchHint.style.color = '#059669';
         nrcMatchHint.style.display = 'block';
+        // 🔥 ADDED: show this patient's sale history right away -- this is
+        // the moment staff can see they aren't due for a refill yet.
+        loadPatientHistory(match.id, match.full_name);
     });
+
+    // ============================================
+    // 🔥 ADDED: PATIENT HISTORY (shown once an existing patient is
+    // selected above). Pulls their past NHIMA sales and flags whether
+    // they still have supply left from the last collection, using each
+    // sale item's `days_supplied` (the same field Retail POS records at
+    // sale time) to estimate when they're actually due back.
+    // ============================================
+    function hidePatientHistory() {
+        historyCard.style.display = 'none';
+        historyBanner.style.display = 'none';
+        historyList.innerHTML = '';
+        if (historyMoreBtn) historyMoreBtn.style.display = 'none';
+    }
+
+    function fmtDate(d) {
+        return d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
+    }
+
+    // 🔥 ADDED: the "still has supply / due" check, factored out so both
+    // the full-width and compact sales tables share the exact same
+    // due-date math instead of duplicating (and risking drifting from)
+    // it. Returns null when there's nothing to flag (no days_supplied on
+    // record for the most recent sale).
+    function computeDueBanner(sales) {
+        if (!sales || sales.length === 0) return null;
+        const mostRecent = sales[0];
+        const items = mostRecent.items || [];
+        let maxDays = 0;
+        items.forEach(it => {
+            const d = Number(it.days_supplied) || 0;
+            if (d > maxDays) maxDays = d;
+        });
+        if (maxDays <= 0) return null;
+
+        const saleDate = new Date(mostRecent.created_at);
+        const dueDate = new Date(saleDate);
+        dueDate.setDate(dueDate.getDate() + maxDays);
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+        const dueDateOnly = new Date(dueDate);
+        dueDateOnly.setHours(0, 0, 0, 0);
+
+        if (dueDateOnly > today) {
+            const daysEarly = Math.round((dueDateOnly - today) / 86400000);
+            return {
+                bg: '#fef2f2',
+                color: '#991b1b',
+                html: `<i class="fa-solid fa-triangle-exclamation"></i> Still has supply from ${fmtDate(saleDate)} (${maxDays}-day supply) -- not due until ${fmtDate(dueDate)}, about ${daysEarly} day(s) early.`
+            };
+        }
+        return {
+            bg: '#ecfdf5',
+            color: '#065f46',
+            html: `<i class="fa-solid fa-circle-check"></i> Due -- last supply (from ${fmtDate(saleDate)}, ${maxDays}-day supply) should be finished by ${fmtDate(dueDate)}.`
+        };
+    }
+
+    function applyDueBanner(sales, bannerEl) {
+        if (!bannerEl) return;
+        const banner = computeDueBanner(sales);
+        if (!banner) { bannerEl.style.display = 'none'; return; }
+        bannerEl.style.background = banner.bg;
+        bannerEl.style.color = banner.color;
+        bannerEl.innerHTML = banner.html;
+        bannerEl.style.display = 'block';
+    }
+
+    // 🔥 CHANGED: was a stack of <div>s -- switched to a real <table> so
+    // date / items / total actually line up in columns instead of
+    // reading as loose blocks of text. Shared by the registration-side
+    // Patient History card AND the sidebar Patient Sales Lookup;
+    // `compact` drops the Claim # column and shortens the item list for
+    // the 220px sidebar, where the full table wraps badly.
+    function buildSalesTable(sales, opts) {
+        opts = opts || {};
+        const compact = !!opts.compact;
+        const cellPad = compact ? '5px 6px' : '8px 10px';
+        const fontSize = compact ? '0.72rem' : '0.82rem';
+        const headFontSize = compact ? '0.6rem' : '0.68rem';
+
+        const headCols = compact
+            ? `<th style="padding:${cellPad}; text-align:left;">Date</th><th style="padding:${cellPad}; text-align:left;">Items</th><th style="padding:${cellPad}; text-align:right;">Total</th>`
+            : `<th style="padding:${cellPad}; text-align:left;">Date</th><th style="padding:${cellPad}; text-align:left;">Claim #</th><th style="padding:${cellPad}; text-align:left;">Items</th><th style="padding:${cellPad}; text-align:right;">Total</th>`;
+
+        const rows = sales.map((s, i) => {
+            const items = s.items || [];
+            let itemsText;
+            if (compact) {
+                const names = items.map(it => it.product_name).filter(Boolean);
+                itemsText = names.slice(0, 2).join(', ') + (names.length > 2 ? ` +${names.length - 2} more` : '');
+            } else {
+                itemsText = items.map(it => `${it.product_name} x${it.qty}${it.days_supplied ? ` (${it.days_supplied}d)` : ''}`).join(', ');
+            }
+            const rowBg = i % 2 === 1 ? 'background:#f8fafc;' : '';
+            return `
+                <tr style="${rowBg} border-bottom:1px solid #f1f5f9;">
+                    <td style="padding:${cellPad}; white-space:nowrap; vertical-align:top; color:#0f172a; font-weight:600;">${fmtDate(new Date(s.created_at))}</td>
+                    ${compact ? '' : `<td style="padding:${cellPad}; white-space:nowrap; vertical-align:top; color:#64748b;">${escapeHtml(s.claim_number || '-')}</td>`}
+                    <td style="padding:${cellPad}; vertical-align:top; color:#475569;">${escapeHtml(itemsText || '-')}</td>
+                    <td style="padding:${cellPad}; text-align:right; white-space:nowrap; vertical-align:top; font-weight:600; color:#0f172a;">ZK ${Number(s.grand_total || 0).toFixed(2)}</td>
+                </tr>`;
+        }).join('');
+
+        return `
+        <div style="overflow-x:auto; border:1px solid #e8edf3; border-radius:8px;">
+            <table style="width:100%; border-collapse:collapse; font-size:${fontSize};">
+                <thead>
+                    <tr style="background:#f8fafc; border-bottom:2px solid #e2e8f0; color:#64748b; text-transform:uppercase; letter-spacing:0.03em; font-size:${headFontSize};">
+                        ${headCols}
+                    </tr>
+                </thead>
+                <tbody>${rows}</tbody>
+            </table>
+        </div>`;
+    }
+
+    async function fetchCustomerSales(customerId, limit) {
+        const { data, error } = await supabaseClient
+            .from('sales')
+            .select('id, sale_id, claim_number, created_at, items, grand_total')
+            .eq('customer_id', customerId)
+            .eq('client_sub_type', 'NHIMA')
+            .order('created_at', { ascending: false })
+            .limit(limit || 10);
+        if (error) throw error;
+        return data || [];
+    }
+
+    // 🔥 ADDED: shows the last DEFAULT_HISTORY_LIMIT sales by default,
+    // with a "View Full History" button that appears ONLY when there
+    // actually are more (fetches one extra row up front to find out,
+    // rather than guessing) and, on click, reloads with FULL_HISTORY_LIMIT
+    // instead. Shared by the registration Patient History card and the
+    // sidebar Patient Sales Lookup -- pass `compact: true` for the
+    // narrower sidebar table.
+    const DEFAULT_HISTORY_LIMIT = 5;
+    const FULL_HISTORY_LIMIT = 200;
+
+    async function loadPatientHistoryInto(customerId, refs) {
+        const { listEl, bannerEl, moreBtnEl, nameEl, patientName, compact, emptyText } = refs;
+        if (!listEl) return;
+
+        if (nameEl) {
+            nameEl.textContent = patientName || '';
+            nameEl.style.display = patientName ? 'block' : 'none';
+        }
+        listEl.innerHTML = `<p class="helper-text" style="${compact ? 'font-size:0.75rem;' : ''} padding:4px 0;"><i class="fa-solid fa-spinner fa-spin"></i> Loading...</p>`;
+        if (bannerEl) bannerEl.style.display = 'none';
+        if (moreBtnEl) moreBtnEl.style.display = 'none';
+
+        try {
+            // Fetch one row past the default limit purely to detect
+            // "is there more" -- the extra row itself is never shown.
+            const sales = await fetchCustomerSales(customerId, DEFAULT_HISTORY_LIMIT + 1);
+            applyDueBanner(sales, bannerEl);
+
+            if (!sales.length) {
+                listEl.innerHTML = `<p class="helper-text" style="${compact ? 'font-size:0.75rem;' : ''} padding:4px 0;">${emptyText || 'No past NHIMA sales on file for this patient.'}</p>`;
+                return;
+            }
+
+            const hasMore = sales.length > DEFAULT_HISTORY_LIMIT;
+            const shown = hasMore ? sales.slice(0, DEFAULT_HISTORY_LIMIT) : sales;
+            listEl.innerHTML = buildSalesTable(shown, { compact });
+
+            if (moreBtnEl && hasMore) {
+                moreBtnEl.style.display = compact ? 'flex' : 'inline-flex';
+                moreBtnEl.disabled = false;
+                moreBtnEl.innerHTML = '<i class="fa-solid fa-clock-rotate-left"></i> View Full History';
+                moreBtnEl.onclick = async () => {
+                    moreBtnEl.disabled = true;
+                    moreBtnEl.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Loading full history...';
+                    try {
+                        const allSales = await fetchCustomerSales(customerId, FULL_HISTORY_LIMIT);
+                        listEl.innerHTML = buildSalesTable(allSales, { compact });
+                        moreBtnEl.style.display = 'none';
+                    } catch (err) {
+                        console.error('Error loading full patient history:', err);
+                        moreBtnEl.disabled = false;
+                        moreBtnEl.innerHTML = '<i class="fa-solid fa-clock-rotate-left"></i> View Full History';
+                    }
+                };
+            }
+        } catch (e) {
+            console.error('Error loading patient history:', e);
+            listEl.innerHTML = `<p class="helper-text" style="${compact ? 'font-size:0.75rem;' : ''} padding:4px 0; color:#dc2626;">Could not load history.</p>`;
+        }
+    }
+
+    async function loadPatientHistory(customerId, patientName) {
+        if (!customerId) { hidePatientHistory(); return; }
+        historyCard.style.display = 'block';
+        await loadPatientHistoryInto(customerId, {
+            listEl: historyList,
+            bannerEl: historyBanner,
+            moreBtnEl: historyMoreBtn,
+            compact: false
+        });
+    }
 
     // ============================================
     // FIND-OR-CREATE CUSTOMER
@@ -471,7 +717,13 @@
                 // submit button -- call_next_ticket() (database side)
                 // always calls priority=true tickets before everyone
                 // else waiting in that stage, regardless of token number.
-                p_priority: !!priorityCheckbox.checked
+                p_priority: !!priorityCheckbox.checked,
+                // 🔥 ADDED: when checked, issue_queue_token() (database
+                // side) creates this ticket in 'on_hold_authorization'
+                // instead of 'waiting_billing' -- it sits in the
+                // "Awaiting NHIMA Authorization" list below and never
+                // reaches call_next_ticket() until someone confirms it.
+                p_requires_authorization: !!requiresAuthCheckbox.checked
             });
 
             if (tokenError) throw tokenError;
@@ -487,6 +739,7 @@
             resetForm();
             await loadRecent();
             await loadPending();
+            await loadAuthHold(); // 🔥 ADDED
         } catch (err) {
             console.error('Error registering patient:', err);
             showError('Error: ' + (err.message || 'could not register patient.'));
@@ -513,6 +766,8 @@
         nrcCandidates = [];
         selectedCustomerId = null;
         if (priorityCheckbox) priorityCheckbox.checked = false;
+        if (requiresAuthCheckbox) requiresAuthCheckbox.checked = false; // 🔥 ADDED
+        hidePatientHistory(); // 🔥 ADDED
     }
 
     // ============================================
@@ -525,12 +780,23 @@
         // 🔥 ADDED: flag priority tokens right on the confirmation card
         // so the front-desk staff know it'll jump the line.
         const priorityTag = ticket.priority ? ' <span style="color:#f59e0b;"><i class="fa-solid fa-star"></i> PRIORITY</span>' : '';
-        tokenMetaEl.innerHTML = `${ticket.customer_type || ''} -- ${new Date(ticket.created_at).toLocaleString()}${priorityTag}`;
+        // 🔥 ADDED: an on-hold ticket hasn't joined the queue yet -- make
+        // that obvious right on the confirmation card, not just in the
+        // "Awaiting NHIMA Authorization" list below.
+        const holdTag = ticket.status === 'on_hold_authorization'
+            ? ' <span style="color:#dc2626;"><i class="fa-solid fa-lock"></i> ON HOLD -- awaiting NHIMA authorization</span>'
+            : '';
+        tokenMetaEl.innerHTML = `${ticket.customer_type || ''} -- ${new Date(ticket.created_at).toLocaleString()}${priorityTag}${holdTag}`;
         tokenCard.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
     }
 
     function buildTokenSlipHTML(ticket) {
         const time = new Date(ticket.created_at).toLocaleString();
+        // 🔥 ADDED: an on-hold ticket shouldn't tell the patient to wait
+        // for their number to be called -- it isn't in the queue yet.
+        const noteText = ticket.status === 'on_hold_authorization'
+            ? 'Your NHIMA authorization is still being confirmed. Please wait -- you will be added to the queue as soon as it comes through.'
+            : 'Please keep this token and wait for your number<br>to be called on the display screen.';
         return `
         <!DOCTYPE html>
         <html>
@@ -557,7 +823,7 @@
             <div class="token">#${ticket.token_number}</div>
             <div class="name">${ticket.patient_name}</div>
             <hr>
-            <div class="note">Please keep this token and wait for your number<br>to be called on the display screen.</div>
+            <div class="note">${noteText}</div>
         </body>
         </html>`;
     }
@@ -598,7 +864,8 @@
         serving_dispensing: 'At Dispensing Counter',
         pending: 'Pending (No-Show)',
         completed: 'Completed',
-        skipped: 'Skipped'
+        skipped: 'Skipped',
+        on_hold_authorization: 'Awaiting NHIMA Authorization' // 🔥 ADDED
     };
     const STATUS_COLORS = {
         waiting_billing: '#2563eb',
@@ -607,7 +874,8 @@
         serving_dispensing: '#7c3aed',
         pending: '#d97706',
         completed: '#059669',
-        skipped: '#94a3b8'
+        skipped: '#94a3b8',
+        on_hold_authorization: '#dc2626' // 🔥 ADDED
     };
     const WAITING_STATUSES = ['waiting_billing', 'waiting_dispensing'];
 
@@ -682,6 +950,76 @@
         } catch (err) {
             console.error('Error updating priority:', err);
             alert('Error updating priority: ' + (err.message || err));
+        }
+    }
+
+    // ============================================
+    // 🔥 ADDED: AWAITING NHIMA AUTHORIZATION LIST
+    // ============================================
+    // Tokens issued with "Requires NHIMA authorization" checked -- they
+    // sit here in 'on_hold_authorization', never reaching call_next_ticket(),
+    // until staff enter the confirmed code and push them into the real
+    // queue. This is the fix for calling a patient's number before their
+    // authorization came through and having to send them to no-show.
+    async function loadAuthHold() {
+        if (!authHoldList) return;
+        const today = new Date().toISOString().split('T')[0];
+        const { data, error } = await supabaseClient
+            .from('queue_tickets')
+            .select('*')
+            .eq('queue_date', today)
+            .eq('status', 'on_hold_authorization')
+            .order('created_at', { ascending: true });
+
+        if (error) {
+            console.error('Error loading authorization-hold tickets:', error);
+            return;
+        }
+
+        if (!data || data.length === 0) {
+            authHoldList.innerHTML = `<p class="helper-text" style="padding:16px;">No tokens are on hold for authorization right now.</p>`;
+            return;
+        }
+
+        authHoldList.innerHTML = data.map(t => `
+            <div style="display:flex; justify-content:space-between; align-items:center; padding:10px 20px; border-bottom:1px solid #f1f5f9; gap:8px; flex-wrap:wrap;">
+                <div>
+                    <div style="font-weight:600; font-size:0.9rem;">#${t.token_number} -- ${t.patient_name}</div>
+                    <div style="font-size:0.75rem; color:#94a3b8;">${t.nhima_number || ''} -- registered ${new Date(t.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</div>
+                </div>
+                <div style="display:flex; gap:6px; align-items:center; flex-wrap:wrap;">
+                    <input type="text" class="form-control" data-auth-code-id="${t.id}" placeholder="Authorization code" style="width:160px; padding:6px 8px; font-size:0.8rem;">
+                    <label style="font-size:0.75rem; display:flex; align-items:center; gap:4px; cursor:pointer;">
+                        <input type="checkbox" data-auth-priority-id="${t.id}" style="width:14px; height:14px; margin:0;"> Priority
+                    </label>
+                    <button class="btn btn-primary btn-sm" data-confirm-auth-id="${t.id}"><i class="fa-solid fa-check"></i> Confirm &amp; Add to Queue</button>
+                </div>
+            </div>
+        `).join('');
+
+        authHoldList.querySelectorAll('[data-confirm-auth-id]').forEach(btn => {
+            btn.addEventListener('click', () => {
+                const id = btn.dataset.confirmAuthId;
+                const codeInput = authHoldList.querySelector(`[data-auth-code-id="${id}"]`);
+                const priorityInput = authHoldList.querySelector(`[data-auth-priority-id="${id}"]`);
+                confirmAuthorization(id, codeInput ? codeInput.value.trim() : '', !!(priorityInput && priorityInput.checked));
+            });
+        });
+    }
+
+    async function confirmAuthorization(ticketId, authorizationCode, makePriority) {
+        try {
+            const { error } = await supabaseClient.rpc('confirm_ticket_authorization', {
+                p_ticket_id: Number(ticketId),
+                p_authorization_code: authorizationCode || null,
+                p_priority: !!makePriority
+            });
+            if (error) throw error;
+            await loadAuthHold();
+            await loadRecent();
+        } catch (err) {
+            console.error('Error confirming authorization:', err);
+            alert('Error confirming authorization: ' + (err.message || err));
         }
     }
 
@@ -762,6 +1100,7 @@
             .on('postgres_changes', { event: '*', schema: 'public', table: 'queue_tickets' }, () => {
                 loadRecent();
                 loadPending();
+                loadAuthHold();
             })
             .subscribe();
     } catch (e) {
@@ -773,4 +1112,90 @@
     // ============================================
     loadRecent();
     loadPending();
+    loadAuthHold();
+
+    // ============================================
+    // 🔥 ADDED: PATIENT SALES LOOKUP (sidebar -- see crm-menu.html)
+    // ============================================
+    // Deliberately independent of the registration form above -- this
+    // searches ANY patient on file (registered today or years ago) and
+    // never touches selectedCustomerId or anything the form submits.
+    async function findCustomerMatches(term) {
+        // Strip characters that have special meaning inside a PostgREST
+        // .or() filter string (comma separates conditions, parens group
+        // them) so a search term containing them can't break the query.
+        const q = (term || '').trim().replace(/[,()]/g, ' ').trim();
+        if (!q) return [];
+        const { data, error } = await supabaseClient
+            .from('customers')
+            .select('id, full_name, nhima_number, phone')
+            .or(`full_name.ilike.%${q}%,nhima_number.ilike.%${q}%`)
+            .limit(15);
+        if (error) throw error;
+        return data || [];
+    }
+
+    function renderLookupMatches(matches) {
+        if (!sidebarLookupResults) return;
+        if (sidebarLookupHistoryWrap) sidebarLookupHistoryWrap.style.display = 'none';
+        if (!matches.length) {
+            sidebarLookupResults.innerHTML = `<p class="helper-text" style="font-size:0.75rem; padding:6px 0;">No patients found matching that search.</p>`;
+            return;
+        }
+        sidebarLookupResults.innerHTML = `
+            <div style="border:1px solid #e8edf3; border-radius:8px; overflow:hidden;">
+                ${matches.map(c => `
+                    <div class="sidebar-lookup-match-row" data-customer-id="${c.id}" data-customer-name="${escapeHtml(c.full_name || 'Unknown')}" style="padding:8px 10px; border-bottom:1px solid #f1f5f9; cursor:pointer;">
+                        <div style="font-weight:600; font-size:0.78rem; color:#0f172a;">${escapeHtml(c.full_name || 'Unknown')}</div>
+                        <div class="helper-text" style="font-size:0.7rem;">${escapeHtml(c.nhima_number || '--')}</div>
+                    </div>
+                `).join('')}
+            </div>
+        `;
+        sidebarLookupResults.querySelectorAll('.sidebar-lookup-match-row').forEach(row => {
+            row.addEventListener('click', async () => {
+                sidebarLookupResults.querySelectorAll('.sidebar-lookup-match-row').forEach(r => r.style.background = '');
+                row.style.background = '#eff6ff';
+                if (sidebarLookupHistoryWrap) sidebarLookupHistoryWrap.style.display = 'block';
+                await loadPatientHistoryInto(row.dataset.customerId, {
+                    listEl: sidebarLookupHistory,
+                    bannerEl: sidebarLookupBanner,
+                    moreBtnEl: sidebarLookupMoreBtn,
+                    nameEl: sidebarLookupName,
+                    patientName: row.dataset.customerName,
+                    compact: true
+                });
+            });
+        });
+    }
+
+    async function runPatientLookup() {
+        if (!sidebarLookupInput) return;
+        const term = sidebarLookupInput.value.trim();
+        if (sidebarLookupHistoryWrap) sidebarLookupHistoryWrap.style.display = 'none';
+        if (!term) {
+            sidebarLookupResults.innerHTML = `<p class="helper-text" style="font-size:0.75rem; padding:6px 0;">Type an NHIMA number or patient name to search.</p>`;
+            return;
+        }
+        sidebarLookupResults.innerHTML = `<p class="helper-text" style="font-size:0.75rem; padding:6px 0;"><i class="fa-solid fa-spinner fa-spin"></i> Searching...</p>`;
+        try {
+            const matches = await findCustomerMatches(term);
+            renderLookupMatches(matches);
+        } catch (err) {
+            console.error('Error searching patients:', err);
+            sidebarLookupResults.innerHTML = `<p class="helper-text" style="font-size:0.75rem; color:#dc2626; padding:6px 0;">Error searching: ${escapeHtml(err.message || String(err))}</p>`;
+        }
+    }
+
+    if (sidebarLookupBtn) {
+        sidebarLookupBtn.addEventListener('click', runPatientLookup);
+    }
+    if (sidebarLookupInput) {
+        sidebarLookupInput.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                runPatientLookup();
+            }
+        });
+    }
 })();
