@@ -44,26 +44,30 @@
         }
     }
 
-    // 🔥 FIX: THE REAL BUG BEHIND "General Ledger is missing recent
-    // entries / doesn't match the real balance" -- this used a single
-    // unranged `.select()`. Supabase/PostgREST caps an unranged select at
-    // 1000 rows per request by default -- it does NOT error or warn, it
-    // just silently returns the first 1000 rows and drops the rest.
-    // Confirmed directly against the data: `journal_entries` currently
-    // has 5,099 rows -- ordered ascending by entry_date, that meant this
-    // page only ever loaded the OLDEST 1000 entries and silently
-    // truncated everything after that (i.e. most of the recent history,
-    // growing every day). This mirrors the identical 1000-row cliff
-    // already found and fixed in the Receipts, Trial Balance, Financial
-    // Statements and (this same session) Chart of Accounts pages -- pages
-    // through with `.range()` until a page comes back shorter than the
-    // page size, so this now reliably loads every journal entry
-    // regardless of how large the ledger grows.
     async function loadJournalEntries() {
         try {
-            const pageSize = 1000;
+            // 🔥 FIX: this used to be a single unpaginated fetch of every
+            // journal_entries row (with its nested journal_lines) -- the
+            // same Supabase/PostgREST 1000-row cap bug already found and
+            // fixed in Trial Balance, Financial Statements, and Chart of
+            // Accounts (see those files' comments). This project has
+            // 5,687+ Posted journal_entries (verified against the live
+            // database), so with .order('entry_date', { ascending: true })
+            // and no .range(), this was silently loading only the OLDEST
+            // ~1000 entries and dropping everything since -- meaning this
+            // page's transaction lists and running/closing balances were
+            // missing essentially all of this business's recent activity,
+            // which is exactly why they didn't match Trial Balance / the
+            // Balance Sheet for the same accounts. Also added a Posted-only
+            // filter to match those other reports (they all exclude
+            // Draft/unposted entries; this page previously didn't). Fixed
+            // by paging through in batches of 1000 until a page comes back
+            // short, so this always loads every Posted entry regardless of
+            // how large the ledger grows.
+            const PAGE_SIZE = 1000;
             let allEntries = [];
-            let from = 0;
+            let offset = 0;
+
             while (true) {
                 const { data, error } = await supabaseClient
                     .from('journal_entries')
@@ -71,16 +75,20 @@
                         *,
                         journal_lines (*)
                     `)
+                    .eq('status', 'Posted')
                     .order('entry_date', { ascending: true })
-                    .range(from, from + pageSize - 1);
+                    .range(offset, offset + PAGE_SIZE - 1);
+
                 if (error) throw error;
-                if (!data || data.length === 0) break;
-                allEntries = allEntries.concat(data);
-                if (data.length < pageSize) break;
-                from += pageSize;
+
+                allEntries = allEntries.concat(data || []);
+
+                if (!data || data.length < PAGE_SIZE) break;
+                offset += PAGE_SIZE;
             }
+
             state.journalEntries = allEntries;
-            
+
             // Extract all journal lines
             state.journalLines = [];
             state.journalEntries.forEach(entry => {
@@ -504,4 +512,4 @@
     console.log("✅ General Ledger initialized successfully!");
     console.log(`📖 ${state.journalLines.length} journal lines loaded`);
     console.log(`📊 ${state.accounts.length} accounts loaded`);
-})();
+})();

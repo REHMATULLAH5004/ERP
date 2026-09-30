@@ -349,7 +349,7 @@
 </div>
 
 <!-- ============================================================ -->
-<!-- SIMPLIFIED RETAIL RECEIPT MODAL (WITHOUT INVOICE SELECTION) -->
+<!-- RETAIL RECEIPT MODAL -->
 <!-- ============================================================ -->
 <div class="modal" id="retailReceiptModal">
     <div class="modal-dialog modal-lg">
@@ -370,17 +370,23 @@
                     </div>
                 </div>
 
-                <!-- ✅ SIMPLIFIED: Just enter amount -->
-                <div style="margin: 15px 0; padding: 15px; background: #f0fdf4; border-radius: 6px; border-left: 4px solid #10b981;">
-                    <p style="margin: 0; font-size: 0.85rem; color: #15803d;">
-                        <i class="fa-solid fa-info-circle"></i>
-                        Enter any amount up to the total receivable. The system will automatically apply it to the oldest invoices first.
-                    </p>
+                <!-- 🔥 ADDED: pick which invoice this payment is for -- selecting
+                     one fills Amount below with that invoice's full outstanding
+                     balance by default; it's still editable for a partial
+                     payment. "Entire Outstanding Balance" keeps the old
+                     behaviour of auto-applying across everything oldest-first,
+                     for when a customer is just clearing their whole account. -->
+                <div class="form-group">
+                    <label class="required">Invoice / Balance</label>
+                    <select class="form-control" id="retailReceiptInvoice" onchange="onReceiptInvoiceSelect(this)" required>
+                        <option value="">-- Select an invoice or balance --</option>
+                    </select>
+                    <small id="retailReceiptInvoiceHint" style="color: #64748b;"></small>
                 </div>
 
                 <div class="form-group">
                     <label class="required">Amount to Receive (ZMW)</label>
-                    <input type="number" class="form-control" id="retailReceiptAmount" step="0.01" min="0.01" placeholder="Enter amount" required>
+                    <input type="number" class="form-control" id="retailReceiptAmount" step="0.01" min="0.01" placeholder="Select an invoice above first" required>
                     <small style="color: #64748b;">Maximum: <span id="retailReceiptMaxAmount">ZK0.00</span></small>
                 </div>
 
@@ -423,7 +429,7 @@
 </div>
 
 <!-- ============================================================ -->
-<!-- SIMPLIFIED WHOLESALE RECEIPT MODAL (WITHOUT INVOICE SELECTION) -->
+<!-- WHOLESALE RECEIPT MODAL -->
 <!-- ============================================================ -->
 <div class="modal" id="wholesaleReceiptModal">
     <div class="modal-dialog modal-lg">
@@ -444,17 +450,23 @@
                     </div>
                 </div>
 
-                <!-- ✅ SIMPLIFIED: Just enter amount -->
-                <div style="margin: 15px 0; padding: 15px; background: #f0fdf4; border-radius: 6px; border-left: 4px solid #10b981;">
-                    <p style="margin: 0; font-size: 0.85rem; color: #15803d;">
-                        <i class="fa-solid fa-info-circle"></i>
-                        Enter any amount up to the total receivable. The system will automatically apply it to the oldest invoices first.
-                    </p>
+                <!-- 🔥 ADDED: pick which invoice this payment is for -- selecting
+                     one fills Amount below with that invoice's full outstanding
+                     balance by default; it's still editable for a partial
+                     payment. "Entire Outstanding Balance" keeps the old
+                     behaviour of auto-applying across everything oldest-first,
+                     for when a customer is just clearing their whole account. -->
+                <div class="form-group">
+                    <label class="required">Invoice / Balance</label>
+                    <select class="form-control" id="wholesaleReceiptInvoice" onchange="onReceiptInvoiceSelect(this)" required>
+                        <option value="">-- Select an invoice or balance --</option>
+                    </select>
+                    <small id="wholesaleReceiptInvoiceHint" style="color: #64748b;"></small>
                 </div>
 
                 <div class="form-group">
                     <label class="required">Amount to Receive (ZMW)</label>
-                    <input type="number" class="form-control" id="wholesaleReceiptAmount" step="0.01" min="0.01" placeholder="Enter amount" required>
+                    <input type="number" class="form-control" id="wholesaleReceiptAmount" step="0.01" min="0.01" placeholder="Select an invoice above first" required>
                     <small style="color: #64748b;">Maximum: <span id="wholesaleReceiptMaxAmount">ZK0.00</span></small>
                 </div>
 

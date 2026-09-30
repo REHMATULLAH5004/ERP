@@ -99,33 +99,54 @@ if (typeof exchangeRate === 'undefined') { var exchangeRate = { zmwPerUsd: 25.00
         try {
             const codes = ['1111', '1120', '1121'];
 
-            // ✅ FIXED: Using foreignTable syntax for Supabase sorting
-            const { data, error } = await supabaseClient
-                .from('journal_lines')
-                .select(`
-                    id,
-                    account_code,
-                    debit,
-                    credit,
-                    description,
-                    journal_entries!inner (
-                        entry_date,
-                        journal_number,
-                        status
-                    )
-                `)
-                .in('account_code', codes)
-                .eq('journal_entries.status', 'Posted')
-                .order('entry_date', { ascending: false, foreignTable: 'journal_entries' });
+            // 🔥 FIX: this was a single unpaginated fetch -- the same
+            // Supabase/PostgREST 1000-row cap bug found (and fixed) in
+            // Chart of Accounts, Trial Balance, Financial Statements, and
+            // General Ledger. Only ~77 journal_lines touch these 3
+            // cash/bank accounts today, so it isn't cutting anything off
+            // yet, but that's exactly how the Accounts Receivable bug
+            // stayed invisible until the ledger grew past 1000 rows --
+            // paginating now means this page's cash/bank balances stay
+            // correct as transaction volume grows, instead of silently
+            // breaking again later.
+            const PAGE_SIZE = 1000;
+            let allLines = [];
+            let offset = 0;
 
-            if (error) throw error;
-            
-            state.glJournalLines = data || [];
-            
-            const foundCodes = [...new Set(data.map(l => l.account_code))];
+            while (true) {
+                const { data, error } = await supabaseClient
+                    .from('journal_lines')
+                    .select(`
+                        id,
+                        account_code,
+                        debit,
+                        credit,
+                        description,
+                        journal_entries!inner (
+                            entry_date,
+                            journal_number,
+                            status
+                        )
+                    `)
+                    .in('account_code', codes)
+                    .eq('journal_entries.status', 'Posted')
+                    .order('entry_date', { ascending: false, foreignTable: 'journal_entries' })
+                    .range(offset, offset + PAGE_SIZE - 1);
+
+                if (error) throw error;
+
+                allLines = allLines.concat(data || []);
+
+                if (!data || data.length < PAGE_SIZE) break;
+                offset += PAGE_SIZE;
+            }
+
+            state.glJournalLines = allLines;
+
+            const foundCodes = [...new Set(allLines.map(l => l.account_code))];
             console.log(`✅ Loaded ${state.glJournalLines.length} GL lines for Cash/Bank.`);
             console.log(`   Found balances in these GL Codes: ${foundCodes.join(', ')}`);
-            
+
         } catch (error) {
             console.error('Error loading GL journal lines:', error);
             state.glJournalLines = [];

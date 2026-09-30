@@ -491,13 +491,6 @@
             } catch { return dateStr; }
         }
     
-        // 🔥 ADDED: identifies the pre-1-Sept-2026 NHIMA opening balance,
-        // both on its ledger entry (journal_entries.reference) and on any
-        // customer_receipts/customer_receipt_invoices rows recording a
-        // payment against it (nhima_claim_number) -- see
-        // loadNhimaOpeningBalance() and processNhimaBulkSettlement().
-        const NHIMA_OPENING_BALANCE_REFERENCE = 'OPENING-NHIMA-AR-2026';
-
         // ============================================
         // GLOBAL STATE
         // ============================================
@@ -509,16 +502,31 @@
             receipts: [],
             sales: [],
             customerReceiptInvoices: [],
-            // 🔥 ADDED: the 51,242,061.49 pre-1-Sept-2026 NHIMA receivable
-            // backlog (posted as a one-time ledger opening entry, not tied
-            // to any real claim/sale) -- see loadNhimaOpeningBalance().
-            nhimaOpeningBalanceAmount: 0,
             currentStatementData: null,
             currentReceiptData: null,
             currentRetailCustomerId: null,
             currentWholesaleCustomerId: null,
-            nhimaReconcile: null
+            nhimaReconcile: null,
+            // 🔥 ADDED: the outstanding invoices/opening-balance items
+            // currently listed in each receipt modal's "Invoice / Balance"
+            // dropdown (see getOutstandingReceivableItems() /
+            // populateReceiptInvoiceSelect() below) -- kept here so
+            // onReceiptInvoiceSelect() and the save functions can look up
+            // what a selected option actually refers to without re-deriving
+            // it from the DOM.
+            currentReceiptInvoiceItems: { retail: [], wholesale: [] },
+            // 🔥 ADDED: the 51,242,061.49 pre-1-Sept-2026 NHIMA receivable
+            // backlog (posted as a one-time ledger opening entry, not tied
+            // to any real claim/sale) -- see loadNhimaOpeningBalance().
+            nhimaOpeningBalanceAmount: 0
         };
+
+        // 🔥 ADDED: identifies the pre-1-Sept-2026 NHIMA opening balance,
+        // both on its ledger entry (journal_entries.reference) and on any
+        // customer_receipts/customer_receipt_invoices rows recording a
+        // payment against it (nhima_claim_number) -- see
+        // loadNhimaOpeningBalance() and processNhimaBulkSettlement().
+        const NHIMA_OPENING_BALANCE_REFERENCE = 'OPENING-NHIMA-AR-2026';
     
         // ============================================
         // LOAD DATA
@@ -1111,6 +1119,132 @@
         }
 
         // ============================================
+        // 🔥 ADDED: PER-INVOICE RECEIPT SELECTION
+        // ============================================
+        // Previously both receipt modals only had one free-text "Amount to
+        // Receive" that got silently auto-applied to whichever invoices
+        // were oldest -- there was no way to actually SEE or CHOOSE which
+        // invoice a payment was for (this is what showed up today as
+        // "there is no reference for the invoice number" against DR JAVIA
+        // MEDICAL CENTER's payment: it happened to land correctly since
+        // there was only one open invoice each time, but nothing on screen
+        // confirmed that). Now staff pick an invoice (or Opening Balance,
+        // or "Entire Outstanding Balance" to keep the old auto-apply
+        // behaviour) from a dropdown; picking one fills Amount with its
+        // full remaining balance, still editable for a partial payment.
+
+        // Shared by both Retail and Wholesale -- `customerIdField` is
+        // which column customer_receipt_invoices uses for THIS side's
+        // opening-balance rows ('customer_id' for retail, 'wholesale_
+        // customer_id' for wholesale); everything else (sale_id lookups)
+        // is identical between the two.
+        function getOutstandingReceivableItems(customerData, customerIdField) {
+            const items = [];
+
+            const sortedSales = [...customerData.sales].sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
+            sortedSales.forEach(sale => {
+                const paid = state.customerReceiptInvoices
+                    .filter(ri => ri.sale_id === sale.id && !ri.is_opening_balance)
+                    .reduce((sum, ri) => sum + (ri.amount_paid || 0), 0);
+                const remaining = (sale.grand_total || 0) - paid;
+                if (remaining > 0.01) {
+                    items.push({
+                        key: `sale_${sale.id}`,
+                        saleId: sale.id,
+                        isOpening: false,
+                        label: sale.sale_id || ('INV-' + String(sale.id).slice(0, 8)),
+                        date: sale.created_at,
+                        remaining
+                    });
+                }
+            });
+
+            if (customerData.opening_balance_zmw > 0) {
+                const custId = customerData.customer._customerId;
+                const paidOpening = custId
+                    ? state.customerReceiptInvoices
+                        .filter(ri => ri[customerIdField] === custId && ri.is_opening_balance === true)
+                        .reduce((sum, ri) => sum + (ri.amount_paid || 0), 0)
+                    : 0;
+                const remainingOpening = customerData.opening_balance_zmw - paidOpening;
+                if (remainingOpening > 0.01) {
+                    items.push({
+                        key: 'opening',
+                        saleId: null,
+                        isOpening: true,
+                        label: 'Opening Balance',
+                        date: null,
+                        remaining: remainingOpening
+                    });
+                }
+            }
+
+            return items;
+        }
+
+        // `side` is 'retail' or 'wholesale' -- picks which <select>/state
+        // slot to populate (retailReceiptInvoice / wholesaleReceiptInvoice).
+        function populateReceiptInvoiceSelect(side, customerData, customerIdField) {
+            const select = document.getElementById(`${side}ReceiptInvoice`);
+            const hint = document.getElementById(`${side}ReceiptInvoiceHint`);
+            const amountInput = document.getElementById(`${side}ReceiptAmount`);
+            if (!select) return;
+
+            const items = getOutstandingReceivableItems(customerData, customerIdField);
+            state.currentReceiptInvoiceItems[side] = items;
+
+            let optionsHtml = '<option value="">-- Select an invoice or balance --</option>';
+            if (items.length > 0) {
+                optionsHtml += `<option value="all">Entire Outstanding Balance (ZK${formatNumber(customerData.receivable)}) -- apply oldest-first</option>`;
+                items.forEach(item => {
+                    const dateText = item.date ? new Date(item.date).toLocaleDateString() + ' -- ' : '';
+                    optionsHtml += `<option value="${item.key}">${item.label} -- ${dateText}Due ZK${formatNumber(item.remaining)}</option>`;
+                });
+            }
+            select.innerHTML = optionsHtml;
+
+            if (hint) hint.textContent = items.length === 0 ? 'No open invoices or balance for this customer.' : '';
+            if (amountInput) {
+                amountInput.value = '';
+                amountInput.removeAttribute('max');
+            }
+        }
+
+        // Wired via onchange="onReceiptInvoiceSelect(this)" on both selects
+        // -- reads which side it belongs to straight off the element's id
+        // rather than needing a second parameter threaded through the HTML.
+        window.onReceiptInvoiceSelect = function(select) {
+            const side = select.id.startsWith('wholesale') ? 'wholesale' : 'retail';
+            const amountInput = document.getElementById(`${side}ReceiptAmount`);
+            const maxAmountLabel = document.getElementById(`${side}ReceiptMaxAmount`);
+            if (!amountInput) return;
+
+            const value = select.value;
+            if (!value) {
+                amountInput.value = '';
+                amountInput.removeAttribute('max');
+                return;
+            }
+
+            if (value === 'all') {
+                const totalReceivable = state.currentReceiptInvoiceItems[side].reduce((sum, it) => sum + it.remaining, 0);
+                amountInput.value = totalReceivable.toFixed(2);
+                amountInput.max = totalReceivable.toFixed(2);
+                if (maxAmountLabel) maxAmountLabel.textContent = `ZK${formatNumber(totalReceivable)}`;
+                return;
+            }
+
+            const item = state.currentReceiptInvoiceItems[side].find(it => it.key === value);
+            if (!item) return;
+            // Defaults to the invoice's full remaining balance -- still a
+            // normal editable number input, so typing a smaller figure
+            // records a partial payment against exactly this invoice.
+            amountInput.value = item.remaining.toFixed(2);
+            amountInput.max = item.remaining.toFixed(2);
+            if (maxAmountLabel) maxAmountLabel.textContent = `ZK${formatNumber(item.remaining)}`;
+        };
+
+        // ============================================
         // RENDER FUNCTIONS
         // ============================================
     
@@ -1157,6 +1291,11 @@
     
             tbody.innerHTML = pendingClaims.map((claim) => {
                 const statusColor = claim.isSettled ? '#10b981' : '#f59e0b';
+                // 🔥 ADDED: highlight the aggregate pre-Sept-2026 opening-balance
+                // line (see calculateNhimaReceivables()) so it reads as distinct
+                // from a normal itemized claim -- selecting it for settlement
+                // still only happens in the NHIMA Bulk modal, this table is
+                // view-only.
                 const rowBg = claim.isOpeningBalance ? 'background:#fef9e7;' : '';
                 return `
                 <tr style="${rowBg}">
@@ -1549,10 +1688,10 @@
                     const nhimaNumber = cb.dataset.nhima || 'N/A';
                     // 🔥 ADDED: the aggregate pre-Sept-2026 opening-balance
                     // line (see calculateNhimaReceivables()) has no real
-                    // sale/claim behind it, so it's settled through a
-                    // separate branch below that never touches `sales` or
-                    // does customer lookups -- it only records a payment
-                    // (customer_receipts + customer_receipt_invoices,
+                    // sale/claim behind it, so it's settled through the
+                    // branches below that skip customer lookup/creation and
+                    // the `sales` status update entirely -- it only records
+                    // a payment (customer_receipts + customer_receipt_invoices,
                     // tagged with NHIMA_OPENING_BALANCE_REFERENCE) and posts
                     // the same Dr Cash/Bank Cr 1200 GL entry as any other
                     // NHIMA settlement.
@@ -1637,7 +1776,7 @@
                     }
 
                     const receiptNumber = `NHIMA-${new Date().getFullYear()}-${String(Math.floor(Math.random() * 10000)).padStart(4, '0')}`;
-
+                    
                     const receiptData = {
                         receipt_number: receiptNumber,
                         receipt_date: settlementDate,
@@ -1826,11 +1965,11 @@
                         <tbody>
                             ${data.claimDetails.map((claim, index) => {
                                 const statusColor = claim.isSettled ? '#10b981' : '#f59e0b';
-                                // 🔥 ADDED: the aggregate pre-Sept-2026 opening-balance
-                                // line has no real sale_id (claim.saleId is null) -- give
-                                // it a distinct, stable marker via data-is-opening rather
-                                // than relying on the (null) claim-id string, and highlight
-                                // the row so it doesn't get mistaken for a normal claim.
+                                // 🔥 ADDED: the aggregate pre-Sept-2026 opening-balance line
+                                // (see calculateNhimaReceivables()) has no real sale_id
+                                // (claim.saleId is null) -- flag it via data-is-opening rather
+                                // than relying on the (null) claim-id string, and highlight the
+                                // row so it doesn't get mistaken for a normal itemized claim.
                                 const rowBg = claim.isOpeningBalance ? 'background:#fef9e7;' : '';
                                 return `
                                 <tr style="border-bottom:1px solid #f1f5f9;${rowBg}${claim.isSettled ? 'opacity:0.6;' : ''}">
@@ -2007,7 +2146,10 @@
             document.getElementById('retailCustomerReceivable').textContent = `ZK${formatNumber(customerData.receivable)}`;
             document.getElementById('retailReceiptMaxAmount').textContent = `ZK${formatNumber(customerData.receivable)}`;
             document.getElementById('retailCustomerInfo').style.display = 'block';
-    
+            // 🔥 ADDED: populate the "Invoice / Balance" dropdown for this
+            // customer so staff pick exactly what they're being paid for.
+            populateReceiptInvoiceSelect('retail', customerData, 'customer_id');
+
             modal.classList.add('show');
         };
     
@@ -2043,7 +2185,10 @@
             document.getElementById('wholesaleCustomerReceivable').textContent = `ZK${formatNumber(customerData.receivable)}`;
             document.getElementById('wholesaleReceiptMaxAmount').textContent = `ZK${formatNumber(customerData.receivable)}`;
             document.getElementById('wholesaleCustomerInfo').style.display = 'block';
-    
+            // 🔥 ADDED: populate the "Invoice / Balance" dropdown for this
+            // customer so staff pick exactly what they're being paid for.
+            populateReceiptInvoiceSelect('wholesale', customerData, 'wholesale_customer_id');
+
             modal.classList.add('show');
         };
     
@@ -2058,24 +2203,53 @@
             const method = document.getElementById('retailReceiptMethod').value;
             const reference = document.getElementById('retailReceiptReference').value.trim();
             const notes = document.getElementById('retailReceiptNotes').value.trim();
-    
+            // 🔥 ADDED: which invoice/balance this payment is actually for --
+            // 'all' keeps the old auto-apply-oldest-first behaviour, a
+            // specific key pays exactly (and only) that one item.
+            const invoiceSelectValue = document.getElementById('retailReceiptInvoice').value;
+
             if (!customerId || !receiptDate || !amount || amount <= 0) {
                 safeToast('Please fill in all required fields', 'error');
                 return;
             }
-    
-            const customerData = calculateRetailReceivables().find(c => 
+
+            if (!invoiceSelectValue) {
+                safeToast('Please select an invoice or balance for this payment.', 'error');
+                return;
+            }
+
+            const customerData = calculateRetailReceivables().find(c =>
                 c.customer._id === customerId || c.customer._customerId === customerId
             );
-    
+
             if (!customerData) {
                 safeToast('Customer not found', 'error');
                 return;
             }
-    
+
             if (amount > customerData.receivable) {
                 safeToast(`Amount exceeds receivable (ZK${formatNumber(customerData.receivable)})`, 'error');
                 return;
+            }
+
+            // 🔥 ADDED: when a specific invoice/balance (not "all") is
+            // selected, the amount can't exceed THAT item's own remaining
+            // balance -- being under the customer's total receivable isn't
+            // enough on its own (e.g. paying ZK9,000 "against" a ZK1,300
+            // invoice would silently spill onto other invoices under the
+            // old FIFO-only logic, which is exactly the behaviour this
+            // dropdown exists to replace with an explicit choice).
+            let selectedItem = null;
+            if (invoiceSelectValue !== 'all') {
+                selectedItem = (state.currentReceiptInvoiceItems.retail || []).find(it => it.key === invoiceSelectValue);
+                if (!selectedItem) {
+                    safeToast('Selected invoice is no longer available -- please reopen this receipt.', 'error');
+                    return;
+                }
+                if (amount > selectedItem.remaining + 0.01) {
+                    safeToast(`Amount exceeds this invoice's remaining balance (ZK${formatNumber(selectedItem.remaining)})`, 'error');
+                    return;
+                }
             }
 
             // 🔥 ADDED: this had no double-submit guard at all -- a double
@@ -2169,7 +2343,46 @@
                 const receiptId = receipt[0].id;
                 const receiptInvoices = [];
                 let remainingAmount = amount;
-    
+
+                // 🔥 CHANGED: a specific invoice/balance selection records
+                // ONE receipt-invoice link against exactly that item
+                // (capped to its own remaining balance, validated above) --
+                // no spilling onto other invoices. "Entire Outstanding
+                // Balance" falls through to the original oldest-first
+                // auto-apply loop, unchanged.
+                if (selectedItem && !selectedItem.isOpening) {
+                    const amountToPay = Math.min(selectedItem.remaining, remainingAmount);
+                    if (amountToPay > 0) {
+                        receiptInvoices.push({
+                            receipt_id: receiptId,
+                            sale_id: selectedItem.saleId,
+                            customer_id: validCustomerId,
+                            amount_paid: amountToPay,
+                            payment_date: receiptDate,
+                            payment_method: method,
+                            payment_reference: reference || null,
+                            status: amountToPay >= selectedItem.remaining ? 'paid' : 'partial',
+                            is_opening_balance: false
+                        });
+                        remainingAmount -= amountToPay;
+                    }
+                } else if (selectedItem && selectedItem.isOpening) {
+                    const amountToPay = Math.min(selectedItem.remaining, remainingAmount);
+                    if (amountToPay > 0) {
+                        receiptInvoices.push({
+                            receipt_id: receiptId,
+                            customer_id: validCustomerId,
+                            amount_paid: amountToPay,
+                            payment_date: receiptDate,
+                            payment_method: method,
+                            payment_reference: reference || null,
+                            status: amountToPay >= selectedItem.remaining ? 'paid' : 'partial',
+                            is_opening_balance: true
+                        });
+                        remainingAmount -= amountToPay;
+                    }
+                } else {
+
                 const outstandingInvoices = customerData.sales
                     .filter(sale => {
                         const paid = state.customerReceiptInvoices
@@ -2178,7 +2391,7 @@
                         return (sale.grand_total || 0) - paid > 0.01;
                     })
                     .sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
-    
+
                 for (const sale of outstandingInvoices) {
                     if (remainingAmount <= 0) break;
                     const paid = state.customerReceiptInvoices
@@ -2186,7 +2399,7 @@
                         .reduce((sum, ri) => sum + (ri.amount_paid || 0), 0);
                     const remaining = (sale.grand_total || 0) - paid;
                     const amountToPay = Math.min(remaining, remainingAmount);
-    
+
                     if (amountToPay > 0) {
                         receiptInvoices.push({
                             receipt_id: receiptId,
@@ -2202,7 +2415,7 @@
                         remainingAmount -= amountToPay;
                     }
                 }
-    
+
                 if (remainingAmount > 0 && customerData.opening_balance_zmw > 0) {
                     const paidOpening = state.customerReceiptInvoices
                         .filter(ri => ri.customer_id === validCustomerId && ri.is_opening_balance === true)
@@ -2223,7 +2436,9 @@
                         remainingAmount -= amountToPay;
                     }
                 }
-    
+
+                } // 🔥 ADDED: closes the "else" (== 'all') branch opened above
+
                 if (receiptInvoices.length > 0) {
                     const { error: riError } = await supabaseClient
                         .from('customer_receipt_invoices')
@@ -2233,7 +2448,7 @@
                         throw riError;
                     }
                 }
-    
+
                 await createReceiptGLEntry({
                     receipt_number: receiptNumber,
                     receipt_date: receiptDate,
@@ -2241,7 +2456,7 @@
                     payment_method: method,
                     customer_type: cust._subType || 'REGULAR'
                 });
-    
+
                 state.currentReceiptData = { customer: cust, amount, receiptNumber, paymentMethod: method, reference, notes };
 
                 // 🔥 ADDED: notify the customer on WhatsApp that their
@@ -2297,24 +2512,48 @@
             const method = document.getElementById('wholesaleReceiptMethod').value;
             const reference = document.getElementById('wholesaleReceiptReference').value.trim();
             const notes = document.getElementById('wholesaleReceiptNotes').value.trim();
-    
+            // 🔥 ADDED: which invoice/balance this payment is actually for --
+            // 'all' keeps the old auto-apply-oldest-first behaviour, a
+            // specific key pays exactly (and only) that one item.
+            const invoiceSelectValue = document.getElementById('wholesaleReceiptInvoice').value;
+
             if (!customerId || !receiptDate || !amount || amount <= 0) {
                 safeToast('Please fill in all required fields', 'error');
                 return;
             }
-    
-            const customerData = calculateWholesaleReceivables().find(c => 
+
+            if (!invoiceSelectValue) {
+                safeToast('Please select an invoice or balance for this payment.', 'error');
+                return;
+            }
+
+            const customerData = calculateWholesaleReceivables().find(c =>
                 c.customer._id === customerId || c.customer._customerId === customerId
             );
-    
+
             if (!customerData) {
                 safeToast('Customer not found', 'error');
                 return;
             }
-    
+
             if (amount > customerData.receivable) {
                 safeToast(`Amount exceeds receivable (ZK${formatNumber(customerData.receivable)})`, 'error');
                 return;
+            }
+
+            // 🔥 ADDED: same "can't exceed THIS item's own remaining
+            // balance" guard as saveRetailReceipt() above.
+            let selectedItem = null;
+            if (invoiceSelectValue !== 'all') {
+                selectedItem = (state.currentReceiptInvoiceItems.wholesale || []).find(it => it.key === invoiceSelectValue);
+                if (!selectedItem) {
+                    safeToast('Selected invoice is no longer available -- please reopen this receipt.', 'error');
+                    return;
+                }
+                if (amount > selectedItem.remaining + 0.01) {
+                    safeToast(`Amount exceeds this invoice's remaining balance (ZK${formatNumber(selectedItem.remaining)})`, 'error');
+                    return;
+                }
             }
 
             // 🔥 ADDED: same double-submit guard as saveRetailReceipt()
@@ -2399,7 +2638,46 @@
                 const receiptId = receipt[0].id;
                 const receiptInvoices = [];
                 let remainingAmount = amount;
-    
+
+                // 🔥 CHANGED: a specific invoice/balance selection records
+                // ONE receipt-invoice link against exactly that item
+                // (capped to its own remaining balance, validated above) --
+                // no spilling onto other invoices. "Entire Outstanding
+                // Balance" falls through to the original oldest-first
+                // auto-apply loop, unchanged.
+                if (selectedItem && !selectedItem.isOpening) {
+                    const amountToPay = Math.min(selectedItem.remaining, remainingAmount);
+                    if (amountToPay > 0) {
+                        receiptInvoices.push({
+                            receipt_id: receiptId,
+                            sale_id: selectedItem.saleId,
+                            wholesale_customer_id: validCustomerId,
+                            amount_paid: amountToPay,
+                            payment_date: receiptDate,
+                            payment_method: method,
+                            payment_reference: reference || null,
+                            status: amountToPay >= selectedItem.remaining ? 'paid' : 'partial',
+                            is_opening_balance: false
+                        });
+                        remainingAmount -= amountToPay;
+                    }
+                } else if (selectedItem && selectedItem.isOpening) {
+                    const amountToPay = Math.min(selectedItem.remaining, remainingAmount);
+                    if (amountToPay > 0) {
+                        receiptInvoices.push({
+                            receipt_id: receiptId,
+                            wholesale_customer_id: validCustomerId,
+                            amount_paid: amountToPay,
+                            payment_date: receiptDate,
+                            payment_method: method,
+                            payment_reference: reference || null,
+                            status: amountToPay >= selectedItem.remaining ? 'paid' : 'partial',
+                            is_opening_balance: true
+                        });
+                        remainingAmount -= amountToPay;
+                    }
+                } else {
+
                 const outstandingInvoices = customerData.sales
                     .filter(sale => {
                         const paid = state.customerReceiptInvoices
@@ -2408,7 +2686,7 @@
                         return (sale.grand_total || 0) - paid > 0.01;
                     })
                     .sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
-    
+
                 for (const sale of outstandingInvoices) {
                     if (remainingAmount <= 0) break;
                     const paid = state.customerReceiptInvoices
@@ -2416,7 +2694,7 @@
                         .reduce((sum, ri) => sum + (ri.amount_paid || 0), 0);
                     const remaining = (sale.grand_total || 0) - paid;
                     const amountToPay = Math.min(remaining, remainingAmount);
-    
+
                     if (amountToPay > 0) {
                         receiptInvoices.push({
                             receipt_id: receiptId,
@@ -2432,7 +2710,7 @@
                         remainingAmount -= amountToPay;
                     }
                 }
-    
+
                 if (remainingAmount > 0 && customerData.opening_balance_zmw > 0) {
                     const paidOpening = state.customerReceiptInvoices
                         .filter(ri => ri.wholesale_customer_id === validCustomerId && ri.is_opening_balance === true)
@@ -2453,7 +2731,9 @@
                         remainingAmount -= amountToPay;
                     }
                 }
-    
+
+                } // 🔥 ADDED: closes the "else" (== 'all') branch opened above
+
                 if (receiptInvoices.length > 0) {
                     const { error: riError } = await supabaseClient
                         .from('customer_receipt_invoices')
@@ -2598,7 +2878,7 @@
                 ]);
             }
         }
-    
+
         // ============================================
         // STATEMENT FUNCTIONS
         // ============================================
@@ -2635,10 +2915,33 @@
             });
     
             customerData.receipts?.forEach(r => {
+                // 🔥 ADDED: the statement used to show a receipt's own
+                // reference (RCT-2026-XXXX) with no way to tell WHICH
+                // invoice it actually paid off -- exactly what was raised
+                // today looking at DR JAVIA MEDICAL CENTER's payment.
+                // customer_receipt_invoices links every receipt back to
+                // the sale(s)/opening balance it was applied against
+                // (see loadPaymentInvoices()/state.customerReceiptInvoices
+                // and the invoice-selection logic in
+                // saveRetailReceipt()/saveWholesaleReceipt() above), so
+                // look that up here and fold the invoice number(s) into
+                // the reference shown on the statement.
+                const appliedTo = (state.customerReceiptInvoices || [])
+                    .filter(ri => ri.receipt_id === r.id)
+                    .map(ri => {
+                        if (ri.is_opening_balance) return 'Opening Balance';
+                        const sale = state.sales.find(s => s.id === ri.sale_id);
+                        return sale ? sale.sale_id : null;
+                    })
+                    .filter(Boolean);
+                const referenceText = appliedTo.length
+                    ? `${r.receipt_number} (Inv: ${appliedTo.join(', ')})`
+                    : r.receipt_number;
+
                 allEntries.push({
                     date: new Date(r.receipt_date),
                     type: 'Receipt',
-                    reference: r.receipt_number,
+                    reference: referenceText,
                     amount: -(r.amount || 0),
                     isReceipt: true,
                     method: r.payment_method
