@@ -1,0 +1,30 @@
+<div class="module-view-container" style="max-width: 480px; margin: 0 auto; text-align: center;">
+    <h3 style="margin-bottom: 5px;"><i class="fa-solid fa-fingerprint"></i> Fingerprint Clock-In Station</h3>
+    <p style="color:#64748b; font-size:0.85rem; margin-top:0; margin-bottom:20px;">
+        Leave this screen open on the PC connected to the HUPx fingerprint reader. Employees place a finger on the reader to clock in or out.
+    </p>
+
+    <div class="card" style="padding:30px;">
+        <div id="fpStationIcon" style="font-size: 4rem; color: #0f766e; margin-bottom: 14px;">
+            <i class="fa-solid fa-fingerprint"></i>
+        </div>
+        <div id="fpStationMessage" style="font-size: 1.05rem; font-weight: 600; color: #0f172a; min-height: 28px; margin-bottom: 6px;">
+            Ready to scan
+        </div>
+        <div id="fpStationSubMessage" style="font-size: 0.85rem; color: #64748b; min-height: 20px; margin-bottom: 20px;">
+            Press the button below, then place a finger on the reader.
+        </div>
+
+        <button id="fpStationScanBtn" style="background: #0f766e; color: white; border: none; padding: 14px 30px; border-radius: 8px; cursor: pointer; font-weight: 600; font-size: 1rem;">
+            <i class="fa-solid fa-hand-pointer"></i> Scan Finger
+        </button>
+    </div>
+
+    <p style="color:#94a3b8; font-size:0.75rem; margin-top:16px;">
+        <i class="fa-solid fa-shield-halved"></i> Requires the SecuGen WebAPI Client running on this PC with the reader plugged in. Not recognized? Use Manual Entry on the Attendance page instead.
+    </p>
+</div>
+
+<script>
+    document.dispatchEvent(new Event('loadModuleComplete'));
+</script>

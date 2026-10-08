@@ -71,6 +71,7 @@
     }
 
     let currentBreakdown = null; // cached rows for the selected month, keyed by employee_id
+    let paidByEmployee = {}; // who's already paid for the selected month, keyed by employee_id -- shared by renderPayrollTable, Pay All, and Print All Payslips
 
     // ============================================
     // 🔥 CALCULATE PAYROLL FOR THE SELECTED MONTH
@@ -83,16 +84,33 @@
         const monthStart = new Date(year, month - 1, 1).toISOString().split('T')[0];
         const monthEnd = new Date(year, month, 0).toISOString().split('T')[0];
         const daysInMonth = new Date(year, month, 0).getDate();
+        // 🔥 CHANGED: don't consider any month before September 2026
+        // (see LEAVE_TRACKING_START in shared-attendance-utils.js) --
+        // yearStart used to always be Jan 1.
+        const yearStart = effectiveYearStart(year);
 
         const tbody = document.getElementById('payrollTableBody');
         tbody.innerHTML = `<tr><td colspan="10" style="text-align:center;padding:30px;color:#94a3b8;"><i class="fa-solid fa-spinner fa-spin"></i> Calculating...</td></tr>`;
 
-        const [employeesRes, jobsRes, unpaidLeaveRes, attendanceRes, alreadyPaidRes] = await Promise.all([
+        const [employeesRes, jobsRes, unpaidLeaveRes, annualLeaveRes, attendanceRes, alreadyPaidRes] = await Promise.all([
             supabaseClient.from('employees').select('employee_id, first_name, last_name').eq('status', 'Active').order('first_name'),
-            supabaseClient.from('employee_employment').select('employee_id, basic_pay, allowances, is_fixed_pay'),
+            // bank_name/bank_branch/bank_account_number: not used in the
+            // payroll calculation itself, just carried through on each
+            // breakdown so the Bank Report/CSV export can read them
+            // straight off currentBreakdown without a second query.
+            supabaseClient.from('employee_employment').select('employee_id, basic_pay, allowances, is_fixed_pay, annual_leave_days, bank_name, bank_branch, bank_account_number'),
             supabaseClient.from('leave_requests').select('employee_id, start_date, end_date')
                 .eq('leave_type', 'Unpaid').eq('status', 'Approved')
                 .lte('start_date', monthEnd).gte('end_date', monthStart),
+            // 🔥 ADDED: every Approved Annual/Emergency request from the
+            // start of the CALENDAR YEAR through the end of this payroll
+            // month -- not just this month -- so we can tell how much of
+            // the employee's entitlement was already used up before this
+            // month started. Mirrors the "Annual + Emergency share one
+            // balance" rule from the Leave page (leave/index.js).
+            supabaseClient.from('leave_requests').select('employee_id, start_date, end_date')
+                .in('leave_type', ['Annual', 'Emergency']).eq('status', 'Approved')
+                .lte('start_date', monthEnd).gte('end_date', yearStart),
             supabaseClient.from('employee_attendance').select('employee_id, overtime_hours')
                 .gte('attendance_date', monthStart).lte('attendance_date', monthEnd),
             supabaseClient.from('payroll_records').select('employee_id, net_pay, paid_at')
@@ -112,12 +130,37 @@
             unpaidDaysByEmployee[l.employee_id] = (unpaidDaysByEmployee[l.employee_id] || 0) + days;
         });
 
+        // 🔥 ADDED: Annual/Emergency leave only deducts salary once the
+        // employee has used up their yearly entitlement -- days within
+        // the balance are free, same as the Leave page shows them. Walk
+        // each approved request day-by-day (clipped to this calendar
+        // year through this payroll month) and sort each day into
+        // "before this month" vs "within this month" per employee, so we
+        // know how much entitlement was already spent walking into this
+        // month before deciding how much of THIS month's leave still
+        // fits inside what's left of it.
+        const annualDaysBeforeMonthByEmployee = {};
+        const annualDaysThisMonthByEmployee = {};
+        (annualLeaveRes.data || []).forEach(l => {
+            let d = new Date(Math.max(new Date(l.start_date), new Date(yearStart)));
+            const end = new Date(Math.min(new Date(l.end_date), new Date(monthEnd)));
+            while (d <= end) {
+                const dateStr = formatDateLocal(d.getFullYear(), d.getMonth(), d.getDate());
+                if (dateStr < monthStart) {
+                    annualDaysBeforeMonthByEmployee[l.employee_id] = (annualDaysBeforeMonthByEmployee[l.employee_id] || 0) + 1;
+                } else {
+                    annualDaysThisMonthByEmployee[l.employee_id] = (annualDaysThisMonthByEmployee[l.employee_id] || 0) + 1;
+                }
+                d.setDate(d.getDate() + 1);
+            }
+        });
+
         const overtimeHoursByEmployee = {};
         (attendanceRes.data || []).forEach(a => {
             overtimeHoursByEmployee[a.employee_id] = (overtimeHoursByEmployee[a.employee_id] || 0) + (a.overtime_hours || 0);
         });
 
-        const paidByEmployee = {};
+        paidByEmployee = {};
         (alreadyPaidRes.data || []).forEach(p => { paidByEmployee[p.employee_id] = p; });
 
         currentBreakdown = {};
@@ -133,7 +176,27 @@
             // pay component unrelated to attendance, same reasoning
             // that exempts Fixed employees from leave/overtime doesn't
             // apply here.
-            const unpaidDays = isFixedPay ? 0 : (unpaidDaysByEmployee[emp.employee_id] || 0);
+            const explicitUnpaidDays = isFixedPay ? 0 : (unpaidDaysByEmployee[emp.employee_id] || 0);
+
+            // 🔥 ADDED: Annual/Emergency leave only costs salary once the
+            // employee has run out of entitlement for the year -- days
+            // still within the balance are free, matching what the Leave
+            // page already shows as the employee's remaining balance.
+            // annualDaysBeforeMonth = how much of the entitlement was
+            // already spent walking INTO this month; whatever's left of
+            // the entitlement absorbs this month's days first, and only
+            // the days beyond that get deducted. annual_leave_days is a
+            // FULL YEAR figure -- prorated via entitlementForYear() the
+            // same way the Leave page does, so the two pages never
+            // disagree on how much entitlement an employee has this year
+            // (24 -> 8, 48 -> 16 for 2026's Sep-Dec-only scope).
+            const entitlement = entitlementForYear(job.annual_leave_days, year);
+            const annualDaysBeforeMonth = isFixedPay ? 0 : (annualDaysBeforeMonthByEmployee[emp.employee_id] || 0);
+            const annualDaysThisMonth = isFixedPay ? 0 : (annualDaysThisMonthByEmployee[emp.employee_id] || 0);
+            const entitlementLeftAtMonthStart = Math.max(0, entitlement - annualDaysBeforeMonth);
+            const unpaidAnnualDays = Math.max(0, annualDaysThisMonth - entitlementLeftAtMonthStart);
+
+            const unpaidDays = explicitUnpaidDays + unpaidAnnualDays;
             const dailyRate = daysInMonth > 0 ? basicPay / daysInMonth : 0;
             const leaveDeduction = dailyRate * unpaidDays;
             const effectiveBasicPay = Math.max(0, basicPay - leaveDeduction);
@@ -168,9 +231,10 @@
 
             const breakdown = {
                 employeeId: emp.employee_id, name: `${emp.first_name} ${emp.last_name}`,
-                basicPay, allowances, unpaidDays, leaveDeduction, overtimeHours, overtimePay,
+                basicPay, allowances, unpaidDays, explicitUnpaidDays, unpaidAnnualDays, leaveDeduction, overtimeHours, overtimePay,
                 grossSalary, paye, napsaEmployee, napsaEmployer, nhimaEmployee, nhimaEmployer, netPay,
-                daysInMonth, month, year
+                daysInMonth, month, year,
+                bankName: job.bank_name || '', bankBranch: job.bank_branch || '', bankAccount: job.bank_account_number || ''
             };
             currentBreakdown[emp.employee_id] = breakdown;
 
@@ -184,6 +248,19 @@
 
     function formatNumber(num) {
         return (num || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    }
+
+    // 🔥 ADDED: a leave deduction can now come from two different places
+    // -- explicit 'Unpaid' leave (always deducted) and Annual/Emergency
+    // leave that ran past the employee's yearly entitlement (deducted
+    // only once the balance is used up). Spell out which is which
+    // instead of a single opaque "Xd unpaid", wherever this shows up
+    // (payroll table, payslip, Pay confirmation).
+    function unpaidDaysLabel(explicitUnpaidDays, unpaidAnnualDays) {
+        const parts = [];
+        if (explicitUnpaidDays > 0) parts.push(`${explicitUnpaidDays}d unpaid leave`);
+        if (unpaidAnnualDays > 0) parts.push(`${unpaidAnnualDays}d beyond annual leave balance`);
+        return parts.join(' + ');
     }
 
     // ============================================
@@ -214,7 +291,7 @@
                 </td>
                 <td style="text-align:right; color:${b.leaveDeduction > 0 ? '#dc2626' : '#94a3b8'};">
                     ${b.leaveDeduction > 0 ? '-K' + formatNumber(b.leaveDeduction) : '-'}
-                    ${b.unpaidDays > 0 ? `<br><small>${b.unpaidDays}d unpaid</small>` : ''}
+                    ${b.unpaidDays > 0 ? `<br><small>${unpaidDaysLabel(b.explicitUnpaidDays, b.unpaidAnnualDays)}</small>` : ''}
                 </td>
                 <td style="text-align:right; color:${b.overtimePay > 0 ? '#059669' : '#94a3b8'};">
                     ${b.overtimePay > 0 ? '+K' + formatNumber(b.overtimePay) : '-'}
@@ -246,6 +323,41 @@
     // a fresh Calculate would show different numbers than what was
     // actually paid. The payslip must always reflect what was actually
     // recorded and paid, not a recalculation.
+    // 🔥 Shared payslip markup -- one employee's slip content (no
+    // <html>/<head>/print-script wrapper), used by both printPayslip
+    // (one employee, popup prints immediately) and printAllPayslips
+    // (many employees, one popup, one slip per printed page). Keeping
+    // this in one place means the two print paths can never drift apart
+    // in what a payslip actually shows.
+    function buildPayslipBlockHtml(emp, r, advanceDeducted, netBeforeAdvance, monthLabel, paidFromLabel) {
+        return `
+            <h1>Payslip</h1>
+            <p class="subtitle">${monthLabel} &middot; ${emp.first_name} ${emp.last_name}${emp.employee_code ? ' (' + emp.employee_code + ')' : ''} &middot; Paid ${new Date(r.paid_at).toLocaleDateString()} via ${paidFromLabel}</p>
+
+            <div class="section-title">Earnings</div>
+            <div class="row"><span>Basic Pay</span><span>K${formatNumber(r.basic_pay)}</span></div>
+            ${r.allowances > 0 ? `<div class="row"><span>Allowances</span><span>K${formatNumber(r.allowances)}</span></div>` : ''}
+            ${r.leave_deduction > 0 ? `<div class="row neg"><span>Leave Deduction (${unpaidDaysLabel(r.unpaid_leave_days - (r.unpaid_annual_leave_days || 0), r.unpaid_annual_leave_days || 0)})</span><span>-K${formatNumber(r.leave_deduction)}</span></div>` : ''}
+            ${r.overtime_pay > 0 ? `<div class="row pos"><span>Overtime (${Number(r.overtime_hours).toFixed(1)}h)</span><span>+K${formatNumber(r.overtime_pay)}</span></div>` : ''}
+            <div class="row total"><span>Gross Salary</span><span>K${formatNumber(r.gross_salary)}</span></div>
+
+            <div class="section-title">Statutory Deductions</div>
+            <div class="row neg"><span>PAYE</span><span>-K${formatNumber(r.paye)}</span></div>
+            <div class="row neg"><span>NAPSA</span><span>-K${formatNumber(r.napsa)}</span></div>
+            <div class="row neg"><span>NHIMA</span><span>-K${formatNumber(r.nhima)}</span></div>
+
+            ${advanceDeducted > 0 ? `
+            <div class="row total" style="border-top:1px solid #e2e8f0; font-size:1rem;"><span>Net Pay (before advance)</span><span>K${formatNumber(netBeforeAdvance)}</span></div>
+            <div class="section-title">Advance Recovery</div>
+            <div class="row neg"><span>Salary Advance Deduction</span><span>-K${formatNumber(advanceDeducted)}</span></div>
+            ` : ''}
+
+            <div class="row total"><span>Net Pay (Take-Home)</span><span>K${formatNumber(r.net_pay)}</span></div>
+
+            <p style="margin-top:30px; font-size:0.7rem; color:#94a3b8;">This is a system-generated payslip.</p>
+        `;
+    }
+
     window.printPayslip = async function (employeeId) {
         const cached = currentBreakdown[employeeId];
         if (!cached) return;
@@ -299,35 +411,265 @@
                 </style>
             </head>
             <body>
-                <h1>Payslip</h1>
-                <p class="subtitle">${monthLabel} &middot; ${emp.first_name} ${emp.last_name}${emp.employee_code ? ' (' + emp.employee_code + ')' : ''} &middot; Paid ${new Date(r.paid_at).toLocaleDateString()} via ${paidFromLabel}</p>
-
-                <div class="section-title">Earnings</div>
-                <div class="row"><span>Basic Pay</span><span>K${formatNumber(r.basic_pay)}</span></div>
-                ${r.allowances > 0 ? `<div class="row"><span>Allowances</span><span>K${formatNumber(r.allowances)}</span></div>` : ''}
-                ${r.leave_deduction > 0 ? `<div class="row neg"><span>Leave Deduction (${r.unpaid_leave_days} unpaid day(s))</span><span>-K${formatNumber(r.leave_deduction)}</span></div>` : ''}
-                ${r.overtime_pay > 0 ? `<div class="row pos"><span>Overtime (${Number(r.overtime_hours).toFixed(1)}h)</span><span>+K${formatNumber(r.overtime_pay)}</span></div>` : ''}
-                <div class="row total"><span>Gross Salary</span><span>K${formatNumber(r.gross_salary)}</span></div>
-
-                <div class="section-title">Statutory Deductions</div>
-                <div class="row neg"><span>PAYE</span><span>-K${formatNumber(r.paye)}</span></div>
-                <div class="row neg"><span>NAPSA</span><span>-K${formatNumber(r.napsa)}</span></div>
-                <div class="row neg"><span>NHIMA</span><span>-K${formatNumber(r.nhima)}</span></div>
-
-                ${advanceDeducted > 0 ? `
-                <div class="row total" style="border-top:1px solid #e2e8f0; font-size:1rem;"><span>Net Pay (before advance)</span><span>K${formatNumber(netBeforeAdvance)}</span></div>
-                <div class="section-title">Advance Recovery</div>
-                <div class="row neg"><span>Salary Advance Deduction</span><span>-K${formatNumber(advanceDeducted)}</span></div>
-                ` : ''}
-
-                <div class="row total"><span>Net Pay (Take-Home)</span><span>K${formatNumber(r.net_pay)}</span></div>
-
-                <p style="margin-top:30px; font-size:0.7rem; color:#94a3b8;">This is a system-generated payslip.</p>
+                ${buildPayslipBlockHtml(emp, r, advanceDeducted, netBeforeAdvance, monthLabel, paidFromLabel)}
                 <script>window.onload = function() { window.print(); };<\/script>
             </body>
             </html>
         `);
         printWindow.document.close();
+    };
+
+    // ============================================
+    // 🔥 ADDED: PRINT ALL PAYSLIPS -- one print job covering every paid
+    // employee for the selected month: a one-page payroll register
+    // (salary printout) summarizing everyone, followed by each
+    // employee's individual payslip (same markup as printPayslip, via
+    // buildPayslipBlockHtml) on its own page. Called automatically right
+    // after a successful "Pay All" run, and also available as its own
+    // button for reprinting any month that already has paid employees.
+    //
+    // employeeIds: optional array to restrict to specific employees
+    // (used by confirmPayAll for "just the batch I paid"). Without it,
+    // prints every employee currently on record as paid for the
+    // selected month.
+    // ============================================
+    window.printAllPayslips = async function (employeeIds) {
+        if (!currentBreakdown) { alert('Pick a month and click Calculate first.'); return; }
+
+        const ids = employeeIds && employeeIds.length ? employeeIds : Object.keys(paidByEmployee);
+        if (ids.length === 0) {
+            alert('No paid employees found for this month yet.');
+            return;
+        }
+
+        const [year, month] = (() => {
+            const first = currentBreakdown[ids[0]] || Object.values(currentBreakdown)[0];
+            return [first.year, first.month];
+        })();
+
+        const [empRes, recordsRes, recoveriesRes] = await Promise.all([
+            supabaseClient.from('employees').select('employee_id, first_name, last_name, employee_code').in('employee_id', ids),
+            supabaseClient.from('payroll_records').select('*')
+                .in('employee_id', ids).eq('pay_period_month', month).eq('pay_period_year', year),
+            supabaseClient.from('advance_recoveries').select('payroll_record_id, amount, method').eq('method', 'Payroll Deduction')
+        ]);
+
+        const empById = {};
+        (empRes.data || []).forEach(e => { empById[e.employee_id] = e; });
+
+        const recoveryByRecordId = {};
+        (recoveriesRes.data || []).forEach(rec => { recoveryByRecordId[rec.payroll_record_id] = rec.amount; });
+
+        const records = (recordsRes.data || []).filter(r => empById[r.employee_id]);
+        if (records.length === 0) {
+            alert('No saved payroll records found for the selected employees/month.');
+            return;
+        }
+
+        const monthLabel = new Date(year, month - 1, 1).toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
+        const paidFromLabel = code => code === '1121' ? 'Bank (ZMW)' : 'Cash in Hand (ZMW)';
+
+        // Keep register + slips in the same stable order as the payroll table.
+        records.sort((a, b) => (empById[a.employee_id]?.first_name || '').localeCompare(empById[b.employee_id]?.first_name || ''));
+
+        const totalNet = records.reduce((s, r) => s + (r.net_pay || 0), 0);
+        const registerRows = records.map(r => {
+            const emp = empById[r.employee_id] || {};
+            return `
+                <tr>
+                    <td style="padding:4px 8px;">${emp.first_name || ''} ${emp.last_name || ''}</td>
+                    <td style="text-align:right;">K${formatNumber(r.basic_pay)}</td>
+                    <td style="text-align:right;">K${formatNumber(r.gross_salary)}</td>
+                    <td style="text-align:right;">K${formatNumber(r.paye)}</td>
+                    <td style="text-align:right;">K${formatNumber(r.napsa)}</td>
+                    <td style="text-align:right;">K${formatNumber(r.nhima)}</td>
+                    <td style="text-align:right; font-weight:600;">K${formatNumber(r.net_pay)}</td>
+                    <td>${r.paid_at ? new Date(r.paid_at).toLocaleDateString() : ''}</td>
+                </tr>
+            `;
+        }).join('');
+
+        const slipBlocks = records.map(r => {
+            const emp = empById[r.employee_id] || {};
+            const advanceDeducted = recoveryByRecordId[r.id] || 0;
+            const netBeforeAdvance = r.net_pay + advanceDeducted;
+            return `<div class="slip-page">${buildPayslipBlockHtml(emp, r, advanceDeducted, netBeforeAdvance, monthLabel, paidFromLabel(r.paid_from))}</div>`;
+        }).join('');
+
+        const printWindow = window.open('', '_blank', 'width=900,height=800');
+        if (!printWindow) { alert('Please allow popups to print.'); return; }
+
+        printWindow.document.write(`
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <title>Payroll Register &amp; Payslips - ${monthLabel}</title>
+                <style>
+                    @page { margin: 12mm; }
+                    body { font-family: Arial, sans-serif; color: #0f172a; }
+                    h1 { font-size: 1.3rem; margin-bottom: 2px; }
+                    .subtitle { color: #64748b; margin-top: 0; margin-bottom: 16px; font-size: 0.85rem; }
+                    table { border-collapse: collapse; width: 100%; font-size: 0.75rem; margin-bottom: 10px; }
+                    th, td { border: 1px solid #e2e8f0; padding: 4px 6px; }
+                    th { background: #f1f5f9; text-align: right; }
+                    th:first-child, td:first-child { text-align: left; }
+                    tfoot td { font-weight: 700; border-top: 2px solid #0f172a; }
+
+                    .register-page { page-break-after: always; }
+                    .slip-page { max-width: 600px; margin: 0 auto; page-break-after: always; }
+                    .slip-page:last-child { page-break-after: auto; }
+                    .slip-page h1 { font-size: 1.3rem; margin-bottom: 2px; }
+                    .slip-page .subtitle { margin-bottom: 20px; }
+                    .row { display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid #f1f5f9; }
+                    .row.total { border-top: 2px solid #0f172a; border-bottom: none; font-weight: 700; font-size: 1.1rem; padding-top: 10px; margin-top: 6px; }
+                    .section-title { font-weight: 600; margin-top: 18px; margin-bottom: 4px; color: #475569; font-size: 0.8rem; text-transform: uppercase; }
+                    .neg { color: #dc2626; }
+                    .pos { color: #059669; }
+                </style>
+            </head>
+            <body>
+                <div class="register-page">
+                    <h1>Payroll Register</h1>
+                    <p class="subtitle">${monthLabel} &middot; ${records.length} employee(s) &middot; Generated ${new Date().toLocaleString()}</p>
+                    <table>
+                        <thead>
+                            <tr>
+                                <th style="text-align:left;">Employee</th>
+                                <th>Basic Pay</th><th>Gross</th><th>PAYE</th><th>NAPSA</th><th>NHIMA</th><th>Net Pay</th><th style="text-align:left;">Paid</th>
+                            </tr>
+                        </thead>
+                        <tbody>${registerRows}</tbody>
+                        <tfoot>
+                            <tr><td colspan="6" style="text-align:right;">Total Net Pay</td><td style="text-align:right;">K${formatNumber(totalNet)}</td><td></td></tr>
+                        </tfoot>
+                    </table>
+                </div>
+                ${slipBlocks}
+                <script>window.onload = function() { window.print(); };<\/script>
+            </body>
+            </html>
+        `);
+        printWindow.document.close();
+    };
+
+    // ============================================
+    // 🔥 ADDED: BANK REPORT -- the batch-payment list handed/uploaded to
+    // the bank so it can pay everyone's salary in one go: Employee,
+    // Bank, Branch, Account Number, Net Pay. Deliberately reads straight
+    // off currentBreakdown (the live Calculate result), NOT saved
+    // payroll_records like Print All Payslips does -- this report's job
+    // is to be the INSTRUCTION you hand the bank before paying, not a
+    // receipt of having already paid, so it has to work before Pay All
+    // has even run. bank_name/bank_branch/bank_account_number ride along
+    // on every breakdown already (see the employee_employment select in
+    // calculatePayroll), so no extra query is needed here.
+    //
+    // Rows with K0 net pay are skipped outright (nothing to submit for
+    // them); rows missing bank details are still INCLUDED (so nobody's
+    // pay silently disappears from the report) but visibly flagged --
+    // better to catch it here than have the bank reject the batch.
+    // ============================================
+    function bankReportRows() {
+        if (!currentBreakdown) return null;
+        return Object.values(currentBreakdown)
+            .filter(b => b.netPay > 0)
+            .sort((a, b) => a.name.localeCompare(b.name));
+    }
+
+    window.printBankReport = function () {
+        const rows = bankReportRows();
+        if (!rows) { alert('Pick a month and click Calculate first.'); return; }
+        if (rows.length === 0) { alert('No employees with a net pay amount for this month yet.'); return; }
+
+        const { month, year } = rows[0];
+        const monthLabel = new Date(year, month - 1, 1).toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
+        const missingCount = rows.filter(r => !r.bankName || !r.bankAccount).length;
+        const totalNet = rows.reduce((s, r) => s + r.netPay, 0);
+
+        const rowsHtml = rows.map(r => {
+            const missing = !r.bankName || !r.bankAccount;
+            return `
+                <tr style="${missing ? 'background:#fef2f2;' : ''}">
+                    <td style="padding:4px 8px;">${r.name}${missing ? ' <span style="color:#dc2626; font-weight:600;">⚠ missing bank details</span>' : ''}</td>
+                    <td>${r.bankName || '-'}</td>
+                    <td>${r.bankBranch || '-'}</td>
+                    <td>${r.bankAccount || '-'}</td>
+                    <td style="text-align:right; font-weight:600;">K${formatNumber(r.netPay)}</td>
+                </tr>
+            `;
+        }).join('');
+
+        const printWindow = window.open('', '_blank', 'width=1000,height=700');
+        if (!printWindow) { alert('Please allow popups to print.'); return; }
+
+        printWindow.document.write(`
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <title>Bank Payment Report - ${monthLabel}</title>
+                <style>
+                    @page { margin: 12mm; }
+                    body { font-family: Arial, sans-serif; color: #0f172a; }
+                    h1 { font-size: 1.3rem; margin-bottom: 2px; }
+                    .subtitle { color: #64748b; margin-top: 0; margin-bottom: 10px; font-size: 0.85rem; }
+                    .warn { color: #dc2626; font-size: 0.8rem; margin-bottom: 14px; }
+                    table { border-collapse: collapse; width: 100%; font-size: 0.8rem; }
+                    th, td { border: 1px solid #e2e8f0; padding: 5px 8px; }
+                    th { background: #f1f5f9; text-align: left; }
+                    tfoot td { font-weight: 700; border-top: 2px solid #0f172a; text-align: right; }
+                </style>
+            </head>
+            <body>
+                <h1>Bank Payment Report</h1>
+                <p class="subtitle">${monthLabel} &middot; ${rows.length} employee(s) &middot; Generated ${new Date().toLocaleString()}</p>
+                ${missingCount > 0 ? `<p class="warn">⚠ ${missingCount} employee(s) below are missing bank details -- add them in Employee Management before submitting this to the bank.</p>` : ''}
+                <table>
+                    <thead>
+                        <tr><th>Employee</th><th>Bank</th><th>Branch</th><th>Account Number</th><th style="text-align:right;">Net Pay</th></tr>
+                    </thead>
+                    <tbody>${rowsHtml}</tbody>
+                    <tfoot>
+                        <tr><td colspan="4">Total</td><td>K${formatNumber(totalNet)}</td></tr>
+                    </tfoot>
+                </table>
+                <script>window.onload = function() { window.print(); };<\/script>
+            </body>
+            </html>
+        `);
+        printWindow.document.close();
+    };
+
+    // 🔥 ADDED: same data as printBankReport, as a downloadable CSV --
+    // most banks' bulk/batch salary upload accepts (or can be matched
+    // to) a plain CSV of name/account/amount, which is far more useful
+    // for actually SUBMITTING a payment than a printed page someone
+    // would have to retype.
+    window.exportBankReportCsv = function () {
+        const rows = bankReportRows();
+        if (!rows) { alert('Pick a month and click Calculate first.'); return; }
+        if (rows.length === 0) { alert('No employees with a net pay amount for this month yet.'); return; }
+
+        const { month, year } = rows[0];
+
+        // Excel/most bank portals expect a comma-separated value to be
+        // quoted, and a literal quote inside a value doubled -- names are
+        // free text and could in principle contain either.
+        const csvField = v => `"${String(v ?? '').replace(/"/g, '""')}"`;
+        const header = ['Employee Name', 'Bank Name', 'Branch / Sort Code', 'Account Number', 'Amount (ZMW)'];
+        const lines = [header.map(csvField).join(',')];
+        rows.forEach(r => {
+            lines.push([r.name, r.bankName, r.bankBranch, r.bankAccount, r.netPay.toFixed(2)].map(csvField).join(','));
+        });
+
+        const blob = new Blob([lines.join('\r\n')], { type: 'text/csv;charset=utf-8;' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `bank-payment-${year}-${String(month).padStart(2, '0')}.csv`;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        URL.revokeObjectURL(url);
     };
 
     // ============================================
@@ -450,7 +792,7 @@
         document.getElementById('payConfirmBreakdown').innerHTML = `
             <div style="display:flex; justify-content:space-between; padding:4px 0;"><span>Basic Pay</span><span>K${formatNumber(b.basicPay)}</span></div>
             ${b.allowances > 0 ? `<div style="display:flex; justify-content:space-between; padding:4px 0;"><span>Allowances</span><span>K${formatNumber(b.allowances)}</span></div>` : ''}
-            ${b.leaveDeduction > 0 ? `<div style="display:flex; justify-content:space-between; padding:4px 0; color:#dc2626;"><span>Leave Deduction (${b.unpaidDays}d unpaid)</span><span>-K${formatNumber(b.leaveDeduction)}</span></div>` : ''}
+            ${b.leaveDeduction > 0 ? `<div style="display:flex; justify-content:space-between; padding:4px 0; color:#dc2626;"><span>Leave Deduction (${unpaidDaysLabel(b.explicitUnpaidDays, b.unpaidAnnualDays)})</span><span>-K${formatNumber(b.leaveDeduction)}</span></div>` : ''}
             ${b.overtimePay > 0 ? `<div style="display:flex; justify-content:space-between; padding:4px 0; color:#059669;"><span>Overtime (${b.overtimeHours.toFixed(1)}h)</span><span>+K${formatNumber(b.overtimePay)}</span></div>` : ''}
             <div style="display:flex; justify-content:space-between; padding:4px 0; font-weight:600; border-top:1px solid #e2e8f0; margin-top:4px;"><span>Gross Salary</span><span>K${formatNumber(b.grossSalary)}</span></div>
             <div style="display:flex; justify-content:space-between; padding:4px 0; color:#dc2626;"><span>PAYE</span><span>-K${formatNumber(b.paye)}</span></div>
@@ -488,33 +830,29 @@
         document.getElementById('payConfirmModal').style.display = 'flex';
     };
 
-    window.confirmPayEmployee = async function () {
-        const employeeId = document.getElementById('payConfirmModal').dataset.employeeId;
-        const outstandingAdvance = parseFloat(document.getElementById('payConfirmModal').dataset.outstandingAdvance) || 0;
+    // ============================================
+    // 🔥 CORE PAY LOGIC -- shared by the single-employee "Pay" button
+    // (confirmPayEmployee, below) and the "Pay All" bulk action
+    // (confirmPayAll, further down). Does the actual DB writes for ONE
+    // employee and returns a result object; it touches no DOM, shows no
+    // alert, and does not refresh the table -- callers do that once,
+    // after either one employee or the whole batch is done, instead of
+    // after every single row.
+    //
+    // NOTE: not wrapped in a DB transaction (the underlying client
+    // doesn't expose one here) -- journal_entries, journal_lines,
+    // payroll_records and advance_recoveries are written as separate
+    // sequential inserts. If one fails partway through, earlier inserts
+    // for THIS employee already committed; callers get an error back but
+    // nothing here rolls itself back. This was true before this refactor
+    // too (see git history), just now shared by both call sites instead
+    // of duplicated.
+    // ============================================
+    async function processEmployeePay(employeeId, { advanceDeduction = 0, paidFrom }) {
         const b = currentBreakdown[employeeId];
-        if (!b) return;
-
-        // 🔥 ADDED: advance deduction -- validated against both the
-        // outstanding balance and net pay, so it's never possible to
-        // deduct more than either allows.
-        const advanceDeduction = parseFloat(document.getElementById('payAdvanceDeduction').value) || 0;
-        if (advanceDeduction > outstandingAdvance) {
-            alert(`Cannot deduct more than the outstanding advance (K${formatNumber(outstandingAdvance)}).`);
-            return;
-        }
-        if (advanceDeduction > b.netPay) {
-            alert(`Cannot deduct more than the net pay (K${formatNumber(b.netPay)}).`);
-            return;
-        }
-
-        const paidFrom = document.getElementById('payFromAccount').value;
-        const btn = document.getElementById('confirmPayBtn');
-        btn.disabled = true;
-        btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Processing...';
+        if (!b) return { success: false, error: new Error('No breakdown cached for this employee -- run Calculate first.') };
 
         try {
-            await ensureChartOfAccounts();
-
             // ---- POST THE JOURNAL ENTRY ----
             // Debit: Salary Expense (gross) + Statutory Contributions
             //   Expense (employer NAPSA + employer NHIMA)
@@ -563,6 +901,7 @@
                 basic_pay: b.basicPay,
                 allowances: b.allowances,
                 unpaid_leave_days: b.unpaidDays,
+                unpaid_annual_leave_days: b.unpaidAnnualDays,
                 leave_deduction: b.leaveDeduction,
                 overtime_hours: b.overtimeHours,
                 overtime_pay: b.overtimePay,
@@ -588,8 +927,44 @@
                 if (recoveryError) throw recoveryError;
             }
 
+            return { success: true, cashPortion, name: b.name };
+        } catch (error) {
+            console.error(`Error processing payment for ${b.name}:`, error);
+            return { success: false, error, name: b.name };
+        }
+    }
+
+    window.confirmPayEmployee = async function () {
+        const employeeId = document.getElementById('payConfirmModal').dataset.employeeId;
+        const outstandingAdvance = parseFloat(document.getElementById('payConfirmModal').dataset.outstandingAdvance) || 0;
+        const b = currentBreakdown[employeeId];
+        if (!b) return;
+
+        // 🔥 ADDED: advance deduction -- validated against both the
+        // outstanding balance and net pay, so it's never possible to
+        // deduct more than either allows.
+        const advanceDeduction = parseFloat(document.getElementById('payAdvanceDeduction').value) || 0;
+        if (advanceDeduction > outstandingAdvance) {
+            alert(`Cannot deduct more than the outstanding advance (K${formatNumber(outstandingAdvance)}).`);
+            return;
+        }
+        if (advanceDeduction > b.netPay) {
+            alert(`Cannot deduct more than the net pay (K${formatNumber(b.netPay)}).`);
+            return;
+        }
+
+        const paidFrom = document.getElementById('payFromAccount').value;
+        const btn = document.getElementById('confirmPayBtn');
+        btn.disabled = true;
+        btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Processing...';
+
+        try {
+            await ensureChartOfAccounts();
+            const result = await processEmployeePay(employeeId, { advanceDeduction, paidFrom });
+            if (!result.success) throw result.error;
+
             document.getElementById('payConfirmModal').style.display = 'none';
-            alert(`✅ ${b.name} paid K${formatNumber(cashPortion)} net${advanceDeduction > 0 ? ` (K${formatNumber(advanceDeduction)} recovered from advance)` : ''}.`);
+            alert(`✅ ${b.name} paid K${formatNumber(result.cashPortion)} net${advanceDeduction > 0 ? ` (K${formatNumber(advanceDeduction)} recovered from advance)` : ''}.`);
             await window.calculatePayroll();
             await loadStatutoryPayments();
         } catch (error) {
@@ -598,6 +973,111 @@
         } finally {
             btn.disabled = false;
             btn.innerHTML = '<i class="fa-solid fa-check"></i> Confirm Payment';
+        }
+    };
+
+    // ============================================
+    // 🔥 ADDED: PAY ALL -- pays every employee for the selected month
+    // who isn't already paid, in one action. Reuses processEmployeePay
+    // per employee (same journal/payroll_records writes as the
+    // individual Pay button, same isWithinPayrollWindow gate), looped
+    // SEQUENTIALLY rather than in parallel -- these are real accounting
+    // writes and running them concurrently would race on
+    // ensureChartOfAccounts and make a partial-failure harder to reason
+    // about. Advance deductions are NOT handled here by design: an
+    // employee with an outstanding advance still needs the individual
+    // "Pay" button so someone decides the deduction amount for them --
+    // the "Pay All" confirmation modal says this explicitly. The
+    // per-employee Pay button keeps working exactly as before; this is
+    // purely additive.
+    // ============================================
+    window.openPayAllConfirm = function () {
+        if (!currentBreakdown) { alert('Pick a month and click Calculate first.'); return; }
+        if (!isWithinPayrollWindow()) {
+            alert('Salary payments can only be processed between the 1st and 5th of the month.');
+            return;
+        }
+
+        const unpaidIds = Object.keys(currentBreakdown).filter(id => !paidByEmployee[id]);
+        if (unpaidIds.length === 0) {
+            alert('Everyone for this month is already paid.');
+            return;
+        }
+
+        const totalNet = unpaidIds.reduce((sum, id) => sum + currentBreakdown[id].netPay, 0);
+
+        document.getElementById('payAllSummary').innerHTML = `
+            <div style="display:flex; justify-content:space-between; padding:4px 0;"><span>Employees to pay</span><span style="font-weight:600;">${unpaidIds.length}</span></div>
+            <div style="display:flex; justify-content:space-between; padding:6px 0; font-weight:700; font-size:1.1rem; border-top:2px solid #0f172a; margin-top:4px; color:#059669;"><span>Total Net Pay</span><span>K${formatNumber(totalNet)}</span></div>
+        `;
+        document.getElementById('payAllConfirmModal').dataset.employeeIds = JSON.stringify(unpaidIds);
+        document.getElementById('payAllProgress').style.display = 'none';
+        document.getElementById('payAllProgress').innerHTML = '';
+        document.getElementById('payAllConfirmModal').style.display = 'flex';
+    };
+
+    window.confirmPayAll = async function () {
+        const modal = document.getElementById('payAllConfirmModal');
+        const employeeIds = JSON.parse(modal.dataset.employeeIds || '[]');
+        if (employeeIds.length === 0) return;
+
+        // Defense in depth, same reasoning as openPayConfirm/openPayAllConfirm.
+        if (!isWithinPayrollWindow()) {
+            alert('Salary payments can only be processed between the 1st and 5th of the month.');
+            modal.style.display = 'none';
+            return;
+        }
+
+        const paidFrom = document.getElementById('payAllFromAccount').value;
+        const confirmBtn = document.getElementById('confirmPayAllBtn');
+        const cancelBtn = document.getElementById('payAllCancelBtn');
+        const progress = document.getElementById('payAllProgress');
+        confirmBtn.disabled = true;
+        cancelBtn.disabled = true;
+        progress.style.display = 'block';
+
+        // Hoisted out of the loop -- it's idempotent/account-level, not
+        // per-employee, so there's no point re-checking it N times.
+        await ensureChartOfAccounts();
+
+        const succeeded = [];
+        const failed = [];
+        for (let i = 0; i < employeeIds.length; i++) {
+            const employeeId = employeeIds[i];
+            const name = currentBreakdown[employeeId]?.name || employeeId;
+            progress.innerHTML = `<i class="fa-solid fa-spinner fa-spin"></i> Paying ${i + 1} of ${employeeIds.length}: ${name}...`;
+            const result = await processEmployeePay(employeeId, { advanceDeduction: 0, paidFrom });
+            if (result.success) {
+                succeeded.push(result.name);
+            } else {
+                failed.push(`${result.name || name}: ${result.error?.message || 'unknown error'}`);
+            }
+        }
+
+        modal.style.display = 'none';
+        confirmBtn.disabled = false;
+        cancelBtn.disabled = false;
+        progress.style.display = 'none';
+
+        let summary = `✅ Paid ${succeeded.length} of ${employeeIds.length} employee(s).`;
+        if (failed.length > 0) {
+            summary += `\n\n⚠️ ${failed.length} failed:\n` + failed.join('\n');
+        }
+        alert(summary);
+
+        await window.calculatePayroll();
+        await loadStatutoryPayments();
+
+        // Per the request this feature was built for: Pay All should
+        // also produce the combined salary printout + slips for
+        // everyone just paid, instead of making someone print each
+        // payslip one by one afterward.
+        if (succeeded.length > 0) {
+            // paidByEmployee was just refreshed by the calculatePayroll()
+            // call above, so this is simply "whichever of the employees we
+            // attempted this run are now on record as paid."
+            const idsToPrint = employeeIds.filter(id => paidByEmployee[id]);
+            await window.printAllPayslips(idsToPrint);
         }
     };
 

@@ -4,6 +4,18 @@
     independent of registering a patient in the main panel.
 </p>
 
+<!-- 🔥 ADDED: QUICK SALE shortcut -- opens the walk-in Quick Sale grid on
+     the CRM page's main view (initQuickSale() in crm-view.js defines
+     window.crmOpenQuickSale). Does nothing if the main view hasn't loaded
+     yet or the role isn't allowed to sell. -->
+<div style="padding: 0 20px; margin-top: 16px;">
+    <button class="btn btn-success btn-sm" style="width:100%; display:flex; justify-content:space-between; align-items:center;"
+        onclick="if (window.crmOpenQuickSale) window.crmOpenQuickSale();" title="Open the quick walk-in sale grid">
+        <span><i class="fa-solid fa-cash-register"></i> Quick Sale</span>
+        <span style="opacity:0.85; font-size:0.85rem; border:1px solid rgba(255,255,255,0.5); border-radius:4px; padding:0 6px;">+</span>
+    </button>
+</div>
+
 <!-- 🔥 MOVED HERE FROM THE MAIN CRM PAGE: PATIENT SALES LOOKUP -->
 <!-- This used to be a card at the top of crm-view.html, but it has
      nothing to do with the registration form there -- it's a general

@@ -448,6 +448,24 @@
         });
     }
 
+    // 🔥 ADDED: "+ Add Item" button (same fix as retail/index.js's
+    // retailAddItemBtn) -- manually appends a blank row on demand. This is
+    // what was actually missing for editing an existing invoice: opening a
+    // saved sale via Search > Edit (loadWholesaleForEdit()) fills exactly
+    // one row per item already on that invoice and leaves no extra blank
+    // row behind, and the only other way a new row ever appeared was the
+    // auto-add-on-last-row logic below (typing a qty / picking a batch),
+    // which needs an already-blank last row to trigger from. With every
+    // row already holding a saved item, there was no row left to type a
+    // new product into at all. This button opens one directly, in new
+    // invoices and edited ones alike.
+    const wholesaleAddItemBtn = document.getElementById('wholesaleAddItemBtn');
+    if (wholesaleAddItemBtn) {
+        wholesaleAddItemBtn.addEventListener('click', function () {
+            addPOSRow();
+        });
+    }
+
     if (closeCustomerModalBtn) {
         closeCustomerModalBtn.addEventListener('click', function() {
             customerModal.style.display = 'none';

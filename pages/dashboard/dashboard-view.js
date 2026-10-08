@@ -37,6 +37,74 @@
         return;
     }
 
+    // ============================================
+    // 🔥 ADDED: RETAIL COMPANY SETTINGS (for the dispensing "Print
+    // Invoice" reprint -- see buildDispatchInvoiceHTML() below)
+    // ============================================
+    // The dispensing reprint used to hardcode its own pharmacy name and
+    // print a totally different 80mm thermal-receipt layout, completely
+    // unlike the real A4 invoice Retail POS prints at checkout -- same
+    // sale, two different-looking documents depending on which screen
+    // reprinted it. Loads the exact same Retail Invoicing profile
+    // (Admin > Invoicing Settings > Retail Invoicing) that
+    // retail/index.js's own loadCompanySettingsInline() reads, so this
+    // page's reprint renders byte-for-byte the same invoice layout/data.
+    // Self-contained (own query, own fallback) rather than importing
+    // retail/index.js, since this page can be opened without ever
+    // visiting Retail POS first.
+    const companySettings = await (async function loadRetailCompanySettingsInline() {
+        const fallback = {
+            company_name: 'GRIFFINS MEDICALS LIMITED',
+            address: 'Plot 3534, Freedomway, Lusaka',
+            phone: '+260 97 000 0000',
+            zamra_number: 'ZAMRA-123456',
+            retail_company_name: '',
+            retail_zamra_number: '',
+            retail_tpin_number: '',
+            retail_phone: '',
+            retail_footer_message: '',
+            invoice_prefix: 'GRI',
+            retail_prefix_regular: '',
+            retail_regular_markup_max_percent: 60,
+            retail_regular_markup_min_percent: 30,
+            markup_cost_min: 1,
+            markup_cost_max: 600
+        };
+        try {
+            const { data, error } = await supabaseClient
+                .from('company_settings')
+                .select(`company_name, address, phone, zamra_number, invoice_prefix,
+                    retail_company_name, retail_zamra_number, retail_tpin_number, retail_phone, retail_footer_message,
+                    retail_prefix_regular, retail_regular_markup_max_percent, retail_regular_markup_min_percent,
+                    markup_cost_min, markup_cost_max`)
+                .eq('id', 1)
+                .maybeSingle();
+            if (error || !data) return fallback;
+            return {
+                company_name: data.company_name || fallback.company_name,
+                address: data.address || fallback.address,
+                phone: data.phone || fallback.phone,
+                zamra_number: data.zamra_number || fallback.zamra_number,
+                retail_company_name: data.retail_company_name || data.company_name || fallback.company_name,
+                retail_zamra_number: data.retail_zamra_number || data.zamra_number || fallback.zamra_number,
+                retail_tpin_number: data.retail_tpin_number || '',
+                retail_phone: data.retail_phone || data.phone || fallback.phone,
+                retail_footer_message: data.retail_footer_message || '',
+                // 🔥 ADDED for Quick Sale (see initQuickSale()): same pricing
+                // curve + Regular invoice prefix that retail/index.js uses.
+                invoice_prefix: data.invoice_prefix || fallback.invoice_prefix,
+                retail_prefix_regular: data.retail_prefix_regular || '',
+                retail_regular_markup_max_percent: data.retail_regular_markup_max_percent ?? fallback.retail_regular_markup_max_percent,
+                retail_regular_markup_min_percent: data.retail_regular_markup_min_percent ?? fallback.retail_regular_markup_min_percent,
+                markup_cost_min: data.markup_cost_min ?? fallback.markup_cost_min,
+                markup_cost_max: data.markup_cost_max ?? fallback.markup_cost_max
+            };
+        } catch (e) {
+            console.warn('Could not load company_settings for invoice reprint, using defaults:', e);
+            return fallback;
+        }
+    })();
+
     // 🔥 FIX: GPS-based location check removed -- superseded by
     // QR-code-based clock-in (see clock-in.html), which is genuinely
     // harder to spoof than a soft GPS check that never blocked anything
@@ -97,13 +165,31 @@
     const WHATSAPP_TEMPLATES = {
         LEAVE_REQUEST: 'leave_request_notice',
         ADVANCE_REQUEST: 'advance_request_notice',
+        // 🔥 ADDED: for a Notice Board post targeted at one specific
+        // employee (see "SIDEBAR -- NOTICE BOARD" below) -- same
+        // placeholder situation as every other template here: this won't
+        // actually send until a real template of this name is created and
+        // approved in Meta Business Manager. Until then, notifyWhatsApp()
+        // fails harmlessly (console-only) and the notice still posts and
+        // shows on the employee's sidebar either way.
+        NOTICE_BOARD: 'notice_board_notice',
     };
 
-    async function notifyAdminWhatsApp(templateName, bodyParams) {
+    // 🔥 CHANGED: pulled the actual send out of notifyAdminWhatsApp() into
+    // this generic `to`-taking helper, so the Notice Board can reuse the
+    // exact same send path to notify a TARGETED EMPLOYEE's own number
+    // instead of always the fixed admin number. notifyAdminWhatsApp() is
+    // now a thin wrapper so every existing call site (Leave/Advance
+    // requests below) is unaffected.
+    async function notifyWhatsApp(to, templateName, bodyParams) {
+        if (!to) {
+            console.log('WhatsApp: no phone number on file -- skipping notification.');
+            return;
+        }
         try {
             await supabaseClient.functions.invoke('send-whatsapp-message', {
                 body: {
-                    to: ADMIN_WHATSAPP_NUMBER,
+                    to,
                     template_name: templateName,
                     language_code: 'en_US',
                     components: [{
@@ -113,9 +199,14 @@
                 }
             });
         } catch (err) {
-            // Non-fatal -- never block the actual request submission on WhatsApp delivery.
-            console.warn('WhatsApp admin notification failed:', err);
+            // Non-fatal -- never block the actual action (request
+            // submission / notice post) on WhatsApp delivery.
+            console.warn(`WhatsApp notification (${templateName}) failed:`, err);
         }
+    }
+
+    async function notifyAdminWhatsApp(templateName, bodyParams) {
+        return notifyWhatsApp(ADMIN_WHATSAPP_NUMBER, templateName, bodyParams);
     }
 
     // ============================================
@@ -418,6 +509,14 @@
                 d.setDate(d.getDate() + 1);
             }
         });
+        // 🔥 FIX: also fold in any day attendance itself marked 'Leave',
+        // regardless of whether its leave_requests row is Approved (or
+        // exists at all) -- see the matching fix in hr-view.js's
+        // loadMonthSummary(). This stat has to agree with what the
+        // calendar below actually colors purple.
+        (attendanceRes.data || []).forEach(a => {
+            if (a.status === 'Leave') leaveDatesInMonth.add(a.attendance_date);
+        });
 
         const holidayDates = {};
         (holidaysRes.data || []).forEach(h => { holidayDates[h.holiday_date] = h.name; });
@@ -428,7 +527,22 @@
         // 🔥 FIX: only count a day as absent if it was EXPLICITLY marked
         // that way (e.g. via HR's Mark Absent) -- a day with simply no
         // record at all is unmarked, not assumed absent.
-        let totalMinutes = 0, absentDays = 0;
+        //
+        // 🔥 ADDED: "Incomplete" days -- a record exists, wasn't marked
+        // Off/Holiday/Absent, but has no check_in at all. No current
+        // code path (Manual Entry forces status to 'Absent' when there's
+        // no check-in; Mark Absent only ever writes Off/Holiday
+        // Off/Absent; Clock In always sets check_in) can produce this
+        // combination going forward, so a nonzero count here almost
+        // always means a stale/bad historical row -- e.g. direct DB
+        // edits/import -- that's quietly inflating "days present"
+        // elsewhere (like the printed Monthly Attendance Register, which
+        // also now flags these the same way) without contributing any
+        // hours here. Previously these were invisible: not counted as
+        // Absent (status isn't 'Absent'), not counted in Hrs (no
+        // check-in/out to sum) -- which is exactly what produces a
+        // "the register doesn't match" complaint.
+        let totalMinutes = 0, absentDays = 0, incompleteDays = 0;
         (attendanceRes.data || []).forEach(a => {
             if (a.status === 'Absent') absentDays++;
             if (a.check_in && a.check_out) {
@@ -436,6 +550,8 @@
                 const [h2, m2] = a.check_out.split(':').map(Number);
                 const minutes = (h2 * 60 + m2) - (h1 * 60 + m1);
                 if (minutes > 0) totalMinutes += minutes;
+            } else if (!a.check_in && a.status !== 'Absent' && a.status !== 'Off' && a.status !== 'Holiday Off' && a.status !== 'Leave') {
+                incompleteDays++;
             }
         });
 
@@ -443,6 +559,7 @@
         set('dashSidebarMonthWorkedHours', (totalMinutes / 60).toFixed(1));
         set('dashSidebarMonthAbsent', absentDays);
         set('dashSidebarMonthLeave', leaveDatesInMonth.size);
+        set('dashSidebarMonthIncomplete', incompleteDays);
 
         // ---- CALENDAR (now in the sidebar -- narrower, so smaller type) ----
         const calEl = document.getElementById('dashSidebarMonthCalendar');
@@ -460,11 +577,30 @@
 
             let bg = 'white', color = '#94a3b8', border = '1px solid #e2e8f0';
 
+            let flagTitle = '';
             if (record && record.check_in) {
                 bg = '#22c55e'; color = 'white'; border = 'none';        // Present
             } else if (record && record.status === 'Absent') {
                 bg = '#ef4444'; color = 'white'; border = 'none';        // Explicitly marked Absent
+            } else if (record && record.status === 'Leave') {
+                // 🔥 FIX: the attendance record's own 'Leave' status is
+                // authoritative by itself -- this used to also require
+                // leaveDatesInMonth (built from APPROVED leave_requests
+                // covering this date) to match, so a day correctly marked
+                // Leave on attendance but backed by a not-yet-approved (or
+                // missing) leave_requests row fell through into the
+                // Incomplete branch below instead. Leave is leave,
+                // approved or not.
+                bg = '#8b5cf6'; color = 'white'; border = 'none';        // On Leave
+            } else if (record && record.status !== 'Off' && record.status !== 'Holiday Off') {
+                // 🔥 ADDED: a record exists, isn't Off/Holiday Off/Absent/
+                // Leave, but has no check_in -- see the "Incomplete" stat
+                // above.
+                bg = '#fbbf24'; color = 'white'; border = 'none';
+                flagTitle = ' -- marked "' + record.status + '" but no check-in recorded';
             } else if (leaveDatesInMonth.has(dateStr)) {
+                // Fallback for an approved multi-day leave span that
+                // hasn't (yet) generated a per-day attendance row.
                 bg = '#8b5cf6'; color = 'white'; border = 'none';        // On Leave
             } else if (holidayDates[dateStr]) {
                 bg = '#eab308'; color = 'white'; border = 'none';        // Holiday
@@ -478,7 +614,7 @@
             // assumed absence. Stays plain white/neutral.
 
             html += `
-                <div title="${dateStr}${holidayDates[dateStr] ? ' -- ' + holidayDates[dateStr] : ''}"
+                <div title="${dateStr}${holidayDates[dateStr] ? ' -- ' + holidayDates[dateStr] : ''}${flagTitle}"
                      style="aspect-ratio:1; display:flex; align-items:center; justify-content:center; background:${bg}; color:${color}; border:${border}; border-radius:4px; font-size:0.62rem; font-weight:500;">
                     ${day}
                 </div>
@@ -660,70 +796,244 @@
         `;
     }
 
-    // 🔥 ADDED: DISPENSING -- "NEXT UP" PREVIEW invoice reprint. Same
-    // self-contained approach as buildStickerHTML() just above -- this
-    // page never loads company_settings (only Retail POS does, for the
-    // live checkout invoice's header/footer), so this reuses the same
-    // hardcoded pharmacy name already used on the sticker labels rather
-    // than pulling that whole dependency in just for a reprint. Good
-    // enough for the dispenser to check the order against while
-    // preparing it; the copy printed at checkout remains the
-    // authoritative original.
-    function buildDispatchInvoiceHTML(sale) {
-        const customer = sale.customer_data || {};
-        const items = sale.items || [];
+    // 🔥 CHANGED: this used to print a totally different 80mm
+    // thermal-receipt layout with a hardcoded pharmacy name -- same sale,
+    // but a dispenser reprinting it from here got a document that looked
+    // nothing like the real A4 invoice Retail POS prints at checkout
+    // (reported as "different from the one we print in main POS
+    // retail"). Rebuilt to be the EXACT same invoice markup as
+    // buildInvoiceHTML() in transaction/retail/index.js -- same CSS
+    // classes, same A4 @page rule, same Item Name / Generic Name / Batch
+    // Number (Expiry Date) / Pack Size / Qty / Rate / Total / Days
+    // Supply / Dosage columns, same totals box and footer -- driven by
+    // the same Retail Invoicing company-settings profile loaded above
+    // (companySettings), so a change to that Admin section (company
+    // name, ZAMRA/TPIN, phone, footer message) shows up identically on
+    // both screens. Keep this in sync with retail/index.js's
+    // buildInvoiceHTML() if that one changes.
+    function cleanBatchDisplay(batchNumber) {
+        if (!batchNumber) return '';
+        return batchNumber.replace(/\s*-\s*(⚠️\s*)?\d+\s*units?(\s*\(Low Stock\))?\s*$/i, '').trim();
+    }
+
+    // Maps a raw `sales` row (as read by loadDispenseQueue() /
+    // searchDispenseSales() / the Next Up preview above) into the same
+    // saleData shape buildInvoiceHTML() expects -- mirrors exactly how
+    // retail/index.js's own viewSaleDetail() does this same translation.
+    // Every dispensing sale is a real Retail sale, never a quotation (the
+    // queries above all filter `.neq('is_quotation', true)`), so this is
+    // hardcoded false rather than reading a column none of those queries
+    // select.
+    function toInvoiceSaleData(sale) {
+        return {
+            sale_id: sale.sale_id,
+            is_quotation: false,
+            customer: sale.customer_data || {},
+            items: sale.items || [],
+            payment: sale.payment || { type: 'Cash', note: '' },
+            totals: {
+                subtotal: sale.subtotal || 0,
+                tax: sale.tax || 0,
+                grand_total: sale.grand_total || 0
+            },
+            date: new Date(sale.created_at).toLocaleString()
+        };
+    }
+
+    // 🔥 ADDED: backfill Generic Name for older sales, same as
+    // retail/index.js's enrichItemsForPrint() -- a sale saved before the
+    // A4 invoice's Generic Name column existed has no generic_name on its
+    // items at all, so reprinting it here would otherwise show a blank
+    // column for every line.
+    async function enrichItemsForPrint(items) {
+        const productIds = [...new Set((items || []).map(i => i.product_id).filter(Boolean))];
+        if (productIds.length === 0) return items;
+
+        try {
+            const { data: products } = await supabaseClient
+                .from('products').select('id, generic_name_id').in('id', productIds);
+            const genericIds = [...new Set((products || []).map(p => p.generic_name_id).filter(Boolean))];
+            let genericMap = {};
+            if (genericIds.length > 0) {
+                const { data: generics } = await supabaseClient
+                    .from('generic_names').select('id, name').in('id', genericIds);
+                (generics || []).forEach(g => { genericMap[g.id] = g.name; });
+            }
+            const genericByProduct = {};
+            (products || []).forEach(p => { genericByProduct[p.id] = genericMap[p.generic_name_id] || ''; });
+
+            return (items || []).map(item => ({
+                ...item,
+                generic_name: item.generic_name || genericByProduct[item.product_id] || ''
+            }));
+        } catch (e) {
+            console.warn('Could not backfill generic names for print:', e);
+            return items;
+        }
+    }
+
+    function buildDispatchInvoiceHTML(saleData) {
+        const docLabel = 'Invoice';
+
         return `<!DOCTYPE html>
             <html>
             <head>
-                <title>Invoice - ${sale.sale_id}</title>
+                <meta charset="UTF-8">
+                <title>${companySettings.retail_company_name} - ${docLabel} ${saleData.sale_id}</title>
                 <style>
-                    @page { size: 80mm auto; margin: 0; }
-                    body { font-family: 'Courier New', monospace; margin: 0; padding: 4mm; font-size: 11px; color:#000; }
-                    h1 { font-size: 13px; margin: 0 0 2px 0; text-align:center; }
-                    .center { text-align:center; }
-                    .row { display:flex; justify-content:space-between; }
-                    .divider { border-top: 1px dashed #000; margin: 6px 0; }
-                    .item { margin-bottom: 4px; }
-                    .item-name { font-weight:bold; }
-                    .totals .row { font-weight:bold; }
+                    * { box-sizing: border-box; }
+                    body { font-family: Arial, Helvetica, sans-serif; padding: 30px; max-width: 800px; margin: 0 auto; color: #1e293b; }
+
+                    .doc-header { border-bottom: 3px solid #000000; padding-bottom: 14px; margin-bottom: 14px; }
+                    .company-block h1 { margin: 0; color: #000000; font-size: 1.4rem; letter-spacing: 0.02em; }
+                    .company-block p { margin: 3px 0 0; color: #64748b; font-size: 0.85rem; }
+
+                    .doc-title-row { margin-bottom: 16px; }
+                    .doc-title { font-size: 2rem; font-weight: 800; color: #000000; letter-spacing: 0.03em; }
+
+                    .info-row { display: flex; justify-content: space-between; gap: 20px; margin-bottom: 20px; }
+                    .info-box { background: #f1f5f9; border-radius: 6px; padding: 12px 16px; font-size: 0.85rem; line-height: 1.7; flex: 1; }
+                    .bill-to { text-align: right; font-size: 0.85rem; line-height: 1.6; flex: 1; }
+
+                    table { width: 100%; border-collapse: collapse; margin-bottom: 20px; font-size: 0.78rem; }
+                    th { background: #000000; color: white; padding: 8px 6px; text-align: left; font-weight: 600; }
+                    th.text-right { text-align: right; }
+                    th.text-center { text-align: center; }
+                    td { padding: 8px 6px; border-bottom: 1px solid #e2e8f0; vertical-align: top; }
+                    tbody tr:nth-child(even) { background: #f8fafc; }
+                    .text-right { text-align: right; }
+                    .text-center { text-align: center; }
+
+                    .totals-box { max-width: 300px; margin-left: auto; margin-bottom: 24px; }
+                    .totals-row { display: flex; justify-content: space-between; padding: 6px 12px; font-size: 0.9rem; }
+                    .totals-row.grand { background: #000000; color: white; font-weight: bold; font-size: 1rem; border-radius: 4px; margin-top: 4px; }
+
+                    .footer-note { border-top: 1px solid #e2e8f0; padding-top: 16px; font-size: 0.85rem; color: #334155; text-align: center; }
+                    .footer-note p { margin: 0 0 6px; line-height: 1.6; }
+
+                    @media print { @page { size: A4; margin: 12mm; } body { margin: 0; padding: 0; max-width: none; } }
                 </style>
             </head>
             <body>
-                <h1>Griffins Medicals Limited</h1>
-                <div class="center">Invoice #: ${sale.sale_id}</div>
-                <div class="center">${new Date(sale.created_at).toLocaleString()}</div>
-                <div class="divider"></div>
-                <div>Customer: ${customer.full_name || 'Walk-in'}</div>
-                ${customer.phone ? `<div>Phone: ${customer.phone}</div>` : ''}
-                <div class="divider"></div>
-                ${items.map((item, i) => `
-                    <div class="item">
-                        <div class="item-name">${i + 1}. ${item.product_name}</div>
-                        <div class="row"><span>Qty ${item.qty} x K${Number(item.rate || 0).toFixed(2)}</span><span>K${Number(item.total || 0).toFixed(2)}</span></div>
+                <div class="doc-header">
+                    <div class="company-block">
+                        <h1>${companySettings.retail_company_name}</h1>
+                        <p>${companySettings.address}</p>
+                        <p>Phone: ${companySettings.retail_phone} | ZAMRA: ${companySettings.retail_zamra_number}${companySettings.retail_tpin_number ? ` | TPIN: ${companySettings.retail_tpin_number}` : ''}</p>
                     </div>
-                `).join('')}
-                <div class="divider"></div>
-                <div class="totals">
-                    ${sale.subtotal != null ? `<div class="row"><span>Subtotal</span><span>K${Number(sale.subtotal).toFixed(2)}</span></div>` : ''}
-                    ${sale.tax != null ? `<div class="row"><span>Tax</span><span>K${Number(sale.tax).toFixed(2)}</span></div>` : ''}
-                    <div class="row"><span>TOTAL</span><span>K${Number(sale.grand_total || 0).toFixed(2)}</span></div>
                 </div>
-                <div class="divider"></div>
-                <div class="center">Thank you for choosing Griffins Medicals Limited.</div>
+
+                <div class="doc-title-row">
+                    <div class="doc-title">${docLabel.toUpperCase()}</div>
+                </div>
+
+                <div class="info-row">
+                    <div class="info-box">
+                        <div><strong>${docLabel} #:</strong> ${saleData.sale_id}</div>
+                        <div><strong>Date:</strong> ${saleData.date}</div>
+                        <div><strong>Payment:</strong> ${saleData.payment.type}</div>
+                    </div>
+                    <div class="bill-to">
+                        <strong>CUSTOMER:</strong><br>
+                        <strong>${saleData.customer.full_name || 'N/A'}</strong><br>
+                        ${saleData.customer.phone ? `Phone: ${saleData.customer.phone}<br>` : ''}
+                        ${saleData.customer.address || ''}<br>
+                        ${saleData.customer.nhima_number ? `NHIMA #: ${saleData.customer.nhima_number}<br>` : ''}
+                        ${saleData.customer.nrc ? `NRC: ${saleData.customer.nrc}` : ''}
+                    </div>
+                </div>
+
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Item Name</th>
+                            <th>Generic Name</th>
+                            <th>Batch Number (Expiry Date)</th>
+                            <th class="text-center">Pack Size</th>
+                            <th class="text-center">Qty</th>
+                            <th class="text-right">Rate</th>
+                            <th class="text-right">Total</th>
+                            <th class="text-center">Days Supply</th>
+                            <th>Dosage</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        ${saleData.items.map(item => `
+                            <tr>
+                                <td>${item.product_name}</td>
+                                <td>${item.generic_name || '-'}</td>
+                                <td>${cleanBatchDisplay(item.batch_number)}${item.expiry ? ` (${item.expiry})` : ''}</td>
+                                <td class="text-center">${item.pack_size}</td>
+                                <td class="text-center">${item.qty}</td>
+                                <td class="text-right">K${Number(item.rate || 0).toFixed(2)}</td>
+                                <td class="text-right">K${Number(item.total || 0).toFixed(2)}</td>
+                                <td class="text-center">${item.days_supplied || 0}</td>
+                                <td>${item.how_to_take || 'As directed'}</td>
+                            </tr>
+                        `).join('')}
+                    </tbody>
+                </table>
+
+                <div class="totals-box">
+                    ${(saleData.payment && Number(saleData.payment.discount_amount) > 0) ? `
+                    <div class="totals-row"><span>Items Total</span><span>K${(saleData.totals.grand_total + Number(saleData.payment.discount_amount)).toFixed(2)}</span></div>
+                    <div class="totals-row"><span>Discount (${Number(saleData.payment.discount_percent || 0)}%)</span><span>-K${Number(saleData.payment.discount_amount).toFixed(2)}</span></div>` : ''}
+                    <div class="totals-row"><span>Subtotal (Excl. Tax)</span><span>K${saleData.totals.subtotal.toFixed(2)}</span></div>
+                    <div class="totals-row"><span>Total Tax</span><span>K${saleData.totals.tax.toFixed(2)}</span></div>
+                    <div class="totals-row grand"><span>GRAND TOTAL</span><span>K${saleData.totals.grand_total.toFixed(2)}</span></div>
+                </div>
+
+                <div class="footer-note">
+                    <p>${companySettings.retail_footer_message || 'Thank you for your business!'}</p><p>This is a computer-generated invoice.</p>
+                </div>
             </body>
             </html>
         `;
     }
 
-    // Opens the print window for one sale's invoice -- unlike labels,
-    // reprinting an invoice doesn't mark anything in the database, so
-    // this is always safe to click again (e.g. to double-check an item
-    // while preparing the order).
-    function printInvoiceForSale(sale) {
-        const invWindow = window.open('', '_blank', 'width=420,height=600');
-        invWindow.document.write(buildDispatchInvoiceHTML(sale));
-        invWindow.document.close();
-        invWindow.print();
+    // 🔥 CHANGED: prints through a hidden, off-screen <iframe> instead of
+    // window.open() -- same reasoning as retail/index.js's
+    // printHTMLViaHiddenFrame(): window.open() launches a whole separate
+    // browser window/tab that's left sitting on top of the dashboard
+    // until manually closed. The OS/browser print dialog itself still
+    // appears -- no page can silently print without it -- but there's no
+    // extra window to see or close. Unlike labels, reprinting an invoice
+    // doesn't mark anything in the database, so this is always safe to
+    // click again (e.g. to double-check an item while preparing the
+    // order).
+    async function printInvoiceForSale(sale) {
+        const saleData = toInvoiceSaleData(sale);
+        if ((saleData.items || []).some(i => !i.generic_name)) {
+            saleData.items = await enrichItemsForPrint(saleData.items);
+        }
+
+        const html = buildDispatchInvoiceHTML(saleData);
+
+        const existing = document.getElementById('dashPrintFrame');
+        if (existing) existing.remove();
+
+        const frame = document.createElement('iframe');
+        frame.id = 'dashPrintFrame';
+        frame.style.cssText = 'position:fixed; right:0; bottom:0; width:0; height:0; border:0; visibility:hidden;';
+        document.body.appendChild(frame);
+
+        const cleanup = () => { const f = document.getElementById('dashPrintFrame'); if (f) f.remove(); };
+        const safetyTimer = setTimeout(cleanup, 60000);
+
+        frame.onload = () => {
+            try {
+                frame.contentWindow.focus();
+                frame.contentWindow.print();
+            } catch (e) {
+                console.error('Print failed:', e);
+            }
+            setTimeout(() => { clearTimeout(safetyTimer); cleanup(); }, 1000);
+        };
+
+        const doc = frame.contentDocument || frame.contentWindow.document;
+        doc.open();
+        doc.write(html);
+        doc.close();
     }
 
     // 🔥 ADDED: same pattern as retail/index.js and hr/employee/index.js --
@@ -812,6 +1122,7 @@
                 <td>${itemCount}</td>
                 <td>${time}</td>
                 <td style="text-align:right; padding-right:12px;">
+                    <button class="btn btn-outline btn-sm dash-print-invoice-btn" data-sale-id="${sale.id}" style="margin-right:6px;"><i class="fa-solid fa-file-invoice"></i> Print Invoice</button>
                     <button class="btn btn-primary btn-sm dash-print-labels-btn" data-sale-id="${sale.id}">${btnLabel}</button>
                 </td>
             </tr>
@@ -847,7 +1158,13 @@
         try {
             const { data, error } = await supabaseClient
                 .from('sales')
-                .select('id, sale_id, customer_data, items, created_at, labels_printed_at')
+                // 🔥 ADDED payment, subtotal, tax, grand_total -- needed so
+                // printInvoiceForSale() can print the SAME full invoice
+                // layout Retail POS prints at checkout (see
+                // buildDispatchInvoiceHTML()'s comment); these weren't
+                // selected before since the queue row itself never showed
+                // them.
+                .select('id, sale_id, customer_data, items, created_at, labels_printed_at, payment, subtotal, tax, grand_total')
                 .eq('client_type', 'RETAIL')
                 .neq('is_quotation', true)
                 .is('labels_printed_at', null)
@@ -891,7 +1208,8 @@
             // already used for Retail POS's own invoice search).
             const { data, error } = await supabaseClient
                 .from('sales')
-                .select('id, sale_id, customer_data, items, created_at, labels_printed_at')
+                // 🔥 ADDED payment, subtotal, tax, grand_total -- same reason as loadDispenseQueue() above.
+                .select('id, sale_id, customer_data, items, created_at, labels_printed_at, payment, subtotal, tax, grand_total')
                 .eq('client_type', 'RETAIL')
                 .neq('is_quotation', true)
                 .or(`sale_id.ilike.%${query}%,customer_data->>full_name.ilike.%${query}%`)
@@ -934,6 +1252,15 @@
     const dispenseCard = document.getElementById('dashDispenseQueueBody')?.closest('.card');
     if (dispenseCard) {
         dispenseCard.addEventListener('click', (e) => {
+            // 🔥 ADDED: Print Invoice, reusing the same printInvoiceForSale()
+            // already wired up on the "Next Up" dispatch panel -- no new
+            // print logic needed, just a second entry point to it from here.
+            const invoiceBtn = e.target.closest('.dash-print-invoice-btn');
+            if (invoiceBtn) {
+                const sale = dispenseSaleCache[invoiceBtn.dataset.saleId];
+                if (sale) printInvoiceForSale(sale);
+                return;
+            }
             const btn = e.target.closest('.dash-print-labels-btn');
             if (!btn) return;
             const sale = dispenseSaleCache[btn.dataset.saleId];
@@ -1081,7 +1408,7 @@
                 // the normal billing flow), falling back to matching the
                 // patient's name on today's Retail sales if that comes up
                 // empty -- e.g. a walk-in never tied to a customer record.
-                const saleColumns = 'id, sale_id, customer_data, items, created_at, labels_printed_at, subtotal, tax, grand_total, customer_id';
+                const saleColumns = 'id, sale_id, customer_data, items, created_at, labels_printed_at, subtotal, tax, grand_total, payment, customer_id';
                 let sale = null;
 
                 if (nextTicket.customer_id) {
@@ -1366,7 +1693,53 @@
     // ============================================
     // SCHEMA THIS NEEDS:
     //   announcements (new table): id uuid pk, message text,
-    //     created_by uuid, created_by_name text, created_at timestamptz
+    //     created_by uuid, created_by_name text, created_at timestamptz,
+    //     target_type text default 'all' (values: 'all' | 'employee'),
+    //     target_employee_id uuid null references employees(employee_id)
+    //
+    // 🔥 CHANGED: a notice can now be posted for EVERYONE (unchanged
+    // behavior) or for one specific employee -- target_type/
+    // target_employee_id above. A targeted notice only ever reaches that
+    // one employee's own Dashboard sidebar (filtered server-side below,
+    // not just hidden client-side -- someone else's browser never even
+    // receives the row), plus Admin's own sidebar so whoever posted it
+    // can still see/manage it. The targeted employee also gets a WhatsApp
+    // message on their own number, same mechanism as the Leave/Advance
+    // request notifications above (see notifyWhatsApp()) -- a legacy row
+    // with no target_type at all (posted before this change) is treated
+    // as 'all', same as an explicit 'all'.
+    let noticeTargetEmployees = [];
+
+    async function loadNoticeTargetEmployees() {
+        const select = document.getElementById('dashPostNoticeTargetEmployee');
+        if (!select) return;
+        // Only Admin ever sees the Post Notice modal (the button that
+        // opens it is hidden for everyone else), so skip the query
+        // entirely for non-Admins rather than loading the whole employee
+        // list on every single Dashboard visit for nothing.
+        if (window.currentUserRole !== 'Admin') return;
+        try {
+            const { data, error } = await supabaseClient
+                .from('employees')
+                .select('employee_id, first_name, last_name, phone, status')
+                .order('first_name', { ascending: true });
+            if (error) throw error;
+
+            // Only Active staff are offered as a notice target -- posting
+            // (and WhatsApping) someone who's resigned/terminated makes no
+            // sense.
+            noticeTargetEmployees = (data || []).filter(e => !e.status || e.status === 'Active');
+
+            select.innerHTML = noticeTargetEmployees.length === 0
+                ? `<option value="">No active employees found</option>`
+                : `<option value="">Select an employee...</option>` +
+                    noticeTargetEmployees.map(e => `<option value="${e.employee_id}">${e.first_name} ${e.last_name}</option>`).join('');
+        } catch (err) {
+            console.warn('Could not load employees for Notice Board targeting:', err);
+            select.innerHTML = `<option value="">Could not load employees</option>`;
+        }
+    }
+
     async function loadSidebarNotices() {
         const listEl = document.getElementById('dashSidebarNotices');
         const postBtn = document.getElementById('dashSidebarPostNoticeBtn');
@@ -1376,11 +1749,23 @@
         if (postBtn) postBtn.style.display = isAdmin ? 'inline-block' : 'none';
 
         try {
-            const { data, error } = await supabaseClient
+            let query = supabaseClient
                 .from('announcements')
                 .select('*')
                 .order('created_at', { ascending: false })
                 .limit(5);
+
+            // 🔥 ADDED: Admin sees every notice (so they can manage a
+            // targeted one even though it isn't "theirs" to see) -- anyone
+            // else only ever gets rows that are for everyone, or
+            // specifically for them.
+            if (!isAdmin) {
+                query = currentEmployeeId
+                    ? query.or(`target_type.is.null,target_type.eq.all,and(target_type.eq.employee,target_employee_id.eq.${currentEmployeeId})`)
+                    : query.or('target_type.is.null,target_type.eq.all');
+            }
+
+            const { data, error } = await query;
 
             if (error) throw error;
 
@@ -1389,13 +1774,29 @@
                 return;
             }
 
-            listEl.innerHTML = data.map(n => `
+            listEl.innerHTML = data.map(n => {
+                const isTargeted = n.target_type === 'employee';
+                // Resolved from the same employee list the "Specific
+                // Employee" picker uses (see loadNoticeTargetEmployees())
+                // rather than a join, so this never breaks if that join
+                // isn't set up -- just falls back to a generic label.
+                const targetEmp = isTargeted ? noticeTargetEmployees.find(e => e.employee_id === n.target_employee_id) : null;
+                const targetName = isTargeted ? (targetEmp ? `${targetEmp.first_name} ${targetEmp.last_name}` : 'an employee') : null;
+                // Only shown to Admin -- a targeted employee already knows
+                // it's for them (it's the only reason they can see it at
+                // all), but Admin needs the "who" since they see everyone's.
+                const targetBadge = (isAdmin && isTargeted)
+                    ? `<div style="display:inline-block; background:#fef3c7; color:#92400e; padding:1px 7px; border-radius:8px; font-size:0.65rem; font-weight:600; margin-top:4px;"><i class="fa-solid fa-user"></i> To: ${targetName}</div>`
+                    : '';
+                return `
                 <div style="background:#eff6ff; border-radius:6px; padding:8px 10px; margin-bottom:6px; font-size:0.78rem; position:relative;">
                     <div style="color:#1e3a8a; padding-right:${isAdmin ? '18px' : '0'};">${n.message}</div>
                     <div style="color:#94a3b8; font-size:0.68rem; margin-top:3px;">${n.created_by_name || 'Admin'} · ${new Date(n.created_at).toLocaleDateString()}</div>
+                    ${targetBadge}
                     ${isAdmin ? `<button onclick="deleteNotice('${n.id}')" style="position:absolute; top:6px; right:6px; background:none; border:none; color:#94a3b8; cursor:pointer; font-size:0.85rem;" title="Delete"><i class="fa-solid fa-xmark"></i></button>` : ''}
                 </div>
-            `).join('');
+            `;
+            }).join('');
         } catch (err) {
             console.warn('Could not load notice board:', err);
             listEl.innerHTML = `<p class="helper-text" style="font-size:0.75rem; padding:8px 0; color:#dc2626;">Couldn't load notices.</p>`;
@@ -1403,7 +1804,7 @@
     }
 
     window.deleteNotice = async function (id) {
-        if (!confirm('Remove this notice for everyone?')) return;
+        if (!confirm('Remove this notice?')) return;
         try {
             const { error } = await supabaseClient.from('announcements').delete().eq('id', id);
             if (error) throw error;
@@ -1472,6 +1873,29 @@
     document.getElementById('dashCancelPostNoticeBtn').addEventListener('click', () => {
         document.getElementById('dashPostNoticeModal').style.display = 'none';
     });
+
+    // 🔥 ADDED: toggles the "Employee" picker on/off depending on who the
+    // notice is for, and adjusts the helper text under Message to match --
+    // so it's never left saying "Everyone sees this" while a specific
+    // employee is actually selected.
+    const dashPostNoticeTargetSelect = document.getElementById('dashPostNoticeTarget');
+    const dashPostNoticeTargetEmployeeWrap = document.getElementById('dashPostNoticeTargetEmployeeWrap');
+    const dashPostNoticeTargetEmployeeSelect = document.getElementById('dashPostNoticeTargetEmployee');
+    const dashPostNoticeHelperText = document.getElementById('dashPostNoticeHelperText');
+    function updatePostNoticeTargetUI() {
+        const isEmployeeTarget = dashPostNoticeTargetSelect.value === 'employee';
+        if (dashPostNoticeTargetEmployeeWrap) dashPostNoticeTargetEmployeeWrap.style.display = isEmployeeTarget ? 'block' : 'none';
+        if (dashPostNoticeTargetEmployeeSelect) dashPostNoticeTargetEmployeeSelect.required = isEmployeeTarget;
+        if (dashPostNoticeHelperText) {
+            dashPostNoticeHelperText.textContent = isEmployeeTarget
+                ? 'Only that employee sees this on their Dashboard sidebar -- they also get a WhatsApp message on their own number.'
+                : 'Everyone sees this on the Dashboard sidebar the moment they open it.';
+        }
+    }
+    if (dashPostNoticeTargetSelect) {
+        dashPostNoticeTargetSelect.addEventListener('change', updatePostNoticeTargetUI);
+    }
+
     document.getElementById('dashPostNoticeForm').addEventListener('submit', async (e) => {
         e.preventDefault();
         const submitBtn = document.getElementById('dashSubmitPostNoticeBtn');
@@ -1479,16 +1903,44 @@
         submitBtn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Posting...';
 
         try {
+            const targetType = dashPostNoticeTargetSelect?.value === 'employee' ? 'employee' : 'all';
+            const targetEmployeeId = targetType === 'employee' ? (dashPostNoticeTargetEmployeeSelect?.value || null) : null;
+
+            if (targetType === 'employee' && !targetEmployeeId) {
+                alert('Please choose which employee this notice is for.');
+                return;
+            }
+
+            const message = document.getElementById('dashPostNoticeMessage').value.trim();
             const { data: sessionData } = await supabaseClient.auth.getSession();
             const { error } = await supabaseClient.from('announcements').insert([{
-                message: document.getElementById('dashPostNoticeMessage').value.trim(),
+                message,
+                target_type: targetType,
+                target_employee_id: targetEmployeeId,
                 created_by: sessionData?.session?.user?.id || null,
                 created_by_name: window.currentUserName || 'Admin',
                 created_at: new Date().toISOString()
             }]);
             if (error) throw error;
 
+            // 🔥 ADDED: the targeted employee also gets this on WhatsApp,
+            // on their own number -- fire-and-forget, same as every other
+            // WhatsApp notification in this file, so a slow/failed send
+            // never blocks the notice from posting.
+            if (targetType === 'employee') {
+                const targetEmp = noticeTargetEmployees.find(emp => emp.employee_id === targetEmployeeId);
+                if (targetEmp?.phone) {
+                    notifyWhatsApp(targetEmp.phone, WHATSAPP_TEMPLATES.NOTICE_BOARD, [
+                        `${targetEmp.first_name} ${targetEmp.last_name}`,
+                        message
+                    ]);
+                } else {
+                    console.log('WhatsApp: targeted employee has no phone number on file -- skipping notification.');
+                }
+            }
+
             document.getElementById('dashPostNoticeForm').reset();
+            updatePostNoticeTargetUI();
             document.getElementById('dashPostNoticeModal').style.display = 'none';
             await loadSidebarNotices();
             showToastSimple('Notice posted.');
@@ -1499,6 +1951,552 @@
             submitBtn.innerHTML = '<i class="fa-solid fa-bullhorn"></i> Post';
         }
     });
+
+    // ============================================
+    // 🔥 ADDED: QUICK SALE (WALK-IN) -- collapsed "+" POS grid on the Dashboard
+    // ============================================
+    // A stripped-down Regular Retail sale with no patient details. It saves
+    // the SAME shape as Retail POS's "Walk-in" button (client_type RETAIL,
+    // client_sub_type REGULAR, customer_id null, customer_data.walk_in
+    // true) so everything downstream -- the server-side accounting trigger
+    // (post_retail_sale_accounting), stock deduction, the Dispensing queue
+    // and invoice reprint -- treats it like any other regular retail sale.
+    //
+    // Pricing is the identical Regular Retail formula from retail/index.js's
+    // updateRowRate(): pack cost (batch cost_price x pack size) marked up by
+    // the exponential curve in company_settings. Quantity is in PACKS
+    // (pack size = products.conversion_rate), stock comes off the
+    // earliest-expiry batch first, spilling into the next batch if one
+    // isn't enough (each batch part priced from its own cost).
+    //
+    // Discount: header-level only. sales.grand_total (what the till
+    // collects and what the accounting trigger books) is AFTER discount;
+    // the line items keep their full list rate/total. The discount itself
+    // is recorded in sales.payment.discount_percent / discount_amount.
+    // Bundle/kit products are not offered here (use Retail POS for those).
+    function initQuickSale() {
+        const card = document.getElementById('dashQsCard');
+        if (!card) return;
+
+        // Same gate as the Sales shortcut: roles that can't open the
+        // Transaction module can't sell from here either.
+        try {
+            if (typeof ROLE_ACCESS !== 'undefined' && window.currentUserRole) {
+                const allowed = ROLE_ACCESS[window.currentUserRole];
+                if (Array.isArray(allowed) && !allowed.includes('transaction')) return;
+            }
+        } catch (e) { /* undetermined -> show */ }
+        card.style.display = '';
+
+        const toggleBtn = document.getElementById('dashQsToggleBtn');
+        const body = document.getElementById('dashQsBody');
+        const rowsEl = document.getElementById('dashQsRows');
+        const discInput = document.getElementById('dashQsDiscPct');
+        const saveBtn = document.getElementById('dashQsSaveBtn');
+        const savePrintBtn = document.getElementById('dashQsSavePrintBtn');
+        const clearBtn = document.getElementById('dashQsClearBtn');
+
+        let catalog = null;          // [{id, product_name, conversion_rate, tax_percent, total_stock}]
+        let catalogLoading = null;
+        let saving = false;
+
+        const money = n => 'K' + (Number(n) || 0).toFixed(2);
+        const round2 = n => Math.round((Number(n) + Number.EPSILON) * 100) / 100;
+        const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+        // Same exponential curve as retail/index.js
+        const cs = {
+            max: Number(companySettings.retail_regular_markup_max_percent) || 60,
+            min: Number(companySettings.retail_regular_markup_min_percent) || 30,
+            costMin: Number(companySettings.markup_cost_min) || 1,
+            costMax: Number(companySettings.markup_cost_max) || 600
+        };
+        function markupPercent(cost) {
+            if (!(cs.costMax > cs.costMin) || cs.max <= 0 || cs.min <= 0) return cs.max;
+            const c = Math.min(Math.max(cost, cs.costMin), cs.costMax);
+            const t = (c - cs.costMin) / (cs.costMax - cs.costMin);
+            return cs.max * Math.pow(cs.min / cs.max, t);
+        }
+        function packRate(batch, pack) {
+            const costPerPack = (Number(batch.cost_price) || 0) * pack;
+            return round2(costPerPack * (1 + markupPercent(costPerPack) / 100));
+        }
+
+        async function ensureCatalog() {
+            if (catalog) return catalog;
+            if (!catalogLoading) {
+                catalogLoading = (async () => {
+                    const all = [];
+                    for (let from = 0; ; from += 1000) {
+                        const { data, error } = await supabaseClient
+                            .from('products')
+                            .select('id, product_name, generic_name_id, conversion_rate, tax_percent, total_stock, is_bundle')
+                            .order('product_name', { ascending: true })
+                            .range(from, from + 999);
+                        if (error) throw error;
+                        all.push(...(data || []));
+                        if (!data || data.length < 1000) break;
+                    }
+                    // Generic names, so an item can be found by either name.
+                    const genericMap = {};
+                    for (let from = 0; ; from += 1000) {
+                        const { data: gens, error: gerr } = await supabaseClient
+                            .from('generic_names')
+                            .select('id, name')
+                            .range(from, from + 999);
+                        if (gerr) { console.warn('Quick sale: could not load generic names', gerr); break; }
+                        (gens || []).forEach(g => { genericMap[g.id] = g.name; });
+                        if (!gens || gens.length < 1000) break;
+                    }
+                    catalog = all.filter(p => !p.is_bundle).map(p => ({
+                        ...p,
+                        generic_name: genericMap[p.generic_name_id] || ''
+                    }));
+                    return catalog;
+                })().catch(err => { catalogLoading = null; throw err; });
+            }
+            return catalogLoading;
+        }
+
+        async function fetchBatches(productId) {
+            const { data, error } = await supabaseClient
+                .from('batches')
+                .select('id, batch_number, expiry_date, total_qty, cost_price')
+                .eq('product_id', productId)
+                .gt('total_qty', 0)
+                .order('expiry_date', { ascending: true });
+            if (error) throw error;
+            return data || [];
+        }
+
+        // Splits `packs` across batches, earliest expiry first, whole packs only.
+        function allocate(batches, pack, packs) {
+            const parts = [];
+            let remaining = packs;
+            for (const b of batches) {
+                if (remaining <= 0) break;
+                const avail = Math.floor((Number(b.total_qty) || 0) / pack);
+                if (avail <= 0) continue;
+                const take = Math.min(avail, remaining);
+                parts.push({ batch: b, packs: take, rate: packRate(b, pack) });
+                remaining -= take;
+            }
+            return { parts, short: remaining };
+        }
+        function maxPacks(batches, pack) {
+            return batches.reduce((s, b) => s + Math.floor((Number(b.total_qty) || 0) / pack), 0);
+        }
+
+        // ---------- rows ----------
+        function newRow() {
+            const tr = document.createElement('tr');
+            tr._d = { product: null, batches: [], parts: [], short: 0, gross: 0 };
+            tr.innerHTML = `
+                <td style="position:relative;">
+                    <input type="text" class="qs-in qs-item" placeholder="Type item name..." autocomplete="off">
+                    <div class="qs-suggest"></div>
+                </td>
+                <td class="qs-pack" style="color:#475569;">--</td>
+                <td class="num qs-rate" style="color:#475569;">--</td>
+                <td><input type="number" class="qs-in qs-qty" min="1" step="1" inputmode="numeric" disabled></td>
+                <td class="num"><div class="qs-total-cell" tabindex="0">0.00</div></td>
+                <td><button type="button" class="qs-del" title="Remove row">&times;</button></td>`;
+            wireRow(tr);
+            return tr;
+        }
+
+        function addRow(focus) {
+            const tr = newRow();
+            rowsEl.appendChild(tr);
+            if (focus) tr.querySelector('.qs-item').focus();
+            return tr;
+        }
+
+        function lastRow() { return rowsEl.lastElementChild; }
+        function rowIsFilled(tr) { return !!(tr._d.product && tr._d.parts.length && !tr._d.short); }
+
+        function renderRow(tr) {
+            const d = tr._d;
+            const qtyEl = tr.querySelector('.qs-qty');
+            const rateEl = tr.querySelector('.qs-rate');
+            const packEl = tr.querySelector('.qs-pack');
+            const totalEl = tr.querySelector('.qs-total-cell');
+            if (!d.product) {
+                packEl.textContent = '--'; rateEl.textContent = '--'; totalEl.textContent = '0.00';
+                qtyEl.disabled = true; qtyEl.value = ''; qtyEl.classList.remove('bad');
+                return;
+            }
+            const pack = Number(d.product.conversion_rate) || 1;
+            packEl.textContent = pack + 's';
+            const first = d.batches[0];
+            rateEl.textContent = first ? Number(packRate(first, pack)).toFixed(2) : '--';
+            rateEl.title = d.parts.length > 1 ? `Spans ${d.parts.length} batches (each priced from its own cost)` : '';
+            totalEl.textContent = Number(d.gross).toFixed(2);
+            qtyEl.classList.toggle('bad', d.short > 0);
+            qtyEl.title = d.short > 0 ? `Only ${maxPacks(d.batches, pack)} pack(s) in stock` : '';
+        }
+
+        function recalcRow(tr) {
+            const d = tr._d;
+            if (!d.product) { d.parts = []; d.short = 0; d.gross = 0; return renderRow(tr); }
+            const pack = Number(d.product.conversion_rate) || 1;
+            const qty = parseInt(tr.querySelector('.qs-qty').value, 10) || 0;
+            if (qty <= 0) { d.parts = []; d.short = 0; d.gross = 0; }
+            else {
+                const a = allocate(d.batches, pack, qty);
+                d.parts = a.parts; d.short = a.short;
+                d.gross = round2(a.parts.reduce((s, p) => s + p.packs * p.rate, 0));
+            }
+            renderRow(tr);
+        }
+
+        // Totals computed from the rows' current state (also used at save).
+        function computeTotals(rows) {
+            const pct = Math.min(Math.max(parseFloat(discInput.value) || 0, 0), 100);
+            let grossAll = 0, grossTax = 0;
+            rows.forEach(tr => {
+                const d = tr._d;
+                if (!d.product || !d.gross) return;
+                const t = Number(d.product.tax_percent) || 0;
+                grossAll += d.gross;
+                if (t > 0) grossTax += d.gross * (t / (100 + t));
+            });
+            grossAll = round2(grossAll);
+            grossTax = round2(grossTax);
+            const discount = round2(grossAll * pct / 100);
+            const grand = round2(grossAll - discount);
+            // Stored split (after discount): tax scales with the discount.
+            const taxNet = round2(grossTax * (1 - pct / 100));
+            return { pct, grossAll, grossTax, subtotalGross: round2(grossAll - grossTax), discount, grand, taxNet, subtotalNet: round2(grand - taxNet) };
+        }
+
+        function refreshTotals() {
+            const t = computeTotals([...rowsEl.children]);
+            document.getElementById('dashQsSubtotal').textContent = money(t.subtotalGross);
+            document.getElementById('dashQsTax').textContent = money(t.grossTax);
+            document.getElementById('dashQsDiscAmt').textContent = '-' + money(t.discount);
+            document.getElementById('dashQsGrand').textContent = money(t.grand);
+            return t;
+        }
+
+        async function pickProduct(tr, product) {
+            const d = tr._d;
+            const itemEl = tr.querySelector('.qs-item');
+            try {
+                const batches = await fetchBatches(product.id);
+                if (!batches.length) {
+                    showToastSimple(`${product.product_name}: no stock available.`);
+                    return;
+                }
+                const pack = Number(product.conversion_rate) || 1;
+                if (!maxPacks(batches, pack)) {
+                    showToastSimple(`${product.product_name}: less than one full pack (${pack}) in stock -- use Retail POS for loose units.`);
+                    return;
+                }
+                d.product = product; d.batches = batches;
+                itemEl.value = product.product_name;
+                const qtyEl = tr.querySelector('.qs-qty');
+                qtyEl.disabled = false;
+                qtyEl.value = '1';
+                recalcRow(tr);
+                refreshTotals();
+                qtyEl.focus(); qtyEl.select();
+            } catch (err) {
+                console.error('Quick sale: could not load batches', err);
+                showToastSimple('Could not load stock for that item. Please try again.');
+            }
+        }
+
+        function clearRowProduct(tr) {
+            tr._d = { product: null, batches: [], parts: [], short: 0, gross: 0 };
+            recalcRow(tr);
+            refreshTotals();
+        }
+
+        function wireRow(tr) {
+            const itemEl = tr.querySelector('.qs-item');
+            const sg = tr.querySelector('.qs-suggest');
+            const qtyEl = tr.querySelector('.qs-qty');
+            const totalEl = tr.querySelector('.qs-total-cell');
+            let matches = [];
+            let active = -1;
+
+            const hide = () => { sg.style.display = 'none'; active = -1; };
+            const paintActive = () => [...sg.children].forEach((c, i) => c.classList.toggle('active', i === active));
+
+            async function showMatches() {
+                const q = itemEl.value.trim().toLowerCase();
+                if (!q) { hide(); return; }
+                let cat;
+                try { cat = await ensureCatalog(); } catch (e) { showToastSimple('Could not load the item list.'); return; }
+                const tokens = q.split(/\s+/).filter(Boolean);
+                matches = cat.filter(p => {
+                    const hay = ((p.product_name || '') + ' ' + (p.generic_name || '')).toLowerCase();
+                    return tokens.every(t => hay.includes(t));
+                }).sort((a, b) => {
+                    const ai = (a.total_stock > 0 ? 0 : 1), bi = (b.total_stock > 0 ? 0 : 1);
+                    if (ai !== bi) return ai - bi;
+                    const rank = p => (p.product_name.toLowerCase().startsWith(q) ? 0 : (p.generic_name || '').toLowerCase().startsWith(q) ? 1 : 2);
+                    const r = rank(a) - rank(b);
+                    return r !== 0 ? r : a.product_name.localeCompare(b.product_name);
+                }).slice(0, 15);
+                if (!matches.length) { sg.innerHTML = '<div class="qs-sg" style="color:#94a3b8; cursor:default;">No matching item</div>'; sg.style.display = 'block'; active = -1; return; }
+                sg.innerHTML = matches.map((p, i) =>
+                    `<div class="qs-sg" data-i="${i}"><span><span style="font-weight:600; color:#0f172a;">${esc(p.product_name)}</span>${p.generic_name ? `<br><small style="color:#64748b;">${esc(p.generic_name)}</small>` : ''}</span><small style="${p.total_stock > 0 ? '' : 'color:#dc2626;'}">${p.total_stock > 0 ? p.total_stock + ' in stock' : 'out of stock'}</small></div>`).join('');
+                sg.style.display = 'block';
+                active = 0; paintActive();
+            }
+
+            itemEl.addEventListener('input', () => {
+                if (tr._d.product) clearRowProduct(tr);
+                showMatches();
+            });
+            const scrollActive = () => { const el = sg.children[active]; if (el && el.scrollIntoView) el.scrollIntoView({ block: 'nearest' }); };
+            const listOpen = () => sg.style.display === 'block' && matches.length > 0;
+            itemEl.addEventListener('keydown', e => {
+                if (e.key === 'ArrowDown') {
+                    e.preventDefault();
+                    if (!listOpen()) { showMatches(); return; }
+                    active = (active + 1) % matches.length; paintActive(); scrollActive();
+                } else if (e.key === 'ArrowUp') {
+                    e.preventDefault();
+                    if (!listOpen()) return;
+                    active = (active - 1 + matches.length) % matches.length; paintActive(); scrollActive();
+                } else if (e.key === 'Enter' || (e.key === 'Tab' && !e.shiftKey)) {
+                    // Enter or Tab takes the highlighted item and jumps to Qty.
+                    if (listOpen() && matches[active]) { e.preventDefault(); const p = matches[active]; hide(); pickProduct(tr, p); }
+                } else if (e.key === 'Escape') { hide(); }
+            });
+            itemEl.addEventListener('focus', () => { if (itemEl.value.trim() && !tr._d.product) showMatches(); });
+            itemEl.addEventListener('blur', () => setTimeout(hide, 150));
+            sg.addEventListener('mousemove', e => {
+                const el = e.target.closest('.qs-sg[data-i]');
+                if (el) { const i = parseInt(el.dataset.i, 10); if (i !== active) { active = i; paintActive(); } }
+            });
+            sg.addEventListener('mousedown', e => {
+                const el = e.target.closest('.qs-sg[data-i]');
+                if (!el) return;
+                e.preventDefault();
+                const p = matches[parseInt(el.dataset.i, 10)];
+                hide();
+                if (p) pickProduct(tr, p);
+            });
+
+            qtyEl.addEventListener('input', () => { recalcRow(tr); refreshTotals(); });
+            qtyEl.addEventListener('keydown', e => {
+                if (e.key === 'Enter') { e.preventDefault(); totalEl.focus(); }
+            });
+
+            // Arriving at Total (Tab/Enter from Qty) starts the next row.
+            totalEl.addEventListener('focus', () => {
+                if (tr === lastRow() && rowIsFilled(tr)) addRow(true);
+                else if (tr === lastRow() && tr._d.short > 0) { qtyEl.focus(); }
+            });
+
+            tr.querySelector('.qs-del').addEventListener('click', () => {
+                if (rowsEl.children.length <= 1) { resetAll(); return; }
+                tr.remove();
+                refreshTotals();
+            });
+        }
+
+        function resetAll() {
+            rowsEl.innerHTML = '';
+            addRow(false);
+            discInput.value = '0';
+            document.getElementById('dashQsNote').value = '';
+            document.getElementById('dashQsPayType').value = 'Cash';
+            refreshTotals();
+        }
+
+        function setOpen(open) {
+            body.style.display = open ? 'block' : 'none';
+            toggleBtn.classList.toggle('open', open);
+            toggleBtn.setAttribute('aria-expanded', open ? 'true' : 'false');
+            toggleBtn.title = open ? 'Close quick sale' : 'Open quick sale';
+            if (open) {
+                if (!rowsEl.children.length) addRow(false);
+                ensureCatalog().catch(() => showToastSimple('Could not load the item list.'));
+                const first = rowsEl.querySelector('.qs-item');
+                if (first) first.focus();
+            }
+        }
+        toggleBtn.addEventListener('click', () => setOpen(body.style.display === 'none'));
+        // Lets the sidebar "Quick Sale" shortcut open it too.
+        window.dashOpenQuickSale = () => {
+            setOpen(true);
+            card.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        };
+
+        discInput.addEventListener('input', refreshTotals);
+        clearBtn.addEventListener('click', resetAll);
+
+        // ---------- save ----------
+        async function deductStock(qtyByBatch) {
+            for (const [batchId, units] of qtyByBatch.entries()) {
+                let done = false;
+                for (let attempt = 0; attempt < 4 && !done; attempt++) {
+                    const { data: cur, error: readErr } = await supabaseClient.from('batches').select('total_qty').eq('id', batchId).maybeSingle();
+                    if (readErr || !cur) throw new Error('Could not read stock to deduct: ' + (readErr?.message || 'batch missing'));
+                    const { data: upd, error: updErr } = await supabaseClient.from('batches')
+                        .update({ total_qty: cur.total_qty - units })
+                        .eq('id', batchId).eq('total_qty', cur.total_qty).select('id');
+                    if (updErr) throw new Error('Stock deduction failed: ' + updErr.message);
+                    if (upd && upd.length) done = true;
+                }
+                if (!done) throw new Error('Stock changed while saving (another sale?). Please try again.');
+            }
+        }
+
+        async function save(andPrint) {
+            if (saving) return;
+            saving = true;
+            [saveBtn, savePrintBtn, clearBtn].forEach(b => b.disabled = true);
+            const origSave = saveBtn.innerHTML, origPrint = savePrintBtn.innerHTML;
+            (andPrint ? savePrintBtn : saveBtn).innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Saving...';
+            try {
+                const rows = [...rowsEl.children].filter(tr => tr._d.product && (parseInt(tr.querySelector('.qs-qty').value, 10) || 0) > 0);
+                if (!rows.length) { showToastSimple('Add at least one item.'); return; }
+
+                // Re-read live stock for every item so a stale screen can't oversell.
+                const shownGrand = computeTotals(rows).grand;
+                for (const tr of rows) {
+                    tr._d.batches = await fetchBatches(tr._d.product.id);
+                    recalcRow(tr);
+                }
+                const bad = rows.find(tr => tr._d.short > 0 || !tr._d.parts.length);
+                if (bad) {
+                    refreshTotals();
+                    alert(`Not enough stock for ${bad._d.product.product_name}. Only ${maxPacks(bad._d.batches, Number(bad._d.product.conversion_rate) || 1)} pack(s) available. Please reduce the quantity.`);
+                    return;
+                }
+                const t = computeTotals(rows);
+                refreshTotals();
+                if (Math.abs(t.grand - shownGrand) > 0.005) {
+                    alert('Prices or stock changed since you entered these items. The totals have been refreshed -- please check them and press Save again.');
+                    return;
+                }
+                if (t.grand <= 0) { showToastSimple('Total is zero -- nothing to save.'); return; }
+
+                const payType = document.getElementById('dashQsPayType').value || 'Cash';
+                const payNote = document.getElementById('dashQsNote').value.trim();
+                const prefix = companySettings.retail_prefix_regular || companySettings.invoice_prefix || 'GRI';
+
+                const items = [];
+                const qtyByBatch = new Map();
+                for (const tr of rows) {
+                    const p = tr._d.product;
+                    const pack = Number(p.conversion_rate) || 1;
+                    for (const part of tr._d.parts) {
+                        items.push({
+                            product_id: p.id,
+                            product_name: p.product_name,
+                            generic_name: p.generic_name || '',
+                            batch_id: part.batch.id,
+                            batch_number: part.batch.batch_number,
+                            expiry: part.batch.expiry_date ? new Date(part.batch.expiry_date).toLocaleDateString() : '',
+                            qty: part.packs,
+                            rate: part.rate,
+                            pack_size: pack + 's',
+                            tax_rate: Number(p.tax_percent) || 0,
+                            total: round2(part.packs * part.rate),
+                            days_supplied: 0,
+                            how_to_take: '',
+                            cost_per_unit: Number(part.batch.cost_price) || 0,
+                            available_qty: part.batch.total_qty
+                        });
+                        qtyByBatch.set(part.batch.id, (qtyByBatch.get(part.batch.id) || 0) + part.packs * pack);
+                    }
+                }
+
+                const makeId = () => `${prefix}-${new Date().getFullYear()}-${Date.now().toString().slice(-6)}-${Math.floor(Math.random() * 10000).toString().padStart(4, '0')}`;
+                const nowIso = new Date().toISOString();
+                const record = {
+                    sale_id: makeId(),
+                    type: 'COMPLETED',
+                    prefix: prefix,
+                    client_type: 'RETAIL',
+                    client_sub_type: 'REGULAR',
+                    customer_data: { type: 'REGULAR', walk_in: true, quick_sale: true, full_name: 'Walk-in Customer' },
+                    customer_id: null,
+                    claim_number: null,
+                    bypass_number: null,
+                    items: items,
+                    payment: { type: payType, note: payNote, discount_percent: t.pct, discount_amount: t.discount },
+                    subtotal: t.subtotalNet,
+                    tax: t.taxNet,
+                    grand_total: t.grand,
+                    status: 'COMPLETED',
+                    is_quotation: false,
+                    created_at: nowIso,
+                    updated_at: nowIso
+                };
+
+                let ins = await withAuthRetry(() => supabaseClient.from('sales').insert([record]).select());
+                if (ins.error && (ins.error.code === '23505' || /duplicate key/i.test(ins.error.message || ''))) {
+                    record.sale_id = makeId();
+                    ins = await withAuthRetry(() => supabaseClient.from('sales').insert([record]).select());
+                }
+                if (ins.error || !ins.data || !ins.data.length) {
+                    alert('❌ Error saving sale:\n' + (ins.error?.message || 'no row returned'));
+                    return;
+                }
+                const saved = ins.data[0];
+
+                const saleItems = items.map(i => ({
+                    sale_id: saved.id,
+                    product_id: i.product_id,
+                    batch_id: i.batch_id,
+                    quantity: i.qty,
+                    unit_price: i.rate,
+                    pack_size: i.pack_size,
+                    tax_rate: i.tax_rate,
+                    total: i.total,
+                    days_supplied: 0,
+                    cost_per_unit: i.cost_per_unit
+                }));
+                const itemRes = await withAuthRetry(() => supabaseClient.from('sale_items').insert(saleItems));
+                if (itemRes.error) {
+                    await supabaseClient.from('sales').delete().eq('id', saved.id);
+                    alert('❌ Failed to save sale items. Sale cancelled.\n' + itemRes.error.message);
+                    return;
+                }
+
+                try {
+                    await deductStock(qtyByBatch);
+                } catch (stockErr) {
+                    console.error('Quick sale stock error:', stockErr);
+                    alert(`⚠️ Sale ${saved.sale_id} was saved but stock could NOT be fully deducted:\n${stockErr.message}\n\nPlease tell an admin so stock can be corrected.`);
+                }
+
+                try {
+                    const { data: posted } = await supabaseClient.rpc('sale_accounting_entry_exists', { p_sale_id: saved.sale_id });
+                    if (posted === false) {
+                        alert(`⚠️ Sale ${saved.sale_id} saved and stock deducted, but its accounting entries were NOT found. Please tell an admin/accountant.`);
+                    }
+                } catch (accErr) { console.warn('Could not verify accounting entry:', accErr); }
+
+                showToastSimple(`Sale ${saved.sale_id} saved -- ${money(t.grand)}.`);
+                if (andPrint) {
+                    try { await printInvoiceForSale(saved); } catch (pe) { console.error('Quick sale print failed:', pe); }
+                }
+                resetAll();
+                rowsEl.querySelector('.qs-item')?.focus();
+                try { await loadDispenseQueue(); } catch (e) { /* queue refresh is best-effort */ }
+            } catch (err) {
+                console.error('Quick sale error:', err);
+                alert('❌ Error saving sale:\n' + (err.message || err));
+            } finally {
+                saving = false;
+                [saveBtn, savePrintBtn, clearBtn].forEach(b => b.disabled = false);
+                saveBtn.innerHTML = origSave; savePrintBtn.innerHTML = origPrint;
+            }
+        }
+        saveBtn.addEventListener('click', () => save(false));
+        savePrintBtn.addEventListener('click', () => save(true));
+
+        resetAll();
+    }
 
     // ============================================
     // INIT
@@ -1524,8 +2522,10 @@
     await safeInit('loadAdminApprovals', loadAdminApprovals);
     await safeInit('loadDispenseQueue', loadDispenseQueue);
     await safeInit('initDispatchQueueCard', initDispatchQueueCard);
+    await safeInit('initQuickSale', initQuickSale);
     await safeInit('loadExchangeRateWidget', loadExchangeRateWidget);
     await safeInit('loadSidebarStats', loadSidebarStats);
+    await safeInit('loadNoticeTargetEmployees', loadNoticeTargetEmployees);
     await safeInit('loadSidebarNotices', loadSidebarNotices);
 
     console.log("✅ Dashboard initialized successfully!");

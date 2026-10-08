@@ -203,6 +203,28 @@
                 </div>
             </div>
 
+            <!-- 🔥 ADDED: Bank Details -- needed for Payroll's bulk Bank
+                 Report (the list handed/uploaded to the bank to pay
+                 everyone's salary in one batch). All optional: an
+                 employee paid in cash has no reason to fill these in,
+                 and the Bank Report simply flags whoever's missing them
+                 instead of requiring them here. -->
+            <h4 style="margin: 15px 0 15px 0; color: #0f172a; border-bottom: 1px solid #e2e8f0; padding-bottom: 8px;">Bank Details <small style="color:#94a3b8; font-weight:400;">(for salary payment -- optional)</small></h4>
+            <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 15px; margin-bottom: 15px;">
+                <div>
+                    <label style="display: block; font-weight: 500; color: #475569; margin-bottom: 3px; font-size: 0.85rem;">Bank Name</label>
+                    <input type="text" id="empBankName" placeholder="e.g. Zanaco" style="width: 100%; padding: 8px; border: 1px solid #e2e8f0; border-radius: 4px;">
+                </div>
+                <div>
+                    <label style="display: block; font-weight: 500; color: #475569; margin-bottom: 3px; font-size: 0.85rem;">Branch / Sort Code</label>
+                    <input type="text" id="empBankBranch" style="width: 100%; padding: 8px; border: 1px solid #e2e8f0; border-radius: 4px;">
+                </div>
+                <div>
+                    <label style="display: block; font-weight: 500; color: #475569; margin-bottom: 3px; font-size: 0.85rem;">Account Number</label>
+                    <input type="text" id="empBankAccount" style="width: 100%; padding: 8px; border: 1px solid #e2e8f0; border-radius: 4px;">
+                </div>
+            </div>
+
             <!-- 🔥 ADDED: Opening Advance -- one-time entry when
                  onboarding an employee who already has an outstanding
                  advance, matching the same opening-balance pattern used

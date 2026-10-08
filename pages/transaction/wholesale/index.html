@@ -104,6 +104,24 @@
                     <input type="text" id="wholesalePaymentNote" placeholder="e.g. Bank Ref #12345" style="width: 100%; padding: 4px 8px; border: 1px solid #e2e8f0; border-radius: 4px; background: white; font-size: 0.8rem;">
                 </div>
 
+                <!-- 🔥 ADDED: manual "+ Add Item" button, same fix as retail/index.html's
+                     #retailAddItemBtn -- wholesale had no way to open a blank row on
+                     demand. It relied entirely on the auto-add-next-row logic (typing a
+                     qty or picking a batch on the LAST row), which only ever runs on a
+                     row that's still blank. loadWholesaleForEdit() (opening an existing
+                     invoice via Search > Edit) populates exactly one row per saved item
+                     and leaves no trailing blank row behind, so an already-loaded invoice
+                     had no last-empty-row left for that auto-add logic to ever fire from
+                     -- there was simply no way to add a new product to it. This button
+                     just appends one directly, same as Retail, regardless of whether
+                     editing an existing invoice or building a new one. -->
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+                    <span style="font-weight: 500; color: #0f172a; font-size: 0.8rem;">Items</span>
+                    <button type="button" id="wholesaleAddItemBtn" style="background: #2563eb; color: white; border: none; padding: 4px 14px; border-radius: 4px; cursor: pointer; font-size: 0.75rem;">
+                        <i class="fa-solid fa-plus"></i> Add Item
+                    </button>
+                </div>
+
                 <!-- Item Table -->
                 <div style="border: 1px solid #e2e8f0; border-radius: 4px; overflow-x: auto;">
                     <table class="table-minimal" id="wholesalePosTable" style="min-width: 900px; width: 100%; font-size: 0.8rem;">

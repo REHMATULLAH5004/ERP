@@ -490,6 +490,15 @@
                 d.setDate(d.getDate() + 1);
             }
         });
+        // 🔥 FIX: also fold in any day attendance itself marked 'Leave',
+        // regardless of whether its leave_requests row is Approved (or
+        // exists at all) -- the attendance status is authoritative on its
+        // own (see the calendar loop below), so this stat has to agree
+        // with what the calendar actually colors purple, instead of only
+        // ever counting the Approved-leave_requests subset.
+        (attendanceRes.data || []).forEach(a => {
+            if (a.status === 'Leave') leaveDatesInMonth.add(a.attendance_date);
+        });
 
         const holidayDates = {};
         (holidaysRes.data || []).forEach(h => { holidayDates[h.holiday_date] = h.name; });
@@ -499,7 +508,12 @@
         // ---- STATS ----
         // 🔥 FIX: only count a day absent if EXPLICITLY marked that way
         // -- no record at all is unmarked, not assumed absent.
-        let totalMinutes = 0, absentDays = 0;
+        //
+        // 🔥 ADDED: "Incomplete" days -- see the matching comment on
+        // loadMonthSummary() in dashboard-view.js for the full rationale.
+        // Kept identical here since these two functions are intentionally
+        // duplicated views of the same logic.
+        let totalMinutes = 0, absentDays = 0, incompleteDays = 0;
         (attendanceRes.data || []).forEach(a => {
             if (a.status === 'Absent') absentDays++;
             if (a.check_in && a.check_out) {
@@ -507,6 +521,8 @@
                 const [h2, m2] = a.check_out.split(':').map(Number);
                 const minutes = (h2 * 60 + m2) - (h1 * 60 + m1);
                 if (minutes > 0) totalMinutes += minutes;
+            } else if (!a.check_in && a.status !== 'Absent' && a.status !== 'Off' && a.status !== 'Holiday Off' && a.status !== 'Leave') {
+                incompleteDays++;
             }
         });
 
@@ -514,6 +530,7 @@
         set('hrMonthWorkedHours', (totalMinutes / 60).toFixed(1));
         set('hrMonthAbsent', absentDays);
         set('hrMonthLeave', leaveDatesInMonth.size);
+        set('hrMonthIncomplete', incompleteDays);
 
         // ---- CALENDAR ----
         const calEl = document.getElementById('hrCalendarGrid');
@@ -529,27 +546,33 @@
 
             let bg = 'white', color = '#94a3b8', border = '1px solid #e2e8f0';
 
-            // 🔥 FIX: THE REAL BUG BEHIND "backfilled Present days show up
-            // blank on this calendar" -- this only ever painted a day
-            // green when `record.check_in` was set, i.e. only for a real
-            // QR clock-in punch. A day marked Present administratively
-            // (no clock-in time attached -- e.g. the schedule-based
-            // attendance backfill, or any manual "mark present" edit)
-            // has a real `employee_attendance` row with status='Present'
-            // but check_in/check_out both null, so it matched NONE of
-            // the branches below and silently fell through to the plain
-            // white "unmarked" default -- even though it's a real,
-            // explicitly-recorded day. Now any non-Absent, non-Off status
-            // counts as Present too, not just an actual clock punch.
-            if (record && (record.check_in || (record.status && record.status !== 'Absent' && record.status !== 'Off'))) {
+            let flagTitle = '';
+            if (record && record.check_in) {
                 bg = '#22c55e'; color = 'white'; border = 'none';
             } else if (record && record.status === 'Absent') {
                 bg = '#ef4444'; color = 'white'; border = 'none';
+            } else if (record && record.status === 'Leave') {
+                // 🔥 FIX: the attendance record's own 'Leave' status is
+                // authoritative on its own -- it used to only count here
+                // if leaveDatesInMonth (built from APPROVED leave_requests
+                // for this exact date) also matched, so a day correctly
+                // marked Leave on attendance but whose leave_requests row
+                // wasn't Approved (or didn't exist) fell through into the
+                // Incomplete bucket below instead. Leave is leave,
+                // approved or not -- don't gate this on leave_requests.
+                bg = '#8b5cf6'; color = 'white'; border = 'none';
+            } else if (record && record.status !== 'Off' && record.status !== 'Holiday Off') {
+                // 🔥 ADDED: see the matching branch in dashboard-view.js's
+                // loadMonthSummary() -- kept identical here.
+                bg = '#fbbf24'; color = 'white'; border = 'none';
+                flagTitle = ' -- marked "' + record.status + '" but no check-in recorded';
             } else if (leaveDatesInMonth.has(dateStr)) {
+                // Fallback for an approved multi-day leave span that
+                // hasn't (yet) generated a per-day attendance row.
                 bg = '#8b5cf6'; color = 'white'; border = 'none';
             } else if (holidayDates[dateStr]) {
                 bg = '#eab308'; color = 'white'; border = 'none';
-            } else if ((record && record.status === 'Off') || isWeeklyOffDay(weeklyOffDay, dayOfWeek)) {
+            } else if (isWeeklyOffDay(weeklyOffDay, dayOfWeek)) {
                 bg = '#cbd5e1'; color = 'white'; border = 'none';
             } else if (dateStr > todayStr) {
                 bg = '#f1f5f9'; color = '#94a3b8';
@@ -558,7 +581,7 @@
             // stays plain white/neutral rather than assumed Absent.
 
             html += `
-                <div title="${dateStr}${holidayDates[dateStr] ? ' -- ' + holidayDates[dateStr] : ''}"
+                <div title="${dateStr}${holidayDates[dateStr] ? ' -- ' + holidayDates[dateStr] : ''}${flagTitle}"
                      style="aspect-ratio:1; display:flex; align-items:center; justify-content:center; background:${bg}; color:${color}; border:${border}; border-radius:6px; font-size:0.8rem; font-weight:500;">
                     ${day}
                 </div>
@@ -574,14 +597,34 @@
     // columns, single-letter codes per cell. Fetches attendance/leave/
     // holidays ONCE across all employees (filtered by date range only),
     // then groups by employee in JS -- not one query per employee.
+    //
+    // Month is read from the #attendancePrintMonth <input type="month">
+    // next to the button (defaulted to the current month on page load --
+    // see INIT below). "today" for the P/A/upcoming-day logic below is
+    // always the REAL current date, not the selected print month, so
+    // printing a future month still blanks out days that haven't happened
+    // yet instead of marking them absent.
+    //
+    // NOTE: `employees` is loaded once at page init filtered to
+    // status = 'Active' (see loadEmployees above) -- someone who has
+    // since left will not appear on a register printed for a past month
+    // they actually worked, and someone hired after that month will. This
+    // mirrors the existing employee-list behavior elsewhere on this page;
+    // fixing it would need hire/termination dates factored into the
+    // employee list query, which is out of scope here.
     window.printMonthlyAttendance = async function () {
         const now = new Date();
-        const year = now.getFullYear(), month = now.getMonth();
+        const picker = document.getElementById('attendancePrintMonth');
+        let year = now.getFullYear(), month = now.getMonth();
+        if (picker && picker.value) {
+            const [y, m] = picker.value.split('-').map(Number);
+            year = y; month = m - 1; // <input type="month"> gives 1-12, Date wants 0-11
+        }
         const monthStart = formatDateLocal(year, month, 1);
         const daysInMonth = new Date(year, month + 1, 0).getDate();
         const monthEnd = formatDateLocal(year, month, daysInMonth);
         const todayStr = formatDateLocal(now.getFullYear(), now.getMonth(), now.getDate());
-        const monthLabel = now.toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
+        const monthLabel = new Date(year, month, 1).toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
 
         const [attendanceRes, leaveRes, jobsRes, holidaysRes] = await Promise.all([
             supabaseClient.from('employee_attendance').select('*')
@@ -624,7 +667,7 @@
             const empLeaveDates = leaveDatesByEmployee[emp.employee_id] || new Set();
             const weeklyOff = weeklyOffByEmployee[emp.employee_id];
 
-            let presentCount = 0, absentCount = 0, leaveCount = 0;
+            let presentCount = 0, absentCount = 0, leaveCount = 0, incompleteCount = 0, totalMinutes = 0;
             let cells = '';
 
             for (let day = 1; day <= daysInMonth; day++) {
@@ -634,37 +677,77 @@
 
                 // 🔥 FIX: no record no longer defaults to Absent -- only
                 // an EXPLICIT status of 'Absent' counts as absent now.
-                // 🔥 FIX: same "Present without a clock-in gets dropped"
-                // bug as loadEmployeeMonthView() above -- a status of
-                // 'Present' (or Short Day / Overtime / Holiday / Holiday
-                // OT) with no check_in time used to match nothing here
-                // and print as a blank cell, undercounting presentCount.
-                let code = '', bg = 'white';
-                if (record && (record.check_in || (record.status && record.status !== 'Absent' && record.status !== 'Off'))) {
+                //
+                // 🔥 CHANGED: a Present day used to just print "P" -- now
+                // it prints the actual check-in/check-out times (what
+                // HOURS WORKED is actually derived from), stacked on two
+                // lines, so the register itself shows the hours an
+                // employee was clocked in rather than just a yes/no mark.
+                // `code` still carries 'P' for the presentCount tally and
+                // the cell's displayed content is built separately into
+                // `cellContent`, since a time pair doesn't fit the
+                // single-letter pattern the other statuses use.
+                let code = '', bg = 'white', cellContent = '';
+                if (record && record.check_in) {
                     code = 'P'; bg = '#dcfce7'; presentCount++;
+                    const inTime = record.check_in.slice(0, 5);
+                    const outTime = record.check_out ? record.check_out.slice(0, 5) : '--:--';
+                    cellContent = `<div>${inTime}</div><div style="color:#64748b;">${outTime}</div>`;
+                    if (record.check_in && record.check_out) {
+                        const [h1, m1] = record.check_in.split(':').map(Number);
+                        const [h2, m2] = record.check_out.split(':').map(Number);
+                        const minutes = (h2 * 60 + m2) - (h1 * 60 + m1);
+                        if (minutes > 0) totalMinutes += minutes;
+                    }
                 } else if (record && record.status === 'Absent') {
                     code = 'A'; bg = '#fee2e2'; absentCount++;
+                } else if (record && record.status === 'Leave') {
+                    // 🔥 FIX: the attendance record's own 'Leave' status is
+                    // authoritative by itself -- this used to require
+                    // empLeaveDates (built from APPROVED leave_requests
+                    // covering this date) to also match, so a day correctly
+                    // marked Leave on attendance but backed by a
+                    // not-yet-approved (or missing) leave_requests row fell
+                    // through into the Incomplete branch below instead.
+                    // Leave is leave, approved or not.
+                    code = 'L'; bg = '#ede9fe'; leaveCount++;
+                } else if (record && record.status !== 'Off' && record.status !== 'Holiday Off') {
+                    // 🔥 ADDED: a record exists (e.g. status 'Present')
+                    // but no check_in was ever recorded -- see the
+                    // "Incomplete" stat on the Dashboard sidebar and HR's
+                    // calendar widget for the full rationale. This is
+                    // exactly the gap that makes this printed register
+                    // disagree with those two widgets' worked-hours total
+                    // if left uncounted, since it used to render as a
+                    // blank cell here (neither P nor A).
+                    code = 'I'; bg = '#fef3c7'; incompleteCount++;
                 } else if (empLeaveDates.has(dateStr)) {
+                    // Fallback for an approved multi-day leave span that
+                    // hasn't (yet) generated a per-day attendance row.
                     code = 'L'; bg = '#ede9fe'; leaveCount++;
                 } else if (holidayDates[dateStr]) {
                     code = 'H'; bg = '#fef9c3';
-                } else if ((record && record.status === 'Off') || weeklyOff === DAY_NAMES[dayOfWeek]) {
+                } else if (weeklyOff === DAY_NAMES[dayOfWeek]) {
                     code = 'O'; bg = '#f1f5f9';
                 } else if (dateStr > todayStr) {
                     code = ''; bg = 'white';
                 } else {
                     code = ''; bg = 'white'; // unmarked, not assumed absent
                 }
-                cells += `<td style="background:${bg}; text-align:center; padding:2px; width:20px;">${code}</td>`;
+                // Every non-Present status still prints as its single
+                // letter -- only Present got the richer two-line time
+                // treatment above.
+                if (!cellContent) cellContent = code;
+                cells += `<td style="background:${bg}; text-align:center; padding:1px; width:32px; line-height:1.15;">${cellContent}</td>`;
             }
 
-            return { name: `${emp.first_name} ${emp.last_name}`, cells, presentCount, absentCount, leaveCount };
+            return { name: `${emp.first_name} ${emp.last_name}`, cells, presentCount, absentCount, leaveCount, incompleteCount, totalHours: totalMinutes / 60 };
         });
 
         // ---- BUILD PRINT WINDOW ----
         let dayHeaderCells = '';
         for (let day = 1; day <= daysInMonth; day++) {
-            dayHeaderCells += `<th style="width:20px; font-size:0.65rem;">${day}</th>`;
+            dayHeaderCells += `<th style="width:32px; font-size:0.65rem;">${day}</th>`;
         }
 
         const rowsHtml = rows.map(r => `
@@ -674,6 +757,8 @@
                 <td style="text-align:center; font-weight:600; color:#059669;">${r.presentCount}</td>
                 <td style="text-align:center; font-weight:600; color:#dc2626;">${r.absentCount}</td>
                 <td style="text-align:center; font-weight:600; color:#8b5cf6;">${r.leaveCount}</td>
+                <td style="text-align:center; font-weight:600; color:#d97706;">${r.incompleteCount}</td>
+                <td style="text-align:center; font-weight:600; color:#0f172a;">${r.totalHours.toFixed(1)}</td>
             </tr>
         `).join('');
 
@@ -686,14 +771,14 @@
             <head>
                 <title>Attendance Register - ${monthLabel}</title>
                 <style>
-                    @page { size: landscape; margin: 12mm; }
+                    @page { size: landscape; margin: 10mm; }
                     body { font-family: Arial, sans-serif; color: #0f172a; }
                     h1 { margin-bottom: 2px; font-size: 1.3rem; }
                     .subtitle { color: #64748b; margin-top: 0; margin-bottom: 14px; font-size: 0.85rem; }
-                    .legend { display: flex; gap: 16px; margin-bottom: 12px; font-size: 0.75rem; }
+                    .legend { display: flex; gap: 16px; margin-bottom: 12px; font-size: 0.75rem; flex-wrap: wrap; }
                     .legend span { display: flex; align-items: center; gap: 4px; }
                     .swatch { display: inline-block; width: 10px; height: 10px; border: 1px solid #cbd5e1; }
-                    table { border-collapse: collapse; width: 100%; font-size: 0.7rem; }
+                    table { border-collapse: collapse; width: 100%; font-size: 0.6rem; }
                     th, td { border: 1px solid #e2e8f0; }
                     th { background: #f1f5f9; padding: 3px 2px; }
                 </style>
@@ -702,18 +787,19 @@
                 <h1>Monthly Attendance Register</h1>
                 <p class="subtitle">${monthLabel} &middot; Generated ${new Date().toLocaleString()}</p>
                 <div class="legend">
-                    <span><span class="swatch" style="background:#dcfce7;"></span> P = Present</span>
+                    <span><span class="swatch" style="background:#dcfce7;"></span> P = Present (shown as check-in / check-out time)</span>
                     <span><span class="swatch" style="background:#fee2e2;"></span> A = Absent</span>
                     <span><span class="swatch" style="background:#ede9fe;"></span> L = Leave</span>
                     <span><span class="swatch" style="background:#fef9c3;"></span> H = Holiday</span>
                     <span><span class="swatch" style="background:#f1f5f9;"></span> O = Off Day</span>
+                    <span><span class="swatch" style="background:#fef3c7;"></span> I = Incomplete (marked present, no check-in recorded)</span>
                 </div>
                 <table>
                     <thead>
                         <tr>
                             <th style="text-align:left; padding-left:8px;">Employee</th>
                             ${dayHeaderCells}
-                            <th>P</th><th>A</th><th>L</th>
+                            <th>P</th><th>A</th><th>L</th><th>I</th><th>Hrs</th>
                         </tr>
                     </thead>
                     <tbody>${rowsHtml}</tbody>
@@ -728,10 +814,16 @@
     // ============================================
     // INIT
     // ============================================
+    const attendancePrintMonthEl = document.getElementById('attendancePrintMonth');
+    if (attendancePrintMonthEl) {
+        const now = new Date();
+        attendancePrintMonthEl.value = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+    }
+
     await loadEmployees();
     await refreshPendingBadge();
     await refreshAdvancePendingBadge();
     await loadOutstandingAdvances();
 
     console.log("✅ HR Overview initialized successfully!");
-})();
+})();

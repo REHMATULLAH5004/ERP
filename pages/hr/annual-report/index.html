@@ -1,0 +1,44 @@
+<div class="module-view-container">
+
+    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:20px; flex-wrap:wrap; gap:10px;">
+        <h3 style="margin:0;"><i class="fa-solid fa-file-contract"></i> Annual Attendance &amp; Leave Report</h3>
+        <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
+            <select id="annReportEmployee" style="padding:7px 10px; border:1px solid #e2e8f0; border-radius:6px; background:white; min-width:180px;">
+                <option value="">All Employees</option>
+            </select>
+            <select id="annReportYear" style="padding:7px 10px; border:1px solid #e2e8f0; border-radius:6px; background:white;"></select>
+            <button class="btn btn-primary" onclick="generateAnnualReport()">
+                <i class="fa-solid fa-magnifying-glass-chart"></i> Generate
+            </button>
+            <button class="btn btn-outline" onclick="printAnnualReport()">
+                <i class="fa-solid fa-print"></i> Print
+            </button>
+        </div>
+    </div>
+
+    <p style="color:#64748b; font-size:0.85rem; margin-top:-12px; margin-bottom:20px;">
+        "All Employees" shows one row per employee for the whole year. Pick a single employee to see a month-by-month
+        breakdown instead. Required Hours = 9h on a normal working day, 5h on the half-day adjacent to a Sat/Sun off
+        day, 0h on the employee's own off day or a public holiday -- the same rule used for overtime elsewhere in HR.
+        A year still in progress only counts days up to today. No month before September 2026 is counted, and annual
+        leave entitlement is prorated to match (e.g. a 24-day/year entitlement shows as 8 for 2026's Sep-Dec-only
+        scope) -- same cutoff the Leave and Payroll pages use.
+    </p>
+
+    <div class="card" style="padding: 0; overflow-x:auto;">
+        <table class="table-minimal" id="annReportTable">
+            <thead id="annReportThead"></thead>
+            <tbody id="annReportBody">
+                <tr>
+                    <td colspan="13" style="text-align: center; padding: 30px; color: #94a3b8;">
+                        Pick a year (and optionally an employee) and click Generate.
+                    </td>
+                </tr>
+            </tbody>
+        </table>
+    </div>
+</div>
+
+<script>
+    document.dispatchEvent(new Event('loadModuleComplete'));
+</script>

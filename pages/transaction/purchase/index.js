@@ -559,11 +559,16 @@
         }
 
         try {
-            const { data: categories, error } = await supabaseClient
-                .from('categories')
-                .select('id, name')
-                .order('name');
-                
+            // 🔥 FIX: this query ran BEFORE generateReorderReport() and had
+            // no timeout of its own -- a stalled connection here meant
+            // generateReorderReport() (and its own timeouts, see below)
+            // never even got called, so the modal never got past its
+            // static "Loading reorder items..." placeholder at all.
+            const { data: categories, error } = await withTimeout(
+                supabaseClient.from('categories').select('id, name').order('name'),
+                20000, 'Loading categories'
+            );
+
             if (!error && categories) {
                 const catSelect = document.getElementById('reorderCategory');
                 if (catSelect) {
@@ -581,11 +586,34 @@
         }
     }
 
+    // 🔥 ADDED: wraps a Supabase query/promise so a stalled network
+    // request (fetch() has no built-in timeout, and a dropped/hung
+    // connection just never resolves or rejects) fails loudly after `ms`
+    // instead of leaving something waiting on it stuck forever. This was
+    // the actual cause of the Reorder Report sometimes sitting on
+    // "Loading reorder items..." indefinitely -- every lookup below was a
+    // bare, unguarded `await`, so one stalled request anywhere in that
+    // chain meant nothing after it ever ran: no error, no retry option,
+    // just a permanent spinner with nothing in the console to explain it.
+    function withTimeout(promiseLike, ms, label) {
+        return Promise.race([
+            Promise.resolve(promiseLike),
+            new Promise((_, reject) => setTimeout(
+                () => reject(new Error(`${label} timed out after ${Math.round(ms / 1000)}s -- check your connection and try again`)),
+                ms
+            ))
+        ]);
+    }
+
     async function generateReorderReport() {
+        const tbody = document.getElementById('reorderTableBody');
+        if (tbody) {
+            tbody.innerHTML = `<tr><td colspan="7" style="text-align: center; padding: 40px; color: #6b7280;">Loading reorder items...</td></tr>`;
+        }
         try {
             const supplierId = document.getElementById('reorderSupplier')?.value || '';
             const categoryId = document.getElementById('reorderCategory')?.value || '';
-            
+
             let query = supabaseClient
                 .from('products')
                 .select('id, product_name, conversion_rate, generic_name_id, supplier_id, category_id');
@@ -597,27 +625,34 @@
                 query = query.eq('category_id', categoryId);
             }
 
-            const { data: products, error } = await query;
+            const { data: products, error } = await withTimeout(query, 20000, 'Loading products');
             if (error) throw error;
 
-            const genericMap = await fetchGenericNames(products);
-            const supplierMap = await fetchSupplierNames(products);
-            const categoryMap = await fetchCategoryNames(products);
-            const stockMap = await fetchStockLevels(products);
-
-            // 🔥 ADDED: last purchase cost + 3-month sales for every
-            // product in the current filter (not just the ones already
-            // known to be due) -- needed up front now because the "due"
-            // decision itself depends on combined generic-level sales,
-            // computed below.
             const allIds = products.map(p => p.id);
-            const lastPurchaseMap = await fetchLastPurchaseCosts(allIds);
+
+            // 🔥 FIX: these six lookups are all independent of one another
+            // (none needs another's result), but were being awaited one
+            // after another -- so the modal's total wait time was the SUM
+            // of every one of them, and any single slow/stalled request
+            // blocked everything after it from ever starting. Running them
+            // together cuts real-world wait time roughly 6x, and each one
+            // is now individually timeout-guarded via withTimeout() above,
+            // so a single bad connection can no longer hang the whole
+            // report -- it surfaces as a visible, retryable error instead.
+            const [genericMap, supplierMap, categoryMap, stockMap, lastPurchaseMap, salesMap] = await Promise.all([
+                withTimeout(fetchGenericNames(products), 20000, 'Loading generic names'),
+                withTimeout(fetchSupplierNames(products), 20000, 'Loading suppliers'),
+                withTimeout(fetchCategoryNames(products), 20000, 'Loading categories'),
+                withTimeout(fetchStockLevels(products), 20000, 'Loading stock levels'),
+                withTimeout(fetchLastPurchaseCosts(allIds), 20000, 'Loading last purchase costs'),
+                withTimeout(fetchLast3MonthSales(allIds), 20000, 'Loading 3-month sales')
+            ]);
 
             // 🔥 CHANGED (Minimum Order Qty removed entirely): reorder_qty
             // tops current stock back up to the generic's own trailing
             // 3-month demand, so one order lasts a full reorder cycle
-            // instead of landing right back below the trigger.
-            const salesMap = await fetchLast3MonthSales(allIds);
+            // instead of landing right back below the trigger. (salesMap
+            // itself now comes from the parallel Promise.all() above.)
 
             // 🔥 CHANGED: reorder decisions happen at the GENERIC NAME
             // level, not per individual brand/product. Two brands of the
@@ -708,10 +743,15 @@
             renderReorderReport();
         } catch (error) {
             console.error('Error generating reorder report:', error);
-            const tbody = document.getElementById('reorderTableBody');
+            // 🔥 FIX: tbody was re-fetched here already, but on a timeout
+            // (see withTimeout() above) there was previously no way back
+            // to a working report short of closing the modal and hoping --
+            // this now leaves a visible error AND a Retry button instead
+            // of an indefinite spinner with nothing to click.
             if (tbody) {
                 tbody.innerHTML = `<tr><td colspan="7" style="text-align: center; padding: 40px; color: #dc2626;">
-                    Error loading reorder report: ${error.message}
+                    Error loading reorder report: ${error.message}<br>
+                    <button type="button" onclick="generateReorderReport()" style="margin-top:12px; padding:6px 16px; background:#2563eb; color:#fff; border:none; border-radius:6px; cursor:pointer;">Retry</button>
                 </td></tr>`;
             }
         }

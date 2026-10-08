@@ -1,0 +1,169 @@
+<div class="module-view-container">
+    <h3 style="margin: 0 0 4px 0;"><i class="fa-solid fa-cash-register"></i> Z-Report (End-of-Day Cash Count)</h3>
+    <p style="color:#64748b; font-size:0.85rem; margin-top:0; margin-bottom:20px;">
+        Shows the cash the system says should be in the drawer (Cash in Hand), lets you enter the cash actually counted,
+        and posts the difference so the Cash in Hand account in the ledger equals the physical cash.
+    </p>
+
+    <!-- Date bar -->
+    <div class="zrep-filter-bar card">
+        <div class="zrep-field">
+            <label>Z-Report Date</label>
+            <input type="date" id="zrepDate">
+        </div>
+        <button class="btn btn-primary btn-sm" id="zrepLoadBtn"><i class="fa-solid fa-rotate"></i> Load</button>
+        <span id="zrepNotice" class="zrep-notice"></span>
+    </div>
+
+    <!-- System cash summary -->
+    <div class="zrep-cards">
+        <div class="zrep-card"><span class="zrep-card-label">Opening Cash</span><span class="zrep-card-value" id="zrepOpening">K 0.00</span><span class="zrep-card-sub">Balance at start of day</span></div>
+        <div class="zrep-card zrep-in"><span class="zrep-card-label">Cash In</span><span class="zrep-card-value" id="zrepIn">K 0.00</span><span class="zrep-card-sub" id="zrepInSub">&nbsp;</span></div>
+        <div class="zrep-card zrep-out"><span class="zrep-card-label">Cash Out</span><span class="zrep-card-value" id="zrepOut">K 0.00</span><span class="zrep-card-sub" id="zrepOutSub">&nbsp;</span></div>
+        <div class="zrep-card zrep-expected"><span class="zrep-card-label">Expected Cash (System)</span><span class="zrep-card-value" id="zrepExpected">K 0.00</span><span class="zrep-card-sub">Opening + In - Out</span></div>
+    </div>
+
+    <div class="zrep-two-col">
+        <!-- Count -->
+        <div class="card zrep-panel">
+            <div class="zrep-panel-head"><strong>Cash Count</strong><span class="zrep-sub">Count the notes and coins (or type the total), then add the Airtel Money balance</span></div>
+            <table class="zrep-denoms">
+                <thead><tr><th>Note / Coin</th><th>Qty</th><th class="zrep-num">Amount</th></tr></thead>
+                <tbody id="zrepDenomBody"></tbody>
+            </table>
+            <div class="zrep-count-row">
+                <label for="zrepCounted">Cash Counted &ndash; Notes &amp; Coins (K)</label>
+                <input type="number" id="zrepCounted" step="0.01" min="0" placeholder="0.00">
+            </div>
+            <div class="zrep-count-row">
+                <label for="zrepAirtel"><i class="fa-solid fa-mobile-screen-button"></i> Airtel Money Balance (K)</label>
+                <input type="number" id="zrepAirtel" step="0.01" min="0" placeholder="0.00">
+            </div>
+            <div class="zrep-total-row">
+                <span>Total Counted (Cash + Airtel Money)</span>
+                <strong id="zrepTotalCounted">K 0.00</strong>
+            </div>
+
+            <div class="zrep-diff" id="zrepDiffBox">
+                <span class="zrep-diff-label">Difference (Counted - Expected)</span>
+                <span class="zrep-diff-value" id="zrepDiffValue">K 0.00</span>
+                <span class="zrep-diff-msg" id="zrepDiffMsg">Enter the counted cash to see the difference.</span>
+            </div>
+
+            <div class="zrep-count-row">
+                <label for="zrepNotes">Notes (optional)</label>
+                <textarea id="zrepNotes" rows="2" placeholder="e.g. change given short, cash taken by owner, ..."></textarea>
+            </div>
+
+            <div class="zrep-actions">
+                <button class="btn btn-primary" id="zrepPostBtn" disabled><i class="fa-solid fa-check"></i> Post Z-Report &amp; Adjust Cash</button>
+                <button class="btn btn-sm zrep-ghost-btn" id="zrepPrintDraftBtn"><i class="fa-solid fa-print"></i> Print</button>
+            </div>
+            <div class="zrep-acct-note" id="zrepAcctNote">
+                Posting books the difference against account 6190 Cash Over/Short, dated the Z-report date.
+            </div>
+        </div>
+
+        <!-- Where the cash came from / went -->
+        <div class="card zrep-panel">
+            <div class="zrep-panel-head"><strong>Cash Movements for the Day</strong><span class="zrep-sub" id="zrepMoveCount"></span></div>
+            <table class="zrep-table">
+                <thead><tr><th>Source / Use</th><th class="zrep-num">Entries</th><th class="zrep-num">In</th><th class="zrep-num">Out</th></tr></thead>
+                <tbody id="zrepSummaryBody"></tbody>
+            </table>
+            <button class="zrep-link-btn" id="zrepDetailToggle"><i class="fa-solid fa-chevron-down"></i> Show every entry</button>
+            <div id="zrepDetailWrap" style="display:none;">
+                <div class="zrep-scroll">
+                    <table class="zrep-table">
+                        <thead><tr><th>Reference</th><th>Description</th><th>Account</th><th class="zrep-num">In</th><th class="zrep-num">Out</th></tr></thead>
+                        <tbody id="zrepDetailBody"></tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- History -->
+    <div class="card zrep-panel" style="margin-top:20px;">
+        <div class="zrep-panel-head"><strong>Posted Z-Reports</strong><span class="zrep-sub">Latest 40</span></div>
+        <div class="zrep-scroll">
+            <table class="zrep-table">
+                <thead>
+                    <tr>
+                        <th>Z-Report</th><th>Date</th><th class="zrep-num">Expected</th><th class="zrep-num">Counted</th>
+                        <th class="zrep-num">Difference</th><th>Notes</th><th>Posted</th><th></th>
+                    </tr>
+                </thead>
+                <tbody id="zrepHistoryBody"></tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+<style>
+.zrep-filter-bar { display:flex; align-items:flex-end; gap:14px; padding:14px 18px; margin-bottom:20px; flex-wrap:wrap; }
+.zrep-field { display:flex; flex-direction:column; gap:4px; }
+.zrep-field label { font-size:0.72rem; color:#64748b; font-weight:600; text-transform:uppercase; letter-spacing:0.4px; }
+.zrep-field input[type="date"] { border:1px solid #e2e8f0; border-radius:6px; padding:6px 10px; font-size:0.85rem; color:#1e293b; }
+.zrep-notice { margin-left:auto; font-size:0.78rem; color:#b45309; align-self:center; }
+
+.zrep-cards { display:grid; grid-template-columns:repeat(4,1fr); gap:15px; margin-bottom:20px; }
+@media (max-width: 900px) { .zrep-cards { grid-template-columns:1fr 1fr; } }
+.zrep-card { background:#fff; border:1px solid #e8edf3; border-left:4px solid #64748b; border-radius:8px; padding:14px 16px; box-shadow:0 1px 3px rgba(0,0,0,0.06); display:flex; flex-direction:column; gap:3px; }
+.zrep-card.zrep-in { border-left-color:#059669; }
+.zrep-card.zrep-out { border-left-color:#dc2626; }
+.zrep-card.zrep-expected { border-left-color:#2563eb; }
+.zrep-card-label { font-size:0.72rem; color:#64748b; font-weight:600; text-transform:uppercase; letter-spacing:0.4px; }
+.zrep-card-value { font-size:1.35rem; font-weight:700; color:#1e293b; }
+.zrep-card-sub { font-size:0.72rem; color:#94a3b8; }
+
+.zrep-two-col { display:grid; grid-template-columns:minmax(320px,5fr) 7fr; gap:20px; align-items:start; }
+@media (max-width: 1000px) { .zrep-two-col { grid-template-columns:1fr; } }
+.zrep-panel { padding:16px 20px 20px; }
+.zrep-panel-head { display:flex; justify-content:space-between; align-items:baseline; margin-bottom:10px; gap:10px; }
+.zrep-panel-head strong { font-size:0.92rem; color:#1e293b; }
+.zrep-sub { font-size:0.72rem; color:#94a3b8; }
+
+.zrep-denoms, .zrep-table { width:100%; border-collapse:collapse; font-size:0.8rem; }
+.zrep-denoms th, .zrep-table th { text-align:left; font-size:0.68rem; text-transform:uppercase; letter-spacing:0.4px; color:#64748b; border-bottom:1px solid #e2e8f0; padding:6px 8px; background:#fff; }
+.zrep-denoms td, .zrep-table td { padding:5px 8px; border-bottom:1px solid #f1f5f9; color:#1e293b; vertical-align:middle; }
+.zrep-num { text-align:right !important; font-variant-numeric:tabular-nums; }
+.zrep-denoms input { width:78px; border:1px solid #e2e8f0; border-radius:6px; padding:4px 8px; font-size:0.82rem; text-align:right; }
+.zrep-scroll { overflow:auto; max-height:380px; }
+.zrep-table thead th { position:sticky; top:0; }
+.zrep-in-val { color:#059669; font-weight:600; }
+.zrep-out-val { color:#dc2626; font-weight:600; }
+.zrep-muted { color:#94a3b8; }
+
+.zrep-count-row { display:flex; flex-direction:column; gap:4px; margin-top:12px; }
+.zrep-count-row label { font-size:0.72rem; color:#64748b; font-weight:600; text-transform:uppercase; letter-spacing:0.4px; }
+.zrep-count-row input, .zrep-count-row textarea { border:1px solid #cbd5e1; border-radius:6px; padding:8px 10px; font-size:1rem; color:#1e293b; font-family:inherit; }
+.zrep-count-row input { font-weight:700; font-size:1.15rem; }
+.zrep-count-row textarea { font-size:0.85rem; resize:vertical; }
+
+.zrep-total-row { display:flex; justify-content:space-between; align-items:center; margin-top:12px; padding:10px 12px; background:#f1f5f9; border-radius:6px; font-size:0.8rem; color:#475569; font-weight:600; }
+.zrep-total-row strong { font-size:1.1rem; color:#1e293b; }
+.zrep-diff { margin-top:14px; border-radius:8px; padding:12px 14px; background:#f8fafc; border:1px solid #e2e8f0; display:flex; flex-direction:column; gap:2px; }
+.zrep-diff-label { font-size:0.72rem; color:#64748b; font-weight:600; text-transform:uppercase; letter-spacing:0.4px; }
+.zrep-diff-value { font-size:1.4rem; font-weight:700; color:#1e293b; }
+.zrep-diff-msg { font-size:0.78rem; color:#64748b; }
+.zrep-diff.zrep-balanced { background:#ecfdf5; border-color:#a7f3d0; }
+.zrep-diff.zrep-balanced .zrep-diff-value { color:#047857; }
+.zrep-diff.zrep-over { background:#eff6ff; border-color:#bfdbfe; }
+.zrep-diff.zrep-over .zrep-diff-value { color:#1d4ed8; }
+.zrep-diff.zrep-short { background:#fef2f2; border-color:#fecaca; }
+.zrep-diff.zrep-short .zrep-diff-value { color:#b91c1c; }
+
+.zrep-actions { display:flex; gap:10px; margin-top:14px; align-items:center; }
+.zrep-ghost-btn { background:transparent; border:1px solid #cbd5e1; color:#475569; border-radius:6px; padding:7px 12px; cursor:pointer; }
+.zrep-ghost-btn:hover { background:#f8fafc; }
+.zrep-acct-note { margin-top:10px; font-size:0.72rem; color:#94a3b8; }
+.zrep-link-btn { background:none; border:none; color:#2563eb; font-size:0.78rem; cursor:pointer; padding:8px 0 4px; }
+.zrep-empty { text-align:center; color:#94a3b8; padding:18px 8px !important; }
+.zrep-badge { display:inline-block; padding:1px 8px; border-radius:8px; font-size:0.68rem; font-weight:600; white-space:nowrap; }
+.zrep-badge.bal { background:#ecfdf5; color:#047857; }
+.zrep-badge.over { background:#eff6ff; color:#1d4ed8; }
+.zrep-badge.short { background:#fef2f2; color:#b91c1c; }
+.zrep-toast { position:fixed; right:24px; bottom:24px; background:#0f172a; color:#fff; padding:10px 16px; border-radius:8px; font-size:0.85rem; z-index:99999; box-shadow:0 6px 20px rgba(0,0,0,0.25); max-width:420px; }
+.zrep-toast.err { background:#b91c1c; }
+</style>

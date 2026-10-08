@@ -77,3 +77,36 @@ function computeOvertime(isFixedPay, isHoliday, dayCategory, hoursWorked) {
     }
     return { isOvertime: false, overtimeHours: 0 };
 }
+
+// ============================================
+// Leave/attendance tracking start date + entitlement proration
+// ============================================
+// Per instruction: don't consider any month before September 2026 --
+// data from before go-live isn't reliable/relevant. This is a single
+// shared cutoff so every page that does a "whole calendar year" query
+// (Leave Balance, Payroll's entitlement-used-before-this-month check,
+// the Annual Report) clips to the same date instead of each picking
+// its own Jan 1 and silently disagreeing with the others.
+//
+// For 2026 specifically this also means annual_leave_days (set as a
+// FULL YEAR figure, e.g. 24 or 48) overstates what's actually been
+// accrued, since only Sep-Dec (4 months) of the year is being counted
+// at all -- entitlementForYear() prorates it down to the monthly rate
+// (annual_leave_days / 12) times however many months of that year are
+// actually in scope. A future year with no cutoff in it (2027
+// onwards, as this is currently set) gets the full 12 months, i.e.
+// the plain annual_leave_days figure, unprorated.
+const LEAVE_TRACKING_START = '2026-09-01';
+
+function effectiveYearStart(year) {
+    const janFirst = `${year}-01-01`;
+    return janFirst < LEAVE_TRACKING_START ? LEAVE_TRACKING_START : janFirst;
+}
+
+function entitlementForYear(annualLeaveDaysPerYear, year) {
+    const start = effectiveYearStart(year);
+    const startMonth = Number(start.slice(5, 7)); // 1-12
+    const monthsCounted = 12 - startMonth + 1; // e.g. Sep(9) -> 4; Jan(1) -> 12
+    const monthlyRate = (annualLeaveDaysPerYear || 0) / 12;
+    return monthlyRate * monthsCounted;
+}

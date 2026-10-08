@@ -234,7 +234,10 @@
                         annual_leave_days,
                         basic_pay,
                         allowances,
-                        is_fixed_pay
+                        is_fixed_pay,
+                        bank_name,
+                        bank_branch,
+                        bank_account_number
                     )
                 `)
                 .eq('employee_id', employeeId)
@@ -272,6 +275,9 @@
             document.getElementById('empAnnualLeave').value = job.annual_leave_days || 20;
             document.getElementById('empBasicPay').value = job.basic_pay || '';
             document.getElementById('empAllowances').value = job.allowances || 0;
+            document.getElementById('empBankName').value = job.bank_name || '';
+            document.getElementById('empBankBranch').value = job.bank_branch || '';
+            document.getElementById('empBankAccount').value = job.bank_account_number || '';
             toggleFixedEmployeeFields();
 
         } catch (error) {
@@ -399,7 +405,11 @@
             weekly_off_day: isFixedPay ? null : (document.getElementById('empWeeklyOffDay').value || null),
             annual_leave_days: isFixedPay ? 0 : (parseInt(document.getElementById('empAnnualLeave').value) || 20),
             basic_pay: parseFloat(document.getElementById('empBasicPay').value) || 0,
-            allowances: parseFloat(document.getElementById('empAllowances').value) || 0
+            allowances: parseFloat(document.getElementById('empAllowances').value) || 0,
+            // 🔥 ADDED: Bank Details, for Payroll's bulk Bank Report
+            bank_name: document.getElementById('empBankName').value || null,
+            bank_branch: document.getElementById('empBankBranch').value || null,
+            bank_account_number: document.getElementById('empBankAccount').value || null
         };
 
         try {

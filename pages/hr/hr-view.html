@@ -3,6 +3,7 @@
     <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:20px; flex-wrap:wrap; gap:10px;">
         <h3 style="margin:0;"><i class="fa-solid fa-users-gear"></i> HR Overview</h3>
         <div style="display:flex; gap:10px; align-items:center;">
+            <input type="month" id="attendancePrintMonth" style="padding:7px 10px; border:1px solid #e2e8f0; border-radius:6px; background:white;">
             <button class="btn btn-outline" onclick="printMonthlyAttendance()">
                 <i class="fa-solid fa-print"></i> Print Monthly Attendance
             </button>
@@ -51,7 +52,7 @@
         </div>
 
         <div id="hrCalendarContent" style="display:none;">
-            <div style="display:grid; grid-template-columns:repeat(3,1fr); gap:15px; margin-bottom:20px;">
+            <div style="display:grid; grid-template-columns:repeat(4,1fr); gap:15px; margin-bottom:20px;">
                 <div style="text-align:center; padding:12px; background:#f8fafc; border-radius:8px;">
                     <div style="font-size:1.6rem; font-weight:700; color:#0f172a;" id="hrMonthWorkedHours">--</div>
                     <div style="font-size:0.75rem; color:#64748b; text-transform:uppercase;">Hours Worked</div>
@@ -64,6 +65,14 @@
                     <div style="font-size:1.6rem; font-weight:700; color:#8b5cf6;" id="hrMonthLeave">--</div>
                     <div style="font-size:0.75rem; color:#64748b; text-transform:uppercase;">Leave Days Taken</div>
                 </div>
+                <!-- 🔥 ADDED: see dashSidebarMonthIncomplete in dashboard-menu.html
+                     for the full rationale -- same stat, same meaning, kept in
+                     sync here since this widget and the Dashboard sidebar one
+                     are intentionally duplicated views of the same logic. -->
+                <div style="text-align:center; padding:12px; background:#fffbeb; border-radius:8px;" title="Marked Present/Short Day/etc. but no check-in or check-out time was ever recorded for that day -- likely a bad or manually-entered record worth reviewing.">
+                    <div style="font-size:1.6rem; font-weight:700; color:#d97706;" id="hrMonthIncomplete">--</div>
+                    <div style="font-size:0.75rem; color:#64748b; text-transform:uppercase;">Incomplete</div>
+                </div>
             </div>
 
             <div style="display:flex; gap:14px; flex-wrap:wrap; margin-bottom:10px; font-size:0.75rem; color:#64748b;">
@@ -72,6 +81,7 @@
                 <span><span style="display:inline-block;width:10px;height:10px;background:#8b5cf6;border-radius:2px;margin-right:4px;"></span>On Leave</span>
                 <span><span style="display:inline-block;width:10px;height:10px;background:#eab308;border-radius:2px;margin-right:4px;"></span>Holiday</span>
                 <span><span style="display:inline-block;width:10px;height:10px;background:#cbd5e1;border-radius:2px;margin-right:4px;"></span>Off Day</span>
+                <span><span style="display:inline-block;width:10px;height:10px;background:#fbbf24;border-radius:2px;margin-right:4px;"></span>Incomplete</span>
                 <span><span style="display:inline-block;width:10px;height:10px;background:#f1f5f9;border:1px solid #e2e8f0;border-radius:2px;margin-right:4px;"></span>Upcoming</span>
             </div>
 

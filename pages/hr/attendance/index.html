@@ -8,6 +8,9 @@
             <button id="manualEntryBtn" style="background: #2563eb; color: white; border: none; padding: 10px 20px; border-radius: 6px; cursor: pointer;">
                 <i class="fa-solid fa-pen-to-square"></i> Manual Entry
             </button>
+            <button id="enrollFingerprintBtn" style="background: #0f766e; color: white; border: none; padding: 10px 20px; border-radius: 6px; cursor: pointer;">
+                <i class="fa-solid fa-fingerprint"></i> Enroll Fingerprint
+            </button>
         </div>
     </div>
 
@@ -200,6 +203,47 @@
                 </button>
             </div>
         </form>
+    </div>
+</div>
+
+<!-- ============================================ -->
+<!-- ENROLL FINGERPRINT MODAL (NEW) -->
+<!-- ============================================ -->
+<div id="fingerprintModal" style="display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(15, 23, 42, 0.6); backdrop-filter: blur(4px); z-index: 1000; justify-content: center; align-items: center; overflow-y: auto;">
+    <div style="background: white; padding: 30px; border-radius: 12px; width: 90%; max-width: 480px; max-height: 90vh; overflow-y: auto; box-shadow: 0 20px 50px rgba(0,0,0,0.5); text-align: center;">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; border-bottom: 1px solid #e2e8f0; padding-bottom: 15px; text-align: left;">
+            <h3 style="margin: 0;"><i class="fa-solid fa-fingerprint" style="color: #0f766e;"></i> Enroll Fingerprint</h3>
+            <button id="closeFingerprintModalBtn" style="background: none; border: none; font-size: 1.5rem; cursor: pointer; color: #64748b;">&times;</button>
+        </div>
+
+        <div style="margin-bottom: 15px; text-align: left;">
+            <label style="display: block; font-weight: 500; color: #475569; margin-bottom: 3px; font-size: 0.85rem;">Employee *</label>
+            <select id="fpEmployee" style="width: 100%; padding: 8px; border: 1px solid #e2e8f0; border-radius: 4px; background: white;">
+                <option value="">Select Employee</option>
+            </select>
+        </div>
+
+        <div style="margin: 20px 0;">
+            <div id="fpStatusIcon" style="font-size: 2.5rem; color: #cbd5e1; margin-bottom: 10px;">
+                <i class="fa-solid fa-fingerprint"></i>
+            </div>
+            <div id="fpStatusText" style="font-size: 0.9rem; color: #64748b; min-height: 20px;">
+                Select an employee, then press "Scan Finger" and have them place a finger on the HUPx reader connected to this PC.
+            </div>
+        </div>
+
+        <div style="display: flex; gap: 10px; justify-content: center; margin-bottom: 10px;">
+            <button type="button" id="fpScanBtn" style="background: #0f766e; color: white; border: none; padding: 10px 20px; border-radius: 6px; cursor: pointer;">
+                <i class="fa-solid fa-arrows-rotate"></i> Scan Finger
+            </button>
+            <button type="button" id="fpSaveBtn" disabled style="background: #94a3b8; color: white; border: none; padding: 10px 20px; border-radius: 6px; cursor: not-allowed;">
+                <i class="fa-solid fa-floppy-disk"></i> Save Enrollment
+            </button>
+        </div>
+
+        <div style="font-size: 0.75rem; color: #94a3b8; border-top: 1px solid #e2e8f0; padding-top: 12px; margin-top: 10px;">
+            <i class="fa-solid fa-circle-info"></i> Requires the SecuGen WebAPI Client to be installed and running on THIS computer, with the HUPx reader plugged in.
+        </div>
     </div>
 </div>
 

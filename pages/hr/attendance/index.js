@@ -46,6 +46,17 @@
     const absentDate = document.getElementById('absentDate');
     const saveAbsentBtn = document.getElementById('saveAbsentBtn');
 
+    // ENROLL FINGERPRINT DOM REFERENCES (NEW)
+    const fingerprintModal = document.getElementById('fingerprintModal');
+    const closeFingerprintModalBtn = document.getElementById('closeFingerprintModalBtn');
+    const enrollFingerprintBtn = document.getElementById('enrollFingerprintBtn');
+    const fpEmployee = document.getElementById('fpEmployee');
+    const fpStatusIcon = document.getElementById('fpStatusIcon');
+    const fpStatusText = document.getElementById('fpStatusText');
+    const fpScanBtn = document.getElementById('fpScanBtn');
+    const fpSaveBtn = document.getElementById('fpSaveBtn');
+    let fpCapturedTemplate = null;
+
     // ============================================
     // LOAD QUICK CLOCK DROPDOWN
     // ============================================
@@ -635,6 +646,121 @@
             alert('❌ Error saving status: ' + error.message);
             saveAbsentBtn.disabled = false;
             saveAbsentBtn.innerHTML = `<i class="fa-solid fa-floppy-disk"></i> Save Status`;
+        }
+    });
+
+    // ============================================
+    // ENROLL FINGERPRINT (NEW)
+    // ============================================
+    async function loadFingerprintEmployeeDropdown() {
+        try {
+            const { data, error } = await supabaseClient
+                .from('employees')
+                .select('employee_id, first_name, last_name')
+                .eq('status', 'Active')
+                .order('first_name');
+
+            if (error) throw error;
+
+            fpEmployee.innerHTML = `<option value="">Select Employee</option>`;
+            data.forEach(emp => {
+                fpEmployee.innerHTML += `<option value="${emp.employee_id}">${emp.first_name} ${emp.last_name}</option>`;
+            });
+        } catch (error) {
+            console.error("Error loading employees:", error);
+        }
+    }
+
+    function resetFingerprintModalStatus() {
+        fpCapturedTemplate = null;
+        fpStatusIcon.innerHTML = `<i class="fa-solid fa-fingerprint"></i>`;
+        fpStatusIcon.style.color = '#cbd5e1';
+        fpStatusText.textContent = 'Select an employee, then press "Scan Finger" and have them place a finger on the HUPx reader connected to this PC.';
+        fpSaveBtn.disabled = true;
+        fpSaveBtn.style.background = '#94a3b8';
+        fpSaveBtn.style.cursor = 'not-allowed';
+    }
+
+    function openFingerprintModal() {
+        fingerprintModal.style.display = 'flex';
+        resetFingerprintModalStatus();
+        loadFingerprintEmployeeDropdown();
+    }
+
+    function closeFingerprintModal() {
+        fingerprintModal.style.display = 'none';
+    }
+
+    enrollFingerprintBtn.addEventListener('click', openFingerprintModal);
+    closeFingerprintModalBtn.addEventListener('click', closeFingerprintModal);
+    fingerprintModal.addEventListener('click', (e) => {
+        if (e.target === fingerprintModal) closeFingerprintModal();
+    });
+
+    fpScanBtn.addEventListener('click', async () => {
+        if (!fpEmployee.value) {
+            alert("Please select an employee first.");
+            return;
+        }
+        if (typeof captureFingerprint !== 'function') {
+            alert("Fingerprint support isn't loaded on this page. Please refresh and try again.");
+            return;
+        }
+
+        fpScanBtn.disabled = true;
+        fpStatusIcon.innerHTML = `<i class="fa-solid fa-spinner fa-spin"></i>`;
+        fpStatusIcon.style.color = '#2563eb';
+        fpStatusText.textContent = 'Scanning... place a finger on the reader now.';
+
+        const result = await captureFingerprint();
+        fpScanBtn.disabled = false;
+
+        if (!result.ok) {
+            fpCapturedTemplate = null;
+            fpStatusIcon.innerHTML = `<i class="fa-solid fa-triangle-exclamation"></i>`;
+            fpStatusIcon.style.color = '#dc2626';
+            fpStatusText.textContent = result.errorMessage;
+            fpSaveBtn.disabled = true;
+            fpSaveBtn.style.background = '#94a3b8';
+            fpSaveBtn.style.cursor = 'not-allowed';
+            return;
+        }
+
+        fpCapturedTemplate = result.template;
+        fpStatusIcon.innerHTML = `<i class="fa-solid fa-circle-check"></i>`;
+        fpStatusIcon.style.color = '#22c55e';
+        fpStatusText.textContent = 'Scan captured. Press "Save Enrollment" to store it, or scan again to retake.';
+        fpSaveBtn.disabled = false;
+        fpSaveBtn.style.background = '#0f766e';
+        fpSaveBtn.style.cursor = 'pointer';
+    });
+
+    fpSaveBtn.addEventListener('click', async () => {
+        if (!fpEmployee.value || !fpCapturedTemplate) return;
+
+        fpSaveBtn.disabled = true;
+        fpSaveBtn.innerHTML = `<i class="fa-solid fa-spinner fa-spin"></i> Saving...`;
+
+        try {
+            const { error } = await supabaseClient
+                .from('employee_fingerprints')
+                .upsert([{
+                    employee_id: fpEmployee.value,
+                    template: fpCapturedTemplate,
+                    updated_at: new Date().toISOString(),
+                }], { onConflict: 'employee_id' });
+
+            if (error) throw error;
+
+            fpStatusText.textContent = 'Fingerprint enrolled successfully!';
+            alert('✅ Fingerprint enrolled successfully.');
+            closeFingerprintModal();
+        } catch (error) {
+            console.error("Error saving fingerprint enrollment:", error);
+            alert('❌ Error saving enrollment: ' + error.message);
+        } finally {
+            fpSaveBtn.disabled = false;
+            fpSaveBtn.innerHTML = `<i class="fa-solid fa-floppy-disk"></i> Save Enrollment`;
         }
     });
 

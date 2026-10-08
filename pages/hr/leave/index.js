@@ -10,11 +10,17 @@
 // Entitlement: employee_employment.annual_leave_days, set once in
 //   Employee Management, NEVER mutated by approvals (fixed this
 //   session -- it used to be decremented directly, which destroyed the
-//   original entitlement with no way to recover it).
-// Leave Taken: sum of days_requested for APPROVED leave_requests this
-//   calendar year, where leave_type is 'Annual' OR 'Emergency' -- both
-//   draw from the same annual leave balance, per instruction. Sick and
-//   Unpaid do NOT count against this balance.
+//   original entitlement with no way to recover it). Per instruction,
+//   displayed/used entitlement is PRORATED by entitlementForYear() in
+//   shared-attendance-utils.js -- annual_leave_days is a full-year
+//   figure, but no month before September 2026 counts, so 2026 only
+//   gets the Sep-Dec (4-month) share of it (24 -> 8, 48 -> 16). A
+//   later year with no cutoff inside it gets the full annual figure.
+// Leave Taken: sum of days_requested for APPROVED leave_requests from
+//   LEAVE_TRACKING_START (not Jan 1 for 2026) through year end, where
+//   leave_type is 'Annual' OR 'Emergency' -- both draw from the same
+//   annual leave balance, per instruction. Sick and Unpaid do NOT
+//   count against this balance.
 // Remaining: entitlement - taken, always computed live, never stored.
 //
 // Year-end unused-leave payout is explicitly deferred to a future
@@ -30,8 +36,12 @@
     }
 
     const tbody = document.getElementById('leaveTableBody');
-    const yearStart = `${new Date().getFullYear()}-01-01`;
-    const yearEnd = `${new Date().getFullYear()}-12-31`;
+    const currentYear = new Date().getFullYear();
+    // 🔥 CHANGED: don't consider any month before September 2026 (see
+    // LEAVE_TRACKING_START in shared-attendance-utils.js) -- yearStart
+    // used to always be Jan 1.
+    const yearStart = effectiveYearStart(currentYear);
+    const yearEnd = `${currentYear}-12-31`;
 
     let leaveRecordsByEmployee = {}; // cached for the drill-down modal
 
@@ -80,15 +90,25 @@
 
             tbody.innerHTML = employees.map(emp => {
                 const job = emp.employment?.[0] || {};
-                const entitlement = job.annual_leave_days || 0;
+                // 🔥 CHANGED: annual_leave_days is set as a FULL YEAR
+                // figure (e.g. 24, or 48 for Shawa) -- prorated down to
+                // just the Sep-Dec 2026 portion we're actually counting
+                // (4 months), via entitlementForYear() in
+                // shared-attendance-utils.js: 24 -> 8, 48 -> 16.
+                const entitlement = entitlementForYear(job.annual_leave_days, currentYear);
                 const records = leaveRecordsByEmployee[emp.employee_id] || [];
                 const taken = records.reduce((sum, l) => sum + (l.days_requested || 0), 0);
                 const remaining = entitlement - taken;
+                // entitlementForYear can be fractional for an
+                // annual_leave_days value that doesn't divide evenly by
+                // 12 -- display to 1 decimal only when it isn't a whole
+                // number, instead of always showing ".0".
+                const fmt = n => Number.isInteger(n) ? n : n.toFixed(1);
 
                 return `
                 <tr>
                     <td style="padding-left: 20px; font-weight: 500;">${emp.first_name} ${emp.last_name}</td>
-                    <td style="text-align: right;">${entitlement} days</td>
+                    <td style="text-align: right;">${fmt(entitlement)} days</td>
                     <td style="text-align: right;">
                         <span class="leave-taken-link" data-id="${emp.employee_id}" data-name="${emp.first_name} ${emp.last_name}"
                               style="color: #2563eb; cursor: pointer; text-decoration: underline;">
@@ -96,7 +116,7 @@
                         </span>
                     </td>
                     <td style="padding-right: 20px; text-align: right; font-weight: bold; color: ${remaining < 0 ? '#dc2626' : '#15803d'};">
-                        ${remaining} days
+                        ${fmt(remaining)} days
                     </td>
                 </tr>
                 `;
