@@ -2443,6 +2443,96 @@
     }
 
     // ============================================
+    // 🔥 ADDED: STOCK TRANSFER NOTE (Griffins Medicals Limited ->
+    // Griffins Pharmaceuticals)
+    // ============================================
+    // When a wholesale invoice is raised to Griffins Pharmaceuticals, the
+    // goods are really a transfer between the two companies. The invoice,
+    // inventory deduction and accounting all stay exactly as they are --
+    // this is ONLY an extra printed page that rides along with the invoice
+    // and delivery note, so the stock leaving can be matched on paper:
+    // Product / Batch / Expiry / Qty. No prices, no database writes of any
+    // kind. Not printed for a Quotation (nothing has moved yet), and only
+    // printed when the customer on the invoice is Griffins Pharmaceuticals.
+    const TRANSFER_FROM_COMPANY = 'Griffins Medicals Limited';
+    const TRANSFER_TO_COMPANY = 'Griffins Pharmaceuticals';
+
+    function isGriffinsPharmaceuticalsSale(saleData) {
+        const name = String((saleData && saleData.customer && saleData.customer.customer_name) || '');
+        return /griffin/i.test(name) && /pharma/i.test(name);
+    }
+
+    function buildStockTransferNoteHTML(saleData) {
+        return `
+            <style>
+                /* tighter rows so a long transfer (20+ lines) still fits one page with the signature lines */
+                .transfer-note td, .transfer-note th { padding: 5px 10px; }
+                .transfer-note .signature-block { page-break-inside: avoid; }
+            </style>
+            <div class="copy-page transfer-note">
+                <div class="doc-header">
+                    <div class="company-block">
+                        <h1>${TRANSFER_FROM_COMPANY}</h1>
+                        <p>${companySettings.address}</p>
+                        <p>Phone: ${companySettings.phone}</p>
+                    </div>
+                </div>
+
+                <div class="doc-title-row">
+                    <div class="doc-title">STOCK TRANSFER NOTE</div>
+                </div>
+
+                <p style="font-size: 1rem; margin: 0 0 16px;">
+                    Transfer from <strong>${TRANSFER_FROM_COMPANY}</strong> to <strong>${TRANSFER_TO_COMPANY}</strong>
+                </p>
+
+                <div class="info-row">
+                    <div class="info-box">
+                        <div><strong>Transfer Ref. #:</strong> ${saleData.sale_id}</div>
+                        <div><strong>Date:</strong> ${saleData.date}</div>
+                    </div>
+                    <div class="bill-to">
+                        <strong>FROM:</strong> ${TRANSFER_FROM_COMPANY}<br>
+                        <strong>TO:</strong> ${TRANSFER_TO_COMPANY}
+                    </div>
+                </div>
+
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Product Name</th>
+                            <th>Batch Number</th>
+                            <th>Expiry</th>
+                            <th class="text-center">Qty</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        ${saleData.items.map(item => `
+                            <tr>
+                                <td>${item.product_name}</td>
+                                <td>${cleanBatchDisplay(item.batch_number)}</td>
+                                <td>${item.expiry || '-'}</td>
+                                <td class="text-center">${item.qty} ${item.pack_size || ''}</td>
+                            </tr>
+                        `).join('')}
+                    </tbody>
+                </table>
+
+                <div class="payment-info signature-block" style="margin-top: 24px; padding-top: 8px;">
+                    <div style="display: flex; justify-content: space-between; gap: 30px; font-size: 0.85rem; margin-top: 28px;">
+                        <div style="flex: 1; border-top: 1px solid #1e293b; padding-top: 6px;">
+                            Issued By (${TRANSFER_FROM_COMPANY}) &nbsp;&nbsp; Name / Signature / Date
+                        </div>
+                        <div style="flex: 1; border-top: 1px solid #1e293b; padding-top: 6px;">
+                            Received By (${TRANSFER_TO_COMPANY}) &nbsp;&nbsp; Name / Signature / Date
+                        </div>
+                    </div>
+                </div>
+            </div>
+        `;
+    }
+
+    // ============================================
     // 🔥 ADDED: backfill Generic Name / Expiry for older sales
     // ============================================
     // Sales saved before the Delivery Note feature don't have
@@ -2579,6 +2669,7 @@
             ${!isQuotation ? buildWholesaleDeliveryNoteHTML(saleData, 'CUSTOMER') : ''}
             ${buildWholesaleCopyHTML(saleData, 'MERCHANT')}
             ${!isQuotation ? buildWholesaleDeliveryNoteHTML(saleData, 'MERCHANT') : ''}
+            ${!isQuotation && isGriffinsPharmaceuticalsSale(saleData) ? buildStockTransferNoteHTML(saleData) : ''}
         </body>
         </html>`;
 

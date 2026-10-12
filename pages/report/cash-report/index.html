@@ -1,7 +1,7 @@
 <div class="module-view-container">
     <h3 style="margin: 0 0 4px 0;"><i class="fa-solid fa-money-bill-trend-up"></i> Cash Report</h3>
     <p style="color:#64748b; font-size:0.85rem; margin-top:0; margin-bottom:20px;">
-        Where cash came from and where it went -- Cash in Hand, Bank (ZMW) and Bank (USD), sourced straight from the general ledger.
+        Where cash came from and where it went -- Cash in Hand (ZMW) only, sourced straight from the general ledger. Bank movements are not included here.
     </p>
 
     <!-- Filter Bar -->
@@ -17,8 +17,8 @@
         <button class="btn btn-primary btn-sm" id="cashrepApplyBtn" onclick="window.cashReportApply()">
             <i class="fa-solid fa-filter"></i> Apply
         </button>
-        <button class="btn btn-sm cashrep-export-btn" onclick="window.cashReportExportCsv()">
-            <i class="fa-solid fa-file-csv"></i> Export CSV
+        <button class="btn btn-sm cashrep-export-btn" onclick="window.cashReportExportExcel()">
+            <i class="fa-solid fa-file-excel"></i> Export Excel
         </button>
         <span id="cashrepRangeLabel" class="cashrep-range-label"></span>
     </div>
@@ -32,7 +32,7 @@
             <div class="cashrep-chart-header">
                 <div>
                     <strong>Cash In By Source</strong>
-                    <span class="cashrep-chart-subtitle">ZMW (Cash in Hand + Bank) &middot; selected range</span>
+                    <span class="cashrep-chart-subtitle">Cash in Hand (ZMW) &middot; selected range</span>
                 </div>
                 <button class="cashrep-table-toggle" id="cashrepInTableToggle" onclick="window.toggleCashReportTable('in')">
                     <i class="fa-solid fa-table"></i> View as table
@@ -48,7 +48,7 @@
             <div class="cashrep-chart-header">
                 <div>
                     <strong>Cash Out By Use</strong>
-                    <span class="cashrep-chart-subtitle">ZMW (Cash in Hand + Bank) &middot; selected range</span>
+                    <span class="cashrep-chart-subtitle">Cash in Hand (ZMW) &middot; selected range</span>
                 </div>
                 <button class="cashrep-table-toggle" id="cashrepOutTableToggle" onclick="window.toggleCashReportTable('out')">
                     <i class="fa-solid fa-table"></i> View as table
@@ -65,7 +65,7 @@
         <div class="cashrep-chart-header">
             <div>
                 <strong>Daily Net Cash Flow</strong>
-                <span class="cashrep-chart-subtitle">ZMW (Cash in Hand + Bank) &middot; selected range</span>
+                <span class="cashrep-chart-subtitle">Cash in Hand (ZMW) &middot; selected range</span>
             </div>
             <button class="cashrep-table-toggle" id="cashrepTrendTableToggle" onclick="window.toggleCashReportTable('trend')">
                 <i class="fa-solid fa-table"></i> View as table
@@ -88,8 +88,6 @@
                 <select id="cashrepAccountFilter" onchange="window.cashReportRenderLedger()">
                     <option value="ALL">All accounts</option>
                     <option value="1111">Cash in Hand (ZMW)</option>
-                    <option value="1121">Bank (ZMW)</option>
-                    <option value="1120">Bank (USD)</option>
                 </select>
             </div>
         </div>

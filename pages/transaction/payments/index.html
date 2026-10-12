@@ -9,6 +9,9 @@
             <button class="btn btn-primary" onclick="openRecordPayment()">
                 <i class="fa-solid fa-plus"></i> Record Payment
             </button>
+            <button class="btn btn-outline" id="exportDueBtn" onclick="exportDueInvoicesExcel()" title="Download all unpaid invoices as an Excel list to send for payment">
+                <i class="fa-solid fa-file-excel"></i> Export Due List
+            </button>
             <button class="btn btn-outline" onclick="refreshPaymentList()">
                 <i class="fa-solid fa-rotate"></i> Refresh
             </button>
@@ -208,6 +211,9 @@
             <div class="modal-footer">
                 <button class="btn btn-primary" onclick="printStatement()">
                     <i class="fa-solid fa-print"></i> Print Statement
+                </button>
+                <button class="btn btn-primary" id="statementPdfBtn" onclick="downloadStatementPDF()">
+                    <i class="fa-solid fa-file-pdf"></i> Download PDF
                 </button>
                 <button class="btn btn-outline" onclick="closeModal('statementModal')">Close</button>
             </div>

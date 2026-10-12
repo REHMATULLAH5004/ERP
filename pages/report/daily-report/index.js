@@ -54,6 +54,14 @@
     // through in batches of 1000 until exhausted, so nothing is ever
     // silently dropped no matter how large these tables get.
     // ============================================
+    // 🔥 FIX: every query passed in here MUST carry a unique .order() (we use
+    // 'id'). Paging with .range() and NO ORDER BY lets Postgres return rows in
+    // a different order for each page (the plan changes with OFFSET), so some
+    // rows were fetched twice and others never -- journal_entries is now
+    // ~8,000 rows and journal_lines for these accounts ~4,400. That made
+    // Opening/Closing for Stock, Cash in Hand and Bank (ZMW) wrong (e.g. Cash
+    // opening K61,298.22 when the ledger said K37,411.00) while the small
+    // Bank (USD) account happened to come out right.
     async function fetchAllRows(query) {
         const PAGE_SIZE = 1000;
         let allRows = [];
@@ -75,7 +83,7 @@
         const ACCOUNTS = ['1400', '1111', '1121', '1120'];
 
         const entries = await fetchAllRows(
-            supabaseClient.from('journal_entries').select('id, entry_date').lte('entry_date', reportDate)
+            supabaseClient.from('journal_entries').select('id, entry_date').lte('entry_date', reportDate).order('id', { ascending: true })
         );
 
         const allEntryIds = new Set((entries || []).map(e => e.id));
@@ -85,6 +93,7 @@
             supabaseClient.from('journal_lines')
                 .select('journal_entry_id, account_code, debit, credit, description')
                 .in('account_code', ACCOUNTS)
+                .order('id', { ascending: true })
         );
 
         const results = {};
@@ -504,6 +513,147 @@
     }
 
     // ============================================
+    // 🔥 ADDED: ITEMISE "OTHER" -- replaces the vague "Other / Uncategorized"
+    // ============================================
+    // "Other / Uncategorized" is just the leftover: (what the general ledger
+    // says moved through the account) minus (everything the named lines above
+    // it add up to). A single vague number there makes the whole report look
+    // doubtful when it goes out on WhatsApp, so it is now broken into named
+    // lines straight from the ledger, using each posting's counterparty
+    // account (e.g. Cash Over/Short, PAYE Payable, a reversed expense):
+    //   1. ledger postings that no named line covers at all (Z-report
+    //      over/short, PAYE/NAPSA/NHIMA payments, opening balances, expense
+    //      reversals...) are listed under their own name, and
+    //   2. where a named line (Expenses, Receivable Collections...) differs
+    //      from what the ledger holds for the same thing, the difference is
+    //      listed under that line's name (e.g. "Expenses later reversed").
+    // Together those add up to the old leftover exactly, so every total on
+    // the report is unchanged -- only the description is. Anything that still
+    // can't be matched shows as "Unreconciled difference", never as "Other".
+    async function computeOtherItems(todayEntryIds, cash, bankZmw, bankUsd, leftovers) {
+        const CASH_ACCTS = ['1111', '1121', '1120'];
+        const result = {};
+        CASH_ACCTS.forEach(c => { result[c] = { in: [], out: [] }; });
+
+        const entryIds = Array.from(todayEntryIds);
+        if (entryIds.length === 0) return result;
+
+        const CHUNK = 100; // keep the .in() URL short enough (see fetchStockLevels fix)
+        let lines = [], entries = [];
+        for (let i = 0; i < entryIds.length; i += CHUNK) {
+            const chunk = entryIds.slice(i, i + CHUNK);
+            const l = await fetchAllRows(supabaseClient.from('journal_lines')
+                .select('id, journal_entry_id, account_code, debit, credit, description')
+                .in('journal_entry_id', chunk).order('id', { ascending: true }));
+            const e = await fetchAllRows(supabaseClient.from('journal_entries')
+                .select('id, reference, description').in('id', chunk).order('id', { ascending: true }));
+            lines = lines.concat(l); entries = entries.concat(e);
+        }
+        const names = {};
+        (await fetchAllRows(supabaseClient.from('chart_of_accounts').select('code, name').order('code', { ascending: true })))
+            .forEach(a => { names[a.code] = a.name; });
+        const entryById = {};
+        entries.forEach(e => { entryById[e.id] = e; });
+
+        const byEntry = {};
+        lines.forEach(l => { (byEntry[l.journal_entry_id] = byEntry[l.journal_entry_id] || []).push(l); });
+
+        // GL amounts per account / direction / group
+        const gl = {};
+        const add = (acct, dir, key, label, amt) => {
+            const k = acct + '|' + dir;
+            gl[k] = gl[k] || {};
+            gl[k][key] = gl[k][key] || { label, amount: 0 };
+            gl[k][key].amount += amt;
+        };
+
+        Object.entries(byEntry).forEach(([entryId, entryLines]) => {
+            const je = entryById[entryId] || {};
+            const others = entryLines.filter(l => !CASH_ACCTS.includes(l.account_code));
+            // counterparty = the largest non-cash/bank line in the entry
+            let cp = null, cpAmt = -1;
+            others.forEach(o => {
+                const a = Math.max(parseFloat(o.debit) || 0, parseFloat(o.credit) || 0);
+                if (a > cpAmt) { cpAmt = a; cp = o; }
+            });
+            entryLines.filter(l => CASH_ACCTS.includes(l.account_code)).forEach(l => {
+                const debit = parseFloat(l.debit) || 0, credit = parseFloat(l.credit) || 0;
+                if (debit === 0 && credit === 0) return;
+                const dir = debit > 0 ? 'in' : 'out';
+                const amt = debit > 0 ? debit : credit;
+                const desc = l.description || '';
+                const code = cp ? String(cp.account_code) : null;
+                const cpName = code ? (names[code] || `Account ${code}`) : '';
+                const isReversal = /^reversal/i.test(desc) || /^reversal/i.test(je.description || '');
+
+                if (!cp || /^Transfer (In|Out):/.test(desc)) return add(l.account_code, dir, 'transfer', 'Transfers', amt);
+                if (isReversal) return add(l.account_code, dir, 'rev:' + code, `Reversal of ${cpName}`, amt);
+                if (code.startsWith('4')) return add(l.account_code, dir, 'sales', 'Sales', amt);
+                if (code === '1200') return add(l.account_code, dir, 'ar', 'Receivable Collections', amt);
+                if (code === '1300') return add(l.account_code, dir, 'adv', 'Advances', amt);
+                if (code === '2001') return add(l.account_code, dir, 'payable', 'Payables Paid', amt);
+                if (code === '1400') return add(l.account_code, dir, 'purchase', 'Purchases (Cash)', amt);
+                if (code === '6250') return add(l.account_code, dir, 'salary', 'Salaries Paid', amt);
+                if (code.startsWith('61') && code !== '6190') return add(l.account_code, dir, 'expense', 'Expenses', amt);
+                if (code === '6190') return add(l.account_code, dir, 'over:' + dir, dir === 'in' ? 'Cash Over (Z-Report count)' : 'Cash Short (Z-Report count)', amt);
+                if (code === '2150') return add(l.account_code, dir, 'stat:2150', 'PAYE Paid', amt);
+                if (code === '2160') return add(l.account_code, dir, 'stat:2160', 'NAPSA Paid', amt);
+                if (code === '2170') return add(l.account_code, dir, 'stat:2170', 'NHIMA Paid', amt);
+                if (code === '3000') return add(l.account_code, dir, 'open', 'Opening Balance Posted', amt);
+                return add(l.account_code, dir, 'acct:' + code, cpName, amt);
+            });
+        });
+
+        // What each named (covered) line on the report already accounts for
+        const covered = {
+            '1111|in':  { sales: cash.inward.retailCash + cash.inward.wholesaleCash, ar: cash.inward.receivableCash, adv: cash.inward.advanceSettled, transfer: cash.inward.withdrawnFromBankZmw + cash.inward.withdrawnFromBankUsd },
+            '1111|out': { expense: cash.outward.expense, purchase: cash.outward.purchase, payable: cash.outward.payable, salary: cash.outward.salary, adv: cash.outward.advanceGiven, transfer: cash.outward.depositedToBankZmw + cash.outward.depositedToBankUsd },
+            '1121|in':  { sales: bankZmw.inward.retailBank + bankZmw.inward.wholesaleBank, ar: bankZmw.inward.receivableBank, adv: bankZmw.inward.advanceSettled, transfer: bankZmw.inward.depositedFromCash + bankZmw.inward.transferFromUsd },
+            '1121|out': { expense: bankZmw.outward.expense, payable: bankZmw.outward.payable, salary: bankZmw.outward.salary, adv: bankZmw.outward.advanceGiven, transfer: bankZmw.outward.withdrawnToCash + bankZmw.outward.transferToUsd },
+            '1120|in':  { transfer: bankUsd.inward.depositedFromCash + bankUsd.inward.transferFromZmw },
+            '1120|out': { payable: bankUsd.outward.paidUsd, transfer: bankUsd.outward.withdrawnToCash + bankUsd.outward.transferToZmw }
+        };
+        const COVERED_KEYS = ['sales', 'ar', 'adv', 'payable', 'purchase', 'salary', 'expense', 'transfer'];
+        const diffLabel = (key, dir, diff) => {
+            if (key === 'expense') return dir === 'out' ? (diff > 0 ? 'Expenses later reversed' : 'Expenses not in ledger') : 'Expense adjustments';
+            if (key === 'sales') return 'Sales (other ledger postings)';
+            if (key === 'ar') return 'Receipts not in receipts list';
+            if (key === 'adv') return 'Advances (other postings)';
+            if (key === 'payable') return 'Payables paid (other postings)';
+            if (key === 'purchase') return 'Purchases (other postings)';
+            if (key === 'salary') return 'Salaries (other postings)';
+            return 'Transfers (other postings)';
+        };
+
+        CASH_ACCTS.forEach(acct => {
+            ['in', 'out'].forEach(dir => {
+                const k = acct + '|' + dir;
+                const groups = gl[k] || {};
+                const cov = covered[k] || {};
+                const items = [];
+                Object.entries(groups).forEach(([key, g]) => {
+                    if (COVERED_KEYS.includes(key)) {
+                        const diff = g.amount - (cov[key] || 0);
+                        if (Math.abs(diff) >= 0.01) items.push({ label: diffLabel(key, dir, diff), amount: diff });
+                    } else if (Math.abs(g.amount) >= 0.01) {
+                        items.push({ label: g.label, amount: g.amount });
+                    }
+                });
+                // a named line the ledger has NOTHING for (bucket > 0, ledger 0)
+                Object.entries(cov).forEach(([key, v]) => {
+                    if (!groups[key] && Math.abs(v) >= 0.01) items.push({ label: diffLabel(key, dir, -v), amount: -v });
+                });
+                const leftover = leftovers[k] || 0;
+                const residual = leftover - items.reduce((sum, i) => sum + i.amount, 0);
+                if (Math.abs(residual) >= 0.01) items.push({ label: 'Unreconciled difference', amount: residual });
+                items.sort((a, b) => Math.abs(b.amount) - Math.abs(a.amount));
+                result[acct][dir] = items;
+            });
+        });
+        return result;
+    }
+
+    // ============================================
     // MAIN
     // ============================================
     async function computeUnifiedReport(reportDate) {
@@ -552,6 +702,16 @@
             depositedFromCash: bankUsd.inward.depositedFromCash, transferFromZmw: bankUsd.inward.transferFromZmw
         });
 
+        // 🔥 Name the leftovers instead of calling them "Other / Uncategorized"
+        const otherItems = await computeOtherItems(todayEntryIds, cash, bankZmw, bankUsd, {
+            '1111|in': cash.inward.other, '1111|out': cash.outward.other,
+            '1121|in': bankZmw.inward.other, '1121|out': bankZmw.outward.other,
+            '1120|in': bankUsd.inward.other, '1120|out': bankUsd.outward.other
+        });
+        cash.inward.otherItems = otherItems['1111'].in;   cash.outward.otherItems = otherItems['1111'].out;
+        bankZmw.inward.otherItems = otherItems['1121'].in; bankZmw.outward.otherItems = otherItems['1121'].out;
+        bankUsd.inward.otherItems = otherItems['1120'].in; bankUsd.outward.otherItems = otherItems['1120'].out;
+
         return { gl, stockOutward, cash, bankZmw, bankUsd, todaySale, todayPurchase };
     }
 
@@ -565,6 +725,17 @@
     function breakdownRowRaw(label, value, symbol, color) {
         if (Math.abs(value) < 0.01) return '';
         return `<div style="display:flex; justify-content:space-between; padding:3px 0 3px 16px; font-size:0.82rem; color:${color || '#64748b'};"><span>${label}</span><span>${symbol}${formatNumber(value)}</span></div>`;
+    }
+
+    // 🔥 itemised replacement for the old single "Other / Uncategorized" row
+    function otherRows(items, color) {
+        return (items || []).map(i => breakdownRow(i.label, i.amount, color)).join('');
+    }
+    function otherRowsRaw(items, symbol, color) {
+        return (items || []).map(i => breakdownRowRaw(i.label, i.amount, symbol, color)).join('');
+    }
+    function otherPairs(items) {
+        return (items || []).map(i => [i.label, i.amount]);
     }
 
     function renderAccountCard(title, icon, color, opening, inwardTotal, outwardTotal, closing, inwardBreakdown, outwardBreakdown, symbol) {
@@ -659,7 +830,7 @@
                 breakdownRow('Advance Settled', cash.inward.advanceSettled, '#059669'),
                 breakdownRow('Withdrawn from Bank (ZMW)', cash.inward.withdrawnFromBankZmw, '#059669'),
                 breakdownRow('Withdrawn from Bank (USD)', cash.inward.withdrawnFromBankUsd, '#059669'),
-                breakdownRow('Other / Uncategorized', cash.inward.other, '#059669')
+                otherRows(cash.inward.otherItems, '#059669')
             ].join(''),
             [
                 breakdownRow('Expenses', cash.outward.expense),
@@ -669,7 +840,7 @@
                 breakdownRow('Advance Given', cash.outward.advanceGiven),
                 breakdownRow('Deposited to Bank (ZMW)', cash.outward.depositedToBankZmw),
                 breakdownRow('Deposited to Bank (USD)', cash.outward.depositedToBankUsd),
-                breakdownRow('Other / Uncategorized', cash.outward.other)
+                otherRows(cash.outward.otherItems)
             ].join('')
         );
 
@@ -683,7 +854,7 @@
                 breakdownRow('Advance Settled', bankZmw.inward.advanceSettled, '#059669'),
                 breakdownRow('Deposited from Cash', bankZmw.inward.depositedFromCash, '#059669'),
                 breakdownRow('Transfer from USD', bankZmw.inward.transferFromUsd, '#059669'),
-                breakdownRow('Other / Uncategorized', bankZmw.inward.other, '#059669')
+                otherRows(bankZmw.inward.otherItems, '#059669')
             ].join(''),
             [
                 breakdownRow('Expenses', bankZmw.outward.expense),
@@ -692,7 +863,7 @@
                 breakdownRow('Advance Given', bankZmw.outward.advanceGiven),
                 breakdownRow('Withdrawn to Cash', bankZmw.outward.withdrawnToCash),
                 breakdownRow('Transfer to USD', bankZmw.outward.transferToUsd),
-                breakdownRow('Other / Uncategorized', bankZmw.outward.other)
+                otherRows(bankZmw.outward.otherItems)
             ].join('')
         );
 
@@ -702,13 +873,13 @@
             [
                 breakdownRowRaw('Deposited from Cash', bankUsd.inward.depositedFromCash, '$', '#059669'),
                 breakdownRowRaw('Transfer from Bank (ZMW)', bankUsd.inward.transferFromZmw, '$', '#059669'),
-                breakdownRowRaw('Other / Uncategorized', bankUsd.inward.other, '$', '#059669')
+                otherRowsRaw(bankUsd.inward.otherItems, '$', '#059669')
             ].join(''),
             [
                 breakdownRowRaw('Paid to Suppliers (USD)', bankUsd.outward.paidUsd, '$'),
                 breakdownRowRaw('Withdrawn to Cash', bankUsd.outward.withdrawnToCash, '$'),
                 breakdownRowRaw('Transfer to Bank (ZMW)', bankUsd.outward.transferToZmw, '$'),
-                breakdownRowRaw('Other / Uncategorized', bankUsd.outward.other, '$')
+                otherRowsRaw(bankUsd.outward.otherItems, '$')
             ].join(''),
             '$'
         );
@@ -716,7 +887,9 @@
         const saleCard = renderSaleCard(todaySale);
         const purchaseCard = renderPurchaseCard(todayPurchase);
 
-        document.getElementById('unifiedReportContent').innerHTML = `
+        const contentEl = document.getElementById('unifiedReportContent');
+        if (!contentEl) return; // page was swapped out while rendering
+        contentEl.innerHTML = `
             <div style="display:grid; grid-template-columns:1fr 1fr; gap:20px;">
                 ${stockCard}
                 ${cashCard}
@@ -738,6 +911,12 @@
         try {
             const data = await computeUnifiedReport(reportDate);
             lastResults = { reportDate, data };
+            // 🔥 Navigation-race guard: the report takes a few seconds to build, and if
+            // you click another page meanwhile the Daily Report's container is gone
+            // by the time the numbers arrive -- render() then crashed with
+            // "Cannot set properties of null (setting 'innerHTML')". Nothing left
+            // to draw into, so just stop quietly.
+            if (!document.body.contains(container)) return;
             render(data);
         } catch (error) {
             console.error('Error generating unified report:', error);
@@ -794,14 +973,14 @@
                 ['Retail Cash Sales', cash.inward.retailCash], ['Wholesale Cash Sales', cash.inward.wholesaleCash],
                 ['Receivable Collections', cash.inward.receivableCash], ['Advance Settled', cash.inward.advanceSettled],
                 ['Withdrawn from Bank (ZMW)', cash.inward.withdrawnFromBankZmw], ['Withdrawn from Bank (USD)', cash.inward.withdrawnFromBankUsd],
-                ['Other / Uncategorized', cash.inward.other]
+                ...otherPairs(cash.inward.otherItems)
             ]),
             printBreakdownLines([
                 ['Expenses', cash.outward.expense], ['Purchases (Cash)', cash.outward.purchase],
                 ['Payables Paid', cash.outward.payable], ['Salaries Paid', cash.outward.salary],
                 ['Advance Given', cash.outward.advanceGiven],
                 ['Deposited to Bank (ZMW)', cash.outward.depositedToBankZmw], ['Deposited to Bank (USD)', cash.outward.depositedToBankUsd],
-                ['Other / Uncategorized', cash.outward.other]
+                ...otherPairs(cash.outward.otherItems)
             ])
         );
 
@@ -811,13 +990,13 @@
                 ['Retail Bank Sales', bankZmw.inward.retailBank], ['Wholesale Bank Sales', bankZmw.inward.wholesaleBank],
                 ['Receivable Collections', bankZmw.inward.receivableBank], ['Advance Settled', bankZmw.inward.advanceSettled],
                 ['Deposited from Cash', bankZmw.inward.depositedFromCash], ['Transfer from USD', bankZmw.inward.transferFromUsd],
-                ['Other / Uncategorized', bankZmw.inward.other]
+                ...otherPairs(bankZmw.inward.otherItems)
             ]),
             printBreakdownLines([
                 ['Expenses', bankZmw.outward.expense], ['Payables Paid', bankZmw.outward.payable],
                 ['Salaries Paid', bankZmw.outward.salary], ['Advance Given', bankZmw.outward.advanceGiven],
                 ['Withdrawn to Cash', bankZmw.outward.withdrawnToCash], ['Transfer to USD', bankZmw.outward.transferToUsd],
-                ['Other / Uncategorized', bankZmw.outward.other]
+                ...otherPairs(bankZmw.outward.otherItems)
             ])
         );
 
@@ -825,11 +1004,11 @@
             gl['1120'].opening, gl['1120'].inward, gl['1120'].outward, gl['1120'].closing,
             printBreakdownLines([
                 ['Deposited from Cash', bankUsd.inward.depositedFromCash], ['Transfer from Bank (ZMW)', bankUsd.inward.transferFromZmw],
-                ['Other / Uncategorized', bankUsd.inward.other]
+                ...otherPairs(bankUsd.inward.otherItems)
             ], '$'),
             printBreakdownLines([
                 ['Paid to Suppliers (USD)', bankUsd.outward.paidUsd], ['Withdrawn to Cash', bankUsd.outward.withdrawnToCash],
-                ['Transfer to Bank (ZMW)', bankUsd.outward.transferToZmw], ['Other / Uncategorized', bankUsd.outward.other]
+                ['Transfer to Bank (ZMW)', bankUsd.outward.transferToZmw], ...otherPairs(bankUsd.outward.otherItems)
             ], '$'),
             '$'
         );

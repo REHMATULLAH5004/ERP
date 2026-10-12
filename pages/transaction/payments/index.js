@@ -474,17 +474,19 @@
         // that's this screen's normal purpose -- but typing a search term
         // searches across ALL suppliers, so a fully-settled one can still
         // be found and their statement opened.
-        let filtered;
-        if (searchTerm) {
-            filtered = supplierData.filter(s => s.name.toLowerCase().includes(searchTerm));
-        } else {
-            filtered = supplierData.filter(s => s.hasDue);
-        }
+        // 🔥 CHANGED: every supplier stays in the list, even once their
+        // payable is zero (they show a "Paid in full" tag and a ZK0.00
+        // balance), so their statement is always one click away. Suppliers
+        // who still have something due are listed first.
+        let filtered = searchTerm
+            ? supplierData.filter(s => s.name.toLowerCase().includes(searchTerm))
+            : [...supplierData];
+        filtered.sort((a, b) => (b.hasDue ? 1 : 0) - (a.hasDue ? 1 : 0) || a.name.localeCompare(b.name));
 
         if (filtered.length === 0) {
             tbody.innerHTML = `<tr><td colspan="5" style="text-align: center; padding: 40px; color: #94a3b8;">
                 <i class="fa-regular fa-circle-check" style="font-size: 2rem; display: block; margin-bottom: 10px; color: #22c55e;"></i>
-                ${searchTerm ? 'No suppliers match your search.' : 'All suppliers are paid in full!'}
+                ${searchTerm ? 'No suppliers match your search.' : 'No suppliers found.'}
             </td></tr>`;
             if (countSpan) countSpan.textContent = '0 suppliers';
             if (countMain) countMain.textContent = '0 suppliers';
@@ -862,6 +864,196 @@
     // SUPPLIER STATEMENT
     // ============================================
 
+    // ============================================
+    // STATEMENT LEDGER BUILDER
+    // ============================================
+    // Local-time YYYY-MM-DD key for a date-only string ("2026-09-03") or a
+    // full timestamp, so rows sort by real calendar date and never by a
+    // locale-formatted string (which parses differently per browser locale).
+    function statementDateKey(value) {
+        if (!value) return '0000-00-00';
+        if (typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value)) return value;
+        const d = new Date(value);
+        if (isNaN(d.getTime())) return '0000-00-00';
+        return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+    }
+    function statementDateLabel(key) {
+        return new Date(key + 'T00:00:00').toLocaleDateString();
+    }
+
+    // Statement layout (agreed with the accountant):
+    //   Date | Invoice # | Type | Reference | Amount DUE | Amount PAID | Balance
+    // followed by three "for information" columns -- Paid so far | Paid on |
+    // Remaining -- that NEVER affect the balance.
+    //   Balance = previous balance + Amount DUE - Amount PAID
+    // One payment = ONE row (even when it settles several invoices); its
+    // Invoice # cell lists everything it covered, e.g. "Opening Balance/EM114589".
+    function buildStatementLedger(supplier, supplierPayables, currency) {
+        const opening = currency === 'USD' ? (supplier.opening_balance_usd || 0) : (supplier.opening_balance_zmw || 0);
+        const openingPayments = getOpeningBalancePayments(supplier.id, currency);
+        const payables = supplierPayables.filter(sp => (sp.currency || 'USD') === currency);
+
+        // Nothing at all in this currency
+        if (!(opening > 0) && openingPayments.length === 0 && payables.length === 0) return [];
+
+        const events = [];
+        let seq = 0;
+        const round2 = n => Math.round(n * 100) / 100;
+        const lineKey = pi => statementDateKey(pi.payment_date || pi.created_at);
+        const latestKey = lines => lines.reduce((m, pi) => (lineKey(pi) > m ? lineKey(pi) : m), '');
+
+        // Payment lines grouped by payment, so one payment = one statement row
+        const groups = new Map();
+        const addPaymentLine = (pi, label, labelKey) => {
+            const gid = pi.payment_id || ('line-' + (pi.id || ('n' + (seq++))));
+            let g = groups.get(gid);
+            if (!g) { g = { lines: [], labels: [] }; groups.set(gid, g); }
+            g.lines.push(pi);
+            g.labels.push({ label, labelKey });
+        };
+
+        openingPayments.forEach(pi => addPaymentLine(pi, 'Opening Balance', ''));
+
+        payables.forEach(sp => {
+            const amount = sp.total_amount || 0;
+            const invoiceNumber = sp.invoice_number || 'INV-' + sp.id.slice(0, 8);
+            const invoiceKey = statementDateKey(sp.invoice_date || sp.created_at);
+
+            // Human-readable GRN/PO number instead of the raw UUID
+            const relatedGrn = state.grns.find(g => g.id === sp.grn_id);
+            const relatedPo = state.purchaseOrders.find(p => p.id === sp.po_id);
+            const referenceDisplay = relatedGrn?.grn_number || relatedPo?.po_number || 'PO';
+
+            const paymentsAgainst = state.paymentInvoices.filter(pi => pi.supplier_id === supplier.id && pi.payable_id === sp.id);
+            const paidAmount = round2(paymentsAgainst.reduce((sum, pi) => sum + (pi.amount_paid || 0), 0));
+
+            events.push({
+                key: invoiceKey, order: 0, seq: seq++,
+                stamp: new Date(sp.created_at || 0).getTime() || 0,
+                row: {
+                    type: 'Purchase', reference: referenceDisplay, due: amount, amount: amount,
+                    isOpening: false, isPayment: false, invoiceNumber: invoiceNumber,
+                    invoiceDate: statementDateLabel(invoiceKey),
+                    paidSoFar: paidAmount, remaining: round2(amount - paidAmount),
+                    paidOn: paymentsAgainst.length ? statementDateLabel(latestKey(paymentsAgainst)) : '',
+                    payableId: sp.id
+                }
+            });
+
+            paymentsAgainst.forEach(pi => addPaymentLine(pi, invoiceNumber, invoiceKey));
+        });
+
+        groups.forEach(g => {
+            const lines = g.lines;
+            const total = round2(lines.reduce((sum, pi) => sum + (pi.amount_paid || 0), 0));
+            const first = lines[0];
+            const payRec = (state.payments || []).find(p => p.id === first.payment_id);
+            const reference = lines.map(pi => pi.payment_reference).find(Boolean)
+                || (payRec && (payRec.reference_number || payRec.payment_number)) || 'PAY';
+            const seen = new Set();
+            const label = g.labels
+                .sort((x, y) => x.labelKey.localeCompare(y.labelKey) || x.label.localeCompare(y.label))
+                .filter(l => !seen.has(l.label) && seen.add(l.label))
+                .map(l => l.label).join('/');
+            events.push({
+                key: lines.map(lineKey).sort()[0], order: 1, seq: seq++,
+                stamp: Math.min.apply(null, lines.map(pi => new Date(pi.created_at || 0).getTime() || 0)),
+                row: {
+                    type: 'Payment', reference: reference, due: 0, amount: -total, credit: total,
+                    isOpening: false, isPayment: true, method: first.payment_method,
+                    invoiceNumber: label || '-', paymentId: first.payment_id
+                }
+            });
+        });
+
+        // Same day: invoices first, then payments; otherwise by entry time.
+        events.sort((a, b) =>
+            a.key.localeCompare(b.key) || a.order - b.order || a.stamp - b.stamp || a.seq - b.seq
+        );
+
+        const rows = [];
+        let running = opening;
+        if (opening > 0 || openingPayments.length > 0) {
+            const paidOpening = round2(openingPayments.reduce((sum, pi) => sum + (pi.amount_paid || 0), 0));
+            rows.push({
+                date: 'Opening Balance', type: 'Opening Balance', reference: 'Opening',
+                due: opening, amount: opening, balance: running, isOpening: true, invoiceNumber: '-',
+                paidSoFar: paidOpening, remaining: round2(opening - paidOpening),
+                paidOn: openingPayments.length ? statementDateLabel(latestKey(openingPayments)) : ''
+            });
+        }
+        events.forEach(ev => {
+            running = round2(running + ev.row.amount); // invoices add, payments are already negative
+            rows.push(Object.assign({ date: statementDateLabel(ev.key), balance: running }, ev.row));
+        });
+        return rows;
+    }
+
+    // ---- shared HTML for the statement table (modal + print) ----
+    const STMT_INFO_STYLE = 'background:#f8fafc; color:#64748b; font-size:0.85em;';
+
+    function statementHeadHtml(currency) {
+        return `
+                    <tr>
+                        <th>Date</th>
+                        <th>Invoice #</th>
+                        <th>Type</th>
+                        <th>Reference</th>
+                        <th style="text-align: right;">Amount (${currency}) DUE</th>
+                        <th style="text-align: right;">Amount (${currency}) PAID</th>
+                        <th style="text-align: right;">Balance (${currency})</th>
+                        <th style="text-align: right; ${STMT_INFO_STYLE}">Paid so far (${currency})</th>
+                        <th style="text-align: right; ${STMT_INFO_STYLE}">PAID ON</th>
+                        <th style="text-align: right; ${STMT_INFO_STYLE}">Remaining (${currency})</th>
+                    </tr>`;
+    }
+
+    // The ten cell texts of one statement row. Used by the screen/print table
+    // AND the PDF download, so all three always show exactly the same figures.
+    function statementRowCells(t, symbol) {
+        const f = n => symbol + formatNumber(n);
+        const isPayment = !!t.isPayment;
+        return [
+            t.date,
+            t.invoiceNumber || '-',
+            t.type + (t.method ? ' (' + t.method + ')' : ''),
+            t.reference,
+            isPayment ? '-' : f(t.due !== undefined ? t.due : t.amount),   // Amount DUE
+            isPayment ? f(Math.abs(t.amount)) : '',                         // Amount PAID
+            f(t.balance),                                                   // Balance
+            isPayment ? '-' : f(t.paidSoFar || 0),                          // Paid so far (info)
+            isPayment ? '-' : (t.paidOn || ''),                             // PAID ON (info)
+            isPayment ? '-' : f(t.remaining || 0)                           // Remaining (info)
+        ];
+    }
+
+    function statementRowHtml(t, symbol) {
+        const isPayment = !!t.isPayment;
+        const c = statementRowCells(t, symbol);
+        return `
+                <tr class="${t.isOpening ? 'total-row' : ''}">
+                    <td>${c[0]}</td>
+                    <td><strong>${c[1]}</strong></td>
+                    <td>${c[2]}</td>
+                    <td>${c[3]}</td>
+                    <td class="text-right ${!isPayment && t.amount > 0 ? 'debit' : ''}">${c[4]}</td>
+                    <td class="text-right ${isPayment ? 'credit' : ''}">${c[5]}</td>
+                    <td class="text-right"><strong>${c[6]}</strong></td>
+                    <td class="text-right" style="${STMT_INFO_STYLE}">${c[7]}</td>
+                    <td class="text-right" style="${STMT_INFO_STYLE}">${c[8]}</td>
+                    <td class="text-right" style="${STMT_INFO_STYLE}">${c[9]}</td>
+                </tr>`;
+    }
+
+    function statementFootHtml(currency, symbol, closingBalance) {
+        return `
+                    <tr class="total-row">
+                        <td colspan="6" style="text-align: right;">Closing Balance (${currency}):</td>
+                        <td style="text-align: right; color: ${closingBalance > 0 ? '#dc2626' : '#15803d'};">${symbol}${formatNumber(closingBalance)}</td>
+                        <td colspan="3" style="${STMT_INFO_STYLE}"></td>
+                    </tr>`;
+    }
+
     async function openSupplierStatement(supplierId) {
         try {
             const supplier = state.suppliers.find(s => s.id === supplierId);
@@ -873,192 +1065,24 @@
             // Get payables for this supplier
             const supplierPayables = state.supplierPayables.filter(sp => sp.supplier_id === supplierId);
             
-            // Build transactions for USD and ZMW separately
-            const transactionsUsd = [];
-            const transactionsZmw = [];
-
-            // Running totals are declared BEFORE the opening balance
-            // blocks below, so those blocks can actually use them.
-            let runningUsd = supplier.opening_balance_usd || 0;
-            let runningZmw = supplier.opening_balance_zmw || 0;
-
-            // Opening balance - USD
-            if (supplier.opening_balance_usd > 0) {
-                transactionsUsd.push({
-                    date: 'Opening Balance',
-                    type: 'Opening Balance',
-                    reference: 'Opening',
-                    amount: supplier.opening_balance_usd || 0,
-                    balance: runningUsd,
-                    isOpening: true,
-                    invoiceNumber: '-'
-                });
-
-                // Payments made against the opening balance get their own
-                // "Payment" line (same treatment as regular payable
-                // payments below) and actually reduce runningUsd -- using
-                // the same shared helper calculateSupplierBalances() uses,
-                // so these two can never disagree again.
-                getOpeningBalancePayments(supplierId, 'USD').forEach(pi => {
-                    runningUsd -= (pi.amount_paid || 0);
-                    transactionsUsd.push({
-                        date: new Date(pi.payment_date || pi.created_at).toLocaleDateString(),
-                        type: 'Payment',
-                        reference: pi.payment_reference || 'PAY',
-                        amount: -(pi.amount_paid || 0),
-                        balance: runningUsd,
-                        isOpening: false,
-                        isPayment: true,
-                        method: pi.payment_method,
-                        invoiceNumber: 'Opening Balance',
-                        paymentId: pi.payment_id
-                    });
-                });
-            }
-
-            // Opening balance - ZMW
-            if (supplier.opening_balance_zmw > 0) {
-                transactionsZmw.push({
-                    date: 'Opening Balance',
-                    type: 'Opening Balance',
-                    reference: 'Opening',
-                    amount: supplier.opening_balance_zmw || 0,
-                    balance: runningZmw,
-                    isOpening: true,
-                    invoiceNumber: '-'
-                });
-
-                getOpeningBalancePayments(supplierId, 'ZMW').forEach(pi => {
-                    runningZmw -= (pi.amount_paid || 0);
-                    transactionsZmw.push({
-                        date: new Date(pi.payment_date || pi.created_at).toLocaleDateString(),
-                        type: 'Payment',
-                        reference: pi.payment_reference || 'PAY',
-                        amount: -(pi.amount_paid || 0),
-                        balance: runningZmw,
-                        isOpening: false,
-                        isPayment: true,
-                        method: pi.payment_method,
-                        invoiceNumber: 'Opening Balance',
-                        paymentId: pi.payment_id
-                    });
-                });
-            }
-
-            // Process each payable (GRN invoice) -- runningUsd/runningZmw
-            // already declared above (before the opening balance blocks),
-            // carrying forward any opening-balance payment reductions.
-
-            // Sort payables by date
-            const sortedPayables = [...supplierPayables].sort((a, b) => 
-                new Date(a.created_at) - new Date(b.created_at)
-            );
-
-            sortedPayables.forEach(sp => {
-                const currency = sp.currency || 'USD';
-                const amount = sp.total_amount || 0;
-                const invoiceNumber = sp.invoice_number || 'INV-' + sp.id.slice(0, 8);
-                const invoiceDate = sp.invoice_date || sp.created_at;
-
-                // 🔥 FIX: reference was showing the raw Supabase UUID
-                // (sp.po_id / sp.grn_id) -- now shows the actual human
-                // -readable GRN/PO number, looked up from the already
-                // -loaded state.grns / state.purchaseOrders.
-                const relatedGrn = state.grns.find(g => g.id === sp.grn_id);
-                const relatedPo = state.purchaseOrders.find(p => p.id === sp.po_id);
-                const referenceDisplay = relatedGrn?.grn_number || relatedPo?.po_number || 'PO';
-                
-                // Get payments against this payable
-                const paidAmount = state.paymentInvoices
-                    .filter(pi => pi.supplier_id === supplierId && pi.payable_id === sp.id)
-                    .reduce((sum, pi) => sum + (pi.amount_paid || 0), 0);
-                
-                const remaining = amount - paidAmount;
-
-                if (currency === 'USD') {
-                    runningUsd += amount;
-                    transactionsUsd.push({
-                        date: new Date(invoiceDate).toLocaleDateString(),
-                        type: 'Purchase',
-                        reference: referenceDisplay,
-                        amount: amount,
-                        balance: runningUsd,
-                        isOpening: false,
-                        isPayment: false,
-                        invoiceNumber: invoiceNumber,
-                        invoiceDate: new Date(invoiceDate).toLocaleDateString(),
-                        paid: paidAmount,
-                        remaining: remaining,
-                        payableId: sp.id
-                    });
-                    
-                    // If payments were made against this payable, add them
-                    const paymentsAgainst = state.paymentInvoices
-                        .filter(pi => pi.supplier_id === supplierId && pi.payable_id === sp.id);
-                    
-                    paymentsAgainst.forEach(pi => {
-                        runningUsd -= pi.amount_paid;
-                        transactionsUsd.push({
-                            date: new Date(pi.payment_date || pi.created_at).toLocaleDateString(),
-                            type: 'Payment',
-                            reference: pi.payment_reference || 'PAY',
-                            amount: -(pi.amount_paid || 0),
-                            balance: runningUsd,
-                            isOpening: false,
-                            isPayment: true,
-                            method: pi.payment_method,
-                            invoiceNumber: invoiceNumber,
-                            paymentId: pi.payment_id
-                        });
-                    });
-                    
-                } else if (currency === 'ZMW') {
-                    runningZmw += amount;
-                    transactionsZmw.push({
-                        date: new Date(invoiceDate).toLocaleDateString(),
-                        type: 'Purchase',
-                        reference: referenceDisplay,
-                        amount: amount,
-                        balance: runningZmw,
-                        isOpening: false,
-                        isPayment: false,
-                        invoiceNumber: invoiceNumber,
-                        invoiceDate: new Date(invoiceDate).toLocaleDateString(),
-                        paid: paidAmount,
-                        remaining: remaining,
-                        payableId: sp.id
-                    });
-                    
-                    const paymentsAgainst = state.paymentInvoices
-                        .filter(pi => pi.supplier_id === supplierId && pi.payable_id === sp.id);
-                    
-                    paymentsAgainst.forEach(pi => {
-                        runningZmw -= pi.amount_paid;
-                        transactionsZmw.push({
-                            date: new Date(pi.payment_date || pi.created_at).toLocaleDateString(),
-                            type: 'Payment',
-                            reference: pi.payment_reference || 'PAY',
-                            amount: -(pi.amount_paid || 0),
-                            balance: runningZmw,
-                            isOpening: false,
-                            isPayment: true,
-                            method: pi.payment_method,
-                            invoiceNumber: invoiceNumber,
-                            paymentId: pi.payment_id
-                        });
-                    });
-                }
-            });
-
-            // Sort transactions by date
-            const sortByDate = (a, b) => {
-                if (a.isOpening) return -1;
-                if (b.isOpening) return 1;
-                return new Date(a.date) - new Date(b.date);
-            };
-            
-            transactionsUsd.sort(sortByDate);
-            transactionsZmw.sort(sortByDate);
+            // 🔥 FIX: the statement used to compute each row's running
+            // balance WHILE building the list (an invoice, then straight
+            // away that invoice's payments), and only afterwards re-sort
+            // the rows by date -- so a payment made on 10/10 against an
+            // invoice from March was pushed to the bottom of the list but
+            // kept the balance it had when it was built right after that
+            // March invoice. Every "Balance" figure after the first few
+            // rows was therefore out of step with the row it was printed
+            // on. Now every event (invoice, payment) is collected first,
+            // sorted into true date order, and ONLY THEN is the running
+            // balance worked out -- one pass, top to bottom, so each row's
+            // balance is exactly the previous row's balance +/- its own
+            // amount. Invoices that are already fully paid (remaining 0)
+            // stay in the list like any other row.
+            const transactionsUsd = buildStatementLedger(supplier, supplierPayables, 'USD');
+            const transactionsZmw = buildStatementLedger(supplier, supplierPayables, 'ZMW');
+            const runningUsd = transactionsUsd.length ? transactionsUsd[transactionsUsd.length - 1].balance : (supplier.opening_balance_usd || 0);
+            const runningZmw = transactionsZmw.length ? transactionsZmw[transactionsZmw.length - 1].balance : (supplier.opening_balance_zmw || 0);
 
             state.currentStatementData = {
                 supplier,
@@ -1068,6 +1092,7 @@
                 closingZmw: runningZmw
             };
 
+            state.currentCurrencyTab = 'USD'; // the modal always opens on the USD tab
             renderStatement(state.currentStatementData);
             document.getElementById('statementModal').classList.add('show');
         } catch (error) {
@@ -1129,65 +1154,26 @@
 
     function renderStatementTable(transactions, currency, closingBalance) {
         const symbol = currency === 'USD' ? '$' : 'ZK';
-        
+
         if (transactions.length === 0) {
             return `<p style="text-align: center; padding: 30px; color: #94a3b8;">No ${currency} transactions found.</p>`;
         }
 
-        let html = `
+        return `
+            <div style="overflow-x: auto;">
             <table class="statement-table">
-                <thead>
-                    <tr>
-                        <th>Date</th>
-                        <th>Invoice #</th>
-                        <th>Type</th>
-                        <th>Reference</th>
-                        <th style="text-align: right;">Amount (${currency})</th>
-                        <th style="text-align: right;">Balance (${currency})</th>
-                    </tr>
+                <thead>${statementHeadHtml(currency)}
                 </thead>
-                <tbody>
-        `;
-
-        transactions.forEach((t) => {
-            const isOpening = t.isOpening;
-            const isPayment = t.isPayment;
-            const rowClass = isOpening ? 'total-row' : '';
-            const amountClass = isPayment ? 'credit' : (t.amount > 0 ? 'debit' : '');
-            const amountDisplay = isPayment ? `(${symbol}${formatNumber(Math.abs(t.amount))})` : `${symbol}${formatNumber(t.amount)}`;
-            
-            const invoiceDisplay = t.invoiceNumber || '-';
-            
-            // Show paid/remaining info for purchases
-            let extraInfo = '';
-            if (!isOpening && !isPayment && t.paid !== undefined && t.remaining !== undefined) {
-                extraInfo = ` <span style="font-size: 0.7rem; color: #64748b;">(Paid: ${symbol}${formatNumber(t.paid)}, Remaining: ${symbol}${formatNumber(t.remaining)})</span>`;
-            }
-            
-            html += `
-                <tr class="${rowClass}">
-                    <td>${t.date}</td>
-                    <td><strong>${invoiceDisplay}</strong></td>
-                    <td>${t.type}${t.method ? ' (' + t.method + ')' : ''}</td>
-                    <td>${t.reference}</td>
-                    <td class="text-right ${amountClass}">${amountDisplay}</td>
-                    <td class="text-right">${symbol}${formatNumber(t.balance)}${extraInfo}</td>
-                </tr>
-            `;
-        });
-
-        html += `
+                <tbody>${transactions.map(t => statementRowHtml(t, symbol)).join('')}
                 </tbody>
-                <tfoot>
-                    <tr class="total-row">
-                        <td colspan="5" style="text-align: right;">Closing Balance (${currency}):</td>
-                        <td style="text-align: right; color: ${closingBalance > 0 ? '#dc2626' : '#15803d'};">${symbol}${formatNumber(closingBalance)}</td>
-                    </tr>
+                <tfoot>${statementFootHtml(currency, symbol, closingBalance)}
                 </tfoot>
             </table>
+            </div>
+            <p style="font-size: 0.72rem; color: #94a3b8; margin: 6px 2px 0;">
+                Balance = previous balance + Amount DUE &minus; Amount PAID. The grey columns (Paid so far, PAID ON, Remaining) are for information only and do not change the balance.
+            </p>
         `;
-
-        return html;
     }
 
     function switchStatementTab(currency) {
@@ -1245,49 +1231,14 @@
             </div>
 
             <table class="statement-table">
-                <thead>
-                    <tr>
-                        <th>Date</th>
-                        <th>Invoice #</th>
-                        <th>Type</th>
-                        <th>Reference</th>
-                        <th style="text-align: right;">Amount (${currency})</th>
-                        <th style="text-align: right;">Balance (${currency})</th>
-                    </tr>
+                <thead>${statementHeadHtml(currency)}
                 </thead>
-                <tbody>
-                    ${transactions.map(t => {
-                        const isOpening = t.isOpening;
-                        const isPayment = t.isPayment;
-                        const rowClass = isOpening ? 'total-row' : '';
-                        const amountClass = isPayment ? 'credit' : (t.amount > 0 ? 'debit' : '');
-                        const amountDisplay = isPayment ? `(${symbol}${formatNumber(Math.abs(t.amount))})` : `${symbol}${formatNumber(t.amount)}`;
-                        const invoiceDisplay = t.invoiceNumber || '-';
-                        
-                        let extraInfo = '';
-                        if (!isOpening && !isPayment && t.paid !== undefined && t.remaining !== undefined) {
-                            extraInfo = ` <span style="font-size: 0.7rem; color: #64748b;">(Paid: ${symbol}${formatNumber(t.paid)}, Remaining: ${symbol}${formatNumber(t.remaining)})</span>`;
-                        }
-                        
-                        return `
-                            <tr class="${rowClass}">
-                                <td>${t.date}</td>
-                                <td><strong>${invoiceDisplay}</strong></td>
-                                <td>${t.type}${t.method ? ' (' + t.method + ')' : ''}</td>
-                                <td>${t.reference}</td>
-                                <td class="text-right ${amountClass}">${amountDisplay}</td>
-                                <td class="text-right">${symbol}${formatNumber(t.balance)}${extraInfo}</td>
-                            </tr>
-                        `;
-                    }).join('')}
+                <tbody>${transactions.map(t => statementRowHtml(t, symbol)).join('')}
                 </tbody>
-                <tfoot>
-                    <tr class="total-row">
-                        <td colspan="5" style="text-align: right;">Closing Balance (${currency}):</td>
-                        <td style="text-align: right; color: ${closingBalance > 0 ? '#dc2626' : '#15803d'};">${symbol}${formatNumber(closingBalance)}</td>
-                    </tr>
+                <tfoot>${statementFootHtml(currency, symbol, closingBalance)}
                 </tfoot>
             </table>
+            <p style="font-size: 0.75rem; color: #64748b;">The grey columns (Paid so far, PAID ON, Remaining) are for information only.</p>
         `;
         
         const printWindow = window.open('', '_blank', 'width=800,height=600');
@@ -1297,7 +1248,7 @@
             <head>
                 <title>Supplier Statement - ${data.supplier.name} (${currency})</title>
                 <style>
-                    body { font-family: Arial, sans-serif; padding: 20px; max-width: 1000px; margin: 0 auto; }
+                    body { font-family: Arial, sans-serif; padding: 20px; max-width: 1150px; margin: 0 auto; }
                     .statement-header { text-align: center; border-bottom: 2px solid #333; padding-bottom: 15px; margin-bottom: 20px; }
                     .statement-header h1 { margin: 0; color: #0f172a; font-size: 1.5rem; }
                     .statement-subtitle { margin: 4px 0 15px 0; color: #64748b; font-size: 0.95rem; text-transform: uppercase; letter-spacing: 0.05em; }
@@ -1309,6 +1260,7 @@
                     table { width: 100%; border-collapse: collapse; margin: 15px 0; font-size: 0.9rem; }
                     th { background: #f1f5f9; padding: 10px; text-align: left; border: 1px solid #e2e8f0; }
                     td { padding: 10px; border: 1px solid #e2e8f0; }
+                    .statement-table th, .statement-table td { padding: 6px 7px; font-size: 0.78rem; }
                     .text-right { text-align: right; }
                     .total-row { font-weight: bold; background: #f8fafc; }
                     .credit { color: #15803d; }
@@ -1333,6 +1285,326 @@
             printWindow.focus();
             printWindow.print();
         }, 500);
+    }
+
+    // ============================================
+    // STATEMENT PDF DOWNLOAD
+    // ============================================
+    // Same layout and same figures as the on-screen / printed statement
+    // (rows come from statementRowCells), saved as a real PDF file for the
+    // tab that is currently showing. jsPDF is loaded on demand, exactly like
+    // the Purchase Order PDF does.
+    async function ensureStatementPdfLibs() {
+        const load = src => new Promise((resolve, reject) => {
+            const s = document.createElement('script');
+            s.src = src;
+            s.onload = resolve;
+            s.onerror = () => reject(new Error('Could not load the PDF library -- check your internet connection.'));
+            document.head.appendChild(s);
+        });
+        if (!(window.jspdf && window.jspdf.jsPDF)) {
+            await load('https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.2/jspdf.umd.min.js');
+        }
+        const probe = new window.jspdf.jsPDF();
+        if (typeof probe.autoTable !== 'function') {
+            await load('https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js');
+        }
+    }
+
+    function buildStatementPdf(data, currency) {
+        const { jsPDF } = window.jspdf;
+        const symbol = currency === 'USD' ? '$' : 'ZK';
+        const transactions = currency === 'USD' ? data.transactionsUsd : data.transactionsZmw;
+        const closingBalance = currency === 'USD' ? data.closingUsd : data.closingZmw;
+        const openingBalance = (currency === 'USD' ? data.supplier.opening_balance_usd : data.supplier.opening_balance_zmw) || 0;
+        const doc = new jsPDF({ orientation: 'landscape', unit: 'mm', format: 'a4' });
+        const pageW = doc.internal.pageSize.getWidth();
+        const f = n => symbol + formatNumber(n);
+
+        doc.setTextColor(15, 23, 42);
+        doc.setFont(undefined, 'bold');
+        doc.setFontSize(16);
+        doc.text('Griffins Medicals Limited', pageW / 2, 14, { align: 'center' });
+        doc.setFont(undefined, 'normal');
+        doc.setFontSize(9);
+        doc.setTextColor(100, 116, 139);
+        doc.text('SUPPLIER STATEMENT', pageW / 2, 19.5, { align: 'center' });
+
+        doc.setTextColor(15, 23, 42);
+        doc.setFontSize(10);
+        let y = 28;
+        const info = [
+            ['Statement For:', String(data.supplier.name || '')],
+            ['Address / Phone:', [data.supplier.address, data.supplier.phone].filter(Boolean).join('  |  ') || '-'],
+            ['Email:', String(data.supplier.email || 'N/A')],
+            ['Opening Balance (' + currency + '):', f(openingBalance)],
+            ['Closing Balance (' + currency + '):', f(closingBalance)]
+        ];
+        info.forEach(([label, value]) => {
+            doc.setFont(undefined, 'bold');
+            doc.text(label, 14, y);
+            doc.setFont(undefined, 'normal');
+            doc.text(value, 64, y);
+            y += 5.5;
+        });
+
+        const head = [[
+            'Date', 'Invoice #', 'Type', 'Reference',
+            'Amount (' + currency + ') DUE', 'Amount (' + currency + ') PAID', 'Balance (' + currency + ')',
+            'Paid so far (' + currency + ')', 'PAID ON', 'Remaining (' + currency + ')'
+        ]];
+        const body = transactions.map(t => statementRowCells(t, symbol));
+        const infoFill = [248, 250, 252];
+        const infoText = [100, 116, 139];
+
+        doc.autoTable({
+            startY: y + 3,
+            head: head,
+            body: body,
+            foot: [[
+                { content: 'Closing Balance (' + currency + '):', colSpan: 6, styles: { halign: 'right' } },
+                { content: f(closingBalance), styles: { halign: 'right', textColor: closingBalance > 0 ? [220, 38, 38] : [21, 128, 61] } },
+                { content: '', colSpan: 3 }
+            ]],
+            showFoot: 'lastPage',
+            theme: 'grid',
+            margin: { left: 10, right: 10, bottom: 14 },
+            styles: { fontSize: 8, cellPadding: 1.8, lineColor: [226, 232, 240], lineWidth: 0.2, textColor: [15, 23, 42], overflow: 'linebreak' },
+            headStyles: { fillColor: [241, 245, 249], textColor: [15, 23, 42], fontStyle: 'bold', halign: 'left' },
+            footStyles: { fillColor: [248, 250, 252], textColor: [15, 23, 42], fontStyle: 'bold' },
+            columnStyles: {
+                0: { cellWidth: 24 }, 1: { cellWidth: 44 }, 2: { cellWidth: 34 }, 3: { cellWidth: 30 },
+                4: { halign: 'right' }, 5: { halign: 'right' }, 6: { halign: 'right', fontStyle: 'bold' },
+                7: { halign: 'right', fillColor: infoFill, textColor: infoText },
+                8: { halign: 'right', fillColor: infoFill, textColor: infoText },
+                9: { halign: 'right', fillColor: infoFill, textColor: infoText }
+            },
+            didParseCell: function (h) {
+                const col = h.column.index;
+                if (h.section === 'head') {
+                    if (col >= 4) h.cell.styles.halign = 'right';
+                    if (col >= 7) { h.cell.styles.fillColor = infoFill; h.cell.styles.textColor = infoText; }
+                }
+                if (h.section === 'body') {
+                    const t = transactions[h.row.index];
+                    if (t && t.isOpening) h.cell.styles.fontStyle = 'bold';
+                    if (t && col === 1) h.cell.styles.fontStyle = 'bold';
+                    if (t && t.isPayment && col === 5) h.cell.styles.textColor = [21, 128, 61];
+                    if (t && !t.isPayment && col === 4 && t.amount > 0) h.cell.styles.textColor = [220, 38, 38];
+                }
+                if (h.section === 'foot' && col >= 7) { h.cell.styles.fillColor = infoFill; }
+            },
+            didDrawPage: function () {
+                const pageH = doc.internal.pageSize.getHeight();
+                doc.setFontSize(7.5);
+                doc.setFont(undefined, 'normal');
+                doc.setTextColor(100, 116, 139);
+                doc.text('This is a computer-generated statement. Generated on: ' + new Date().toLocaleString(), 10, pageH - 7);
+                doc.text('Page ' + doc.internal.getNumberOfPages(), pageW - 10, pageH - 7, { align: 'right' });
+            }
+        });
+
+        const endY = (doc.lastAutoTable && doc.lastAutoTable.finalY) || y + 20;
+        doc.setFontSize(7.5);
+        doc.setTextColor(100, 116, 139);
+        doc.text('Balance = previous balance + Amount DUE - Amount PAID. The grey columns (Paid so far, PAID ON, Remaining) are for information only.', 10, endY + 5);
+        return doc;
+    }
+
+    async function downloadStatementPDF() {
+        const data = state.currentStatementData;
+        if (!data) return;
+        const currency = state.currentCurrencyTab;
+        const transactions = currency === 'USD' ? data.transactionsUsd : data.transactionsZmw;
+        if (!transactions || transactions.length === 0) {
+            showToast('No ' + currency + ' transactions to download.', 'error');
+            return;
+        }
+
+        const btn = document.getElementById('statementPdfBtn');
+        const original = btn ? btn.innerHTML : '';
+        if (btn) { btn.disabled = true; btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Preparing PDF...'; }
+        try {
+            await ensureStatementPdfLibs();
+            const doc = buildStatementPdf(data, currency);
+            const safeName = String(data.supplier.name || 'Supplier').replace(/[^A-Za-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+            doc.save('Supplier_Statement_' + safeName + '_' + currency + '_' + statementDateKey(new Date()) + '.pdf');
+        } catch (error) {
+            console.error('Statement PDF failed:', error);
+            showToast('Could not create the PDF: ' + error.message, 'error');
+        } finally {
+            if (btn) { btn.disabled = false; btn.innerHTML = original; }
+        }
+    }
+
+    // ============================================
+    // DUE INVOICES -> EXCEL (list sent to the boss for payment)
+    // ============================================
+    // One row per unpaid / part-paid supplier invoice, oldest first, in the
+    // same layout as the accountant's manual sheet:
+    //   DATE | INV NO. | SUPPLIER NAME | INV AMOUNT ZMW | INV AMOUNT USD |
+    //   STATUS | Payment Date | NOTE | MONTH
+    // "Payment Date" and "NOTE" are left empty for the boss to fill in.
+    // The amount shown is what is still unpaid on that invoice (same maths as
+    // the Due figures on this page). Opening balances (money owed from before
+    // the system, with no invoice number) are added at the bottom.
+    function buildDueInvoiceRows() {
+        const round2 = n => Math.round(n * 100) / 100;
+        const money = (cur, n) => (cur === 'USD' ? '$' : 'ZMW ') + formatNumber(n);
+        const rows = [];
+
+        state.suppliers.forEach(supplier => {
+            state.supplierPayables.filter(sp => sp.supplier_id === supplier.id).forEach(sp => {
+                const cur = sp.currency === 'ZMW' ? 'ZMW' : 'USD';
+                const total = sp.total_amount || 0;
+                const paid = round2(state.paymentInvoices
+                    .filter(pi => pi.supplier_id === supplier.id && pi.payable_id === sp.id)
+                    .reduce((sum, pi) => sum + (pi.amount_paid || 0), 0));
+                const remaining = round2(total - paid);
+                if (remaining <= 0.005) return; // fully paid -> not on the list
+                rows.push({
+                    dateKey: statementDateKey(sp.invoice_date || sp.created_at),
+                    invoice: sp.invoice_number || ('INV-' + String(sp.id).slice(0, 8)),
+                    supplier: supplier.name,
+                    zmw: cur === 'ZMW' ? remaining : 0,
+                    usd: cur === 'USD' ? remaining : 0,
+                    status: paid > 0.005 ? 'PART PAID' : 'DUE',
+                    note: paid > 0.005 ? ('Part paid: ' + money(cur, paid) + ' of ' + money(cur, total)) : '',
+                    isOpening: false
+                });
+            });
+
+            ['ZMW', 'USD'].forEach(cur => {
+                const opening = (cur === 'USD' ? supplier.opening_balance_usd : supplier.opening_balance_zmw) || 0;
+                const paidOpening = getOpeningBalancePayments(supplier.id, cur)
+                    .reduce((sum, pi) => sum + (pi.amount_paid || 0), 0);
+                const remaining = round2(opening - paidOpening);
+                if (remaining <= 0.005) return;
+                rows.push({
+                    dateKey: '',
+                    invoice: 'OPENING BALANCE',
+                    supplier: supplier.name,
+                    zmw: cur === 'ZMW' ? remaining : 0,
+                    usd: cur === 'USD' ? remaining : 0,
+                    status: paidOpening > 0.005 ? 'PART PAID' : 'DUE',
+                    note: 'Balance brought forward' + (paidOpening > 0.005 ? (' (part paid: ' + money(cur, paidOpening) + ' of ' + money(cur, opening) + ')') : ''),
+                    isOpening: true
+                });
+            });
+        });
+
+        rows.sort((a, b) =>
+            (a.isOpening - b.isOpening) ||
+            a.dateKey.localeCompare(b.dateKey) ||
+            a.supplier.localeCompare(b.supplier) ||
+            String(a.invoice).localeCompare(String(b.invoice))
+        );
+        return rows;
+    }
+
+    async function ensureExcelJsLoaded() {
+        if (window.ExcelJS) return;
+        await new Promise((resolve, reject) => {
+            const s = document.createElement('script');
+            s.src = 'https://cdnjs.cloudflare.com/ajax/libs/exceljs/4.4.0/exceljs.min.js';
+            s.onload = resolve;
+            s.onerror = () => reject(new Error('Could not load the Excel library -- check your internet connection.'));
+            document.head.appendChild(s);
+        });
+        if (!window.ExcelJS) throw new Error('Excel library failed to load');
+    }
+
+    async function buildDueInvoicesWorkbook(rows) {
+        const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+        const wb = new window.ExcelJS.Workbook();
+        const ws = wb.addWorksheet('Payment List', { views: [{ state: 'frozen', ySplit: 1 }] });
+        const ZMW_FMT = '"ZMW "#,##0.00;-"ZMW "#,##0.00;"ZMW -"';
+        const USD_FMT = '"$"#,##0.00;-"$"#,##0.00;"$-"';
+
+        ws.columns = [
+            { header: 'DATE', key: 'date', width: 12 },
+            { header: 'INV NO.', key: 'inv', width: 18 },
+            { header: 'SUPPLIER NAME', key: 'sup', width: 46 },
+            { header: 'INV AMOUNT ZMW', key: 'zmw', width: 18 },
+            { header: 'INV AMOUNT USD', key: 'usd', width: 18 },
+            { header: 'STATUS', key: 'status', width: 12 },
+            { header: 'Payment Date', key: 'paydate', width: 14 },
+            { header: 'NOTE', key: 'note', width: 56 },
+            { header: 'MONTH', key: 'month', width: 9 }
+        ];
+        const thin = { style: 'thin', color: { argb: 'FFBFBFBF' } };
+        const border = { top: thin, left: thin, bottom: thin, right: thin };
+
+        const head = ws.getRow(1);
+        head.font = { name: 'Arial', bold: true, size: 10 };
+        head.alignment = { vertical: 'middle', horizontal: 'center' };
+        head.eachCell(c => { c.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFD9E1F2' } }; c.border = border; });
+
+        rows.forEach(r => {
+            let dateVal = null, month = '';
+            if (r.dateKey && r.dateKey !== '0000-00-00') {
+                const [y, m, dd] = r.dateKey.split('-').map(Number);
+                dateVal = new Date(Date.UTC(y, m - 1, dd));
+                month = MONTHS[m - 1];
+            }
+            const row = ws.addRow({
+                date: dateVal, inv: r.invoice, sup: r.supplier,
+                zmw: r.zmw, usd: r.usd, status: r.status, paydate: null, note: r.note, month: month
+            });
+            row.font = { name: 'Arial', size: 10 };
+            row.getCell('date').numFmt = 'm/d/yyyy';
+            row.getCell('zmw').numFmt = ZMW_FMT;
+            row.getCell('usd').numFmt = USD_FMT;
+            row.getCell('paydate').numFmt = 'm/d/yyyy';
+            ['date', 'status', 'paydate', 'month'].forEach(k => { row.getCell(k).alignment = { horizontal: 'center' }; });
+            row.eachCell({ includeEmpty: true }, c => { c.border = border; });
+        });
+
+        const first = 2, last = rows.length + 1;
+        const t = ws.getRow(last + 2); // totals one blank row below the list
+        t.getCell('sup').value = 'TOTAL DUE';
+        t.getCell('zmw').value = { formula: 'SUM(D' + first + ':D' + last + ')', result: rows.reduce((s, r) => s + r.zmw, 0) };
+        t.getCell('usd').value = { formula: 'SUM(E' + first + ':E' + last + ')', result: rows.reduce((s, r) => s + r.usd, 0) };
+        t.getCell('zmw').numFmt = ZMW_FMT;
+        t.getCell('usd').numFmt = USD_FMT;
+        t.font = { name: 'Arial', bold: true, size: 10 };
+        t.getCell('sup').alignment = { horizontal: 'right' };
+        t.eachCell(c => { c.border = { top: { style: 'medium', color: { argb: 'FF000000' } } }; });
+
+        ws.autoFilter = { from: 'A1', to: 'I' + last };
+        ws.pageSetup = { orientation: 'landscape', fitToPage: true, fitToWidth: 1, fitToHeight: 0 };
+        return wb;
+    }
+
+    async function exportDueInvoicesExcel() {
+        const btn = document.getElementById('exportDueBtn');
+        const original = btn ? btn.innerHTML : '';
+        try {
+            const rows = buildDueInvoiceRows();
+            if (rows.length === 0) {
+                showToast('There are no unpaid invoices to export.', 'error');
+                return;
+            }
+            if (btn) { btn.disabled = true; btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Preparing...'; }
+            await ensureExcelJsLoaded();
+            const wb = await buildDueInvoicesWorkbook(rows);
+            const buffer = await wb.xlsx.writeBuffer();
+            const blob = new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = 'Supplier_Payment_List_' + statementDateKey(new Date()) + '.xlsx';
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+            setTimeout(() => URL.revokeObjectURL(url), 5000);
+            showToast('Payment list downloaded (' + rows.length + ' invoices).');
+        } catch (error) {
+            console.error('Due list export failed:', error);
+            showToast('Could not create the Excel file: ' + error.message, 'error');
+        } finally {
+            if (btn) { btn.disabled = false; btn.innerHTML = original; }
+        }
     }
 
     // ============================================
@@ -1876,6 +2148,8 @@
     window.openSupplierStatement = openSupplierStatement;
     window.switchStatementTab = switchStatementTab;
     window.printStatement = printStatement;
+    window.downloadStatementPDF = downloadStatementPDF;
+    window.exportDueInvoicesExcel = exportDueInvoicesExcel;
     window.closeModal = closeModal;
     window.refreshPaymentList = refreshPaymentList;
     window.showToast = showToast;

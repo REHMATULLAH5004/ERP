@@ -370,7 +370,7 @@
             let allProducts = [];
             
             if (products && products.length > 0) {
-                const genericIds = products.map(p => p.generic_name_id).filter(id => id);
+                const genericIds = [...new Set(products.map(p => p.generic_name_id).filter(id => id))];
                 let genericMap = {};
                 
                 if (genericIds.length > 0) {
@@ -559,16 +559,11 @@
         }
 
         try {
-            // 🔥 FIX: this query ran BEFORE generateReorderReport() and had
-            // no timeout of its own -- a stalled connection here meant
-            // generateReorderReport() (and its own timeouts, see below)
-            // never even got called, so the modal never got past its
-            // static "Loading reorder items..." placeholder at all.
-            const { data: categories, error } = await withTimeout(
-                supabaseClient.from('categories').select('id, name').order('name'),
-                20000, 'Loading categories'
-            );
-
+            const { data: categories, error } = await supabaseClient
+                .from('categories')
+                .select('id, name')
+                .order('name');
+                
             if (!error && categories) {
                 const catSelect = document.getElementById('reorderCategory');
                 if (catSelect) {
@@ -586,34 +581,11 @@
         }
     }
 
-    // 🔥 ADDED: wraps a Supabase query/promise so a stalled network
-    // request (fetch() has no built-in timeout, and a dropped/hung
-    // connection just never resolves or rejects) fails loudly after `ms`
-    // instead of leaving something waiting on it stuck forever. This was
-    // the actual cause of the Reorder Report sometimes sitting on
-    // "Loading reorder items..." indefinitely -- every lookup below was a
-    // bare, unguarded `await`, so one stalled request anywhere in that
-    // chain meant nothing after it ever ran: no error, no retry option,
-    // just a permanent spinner with nothing in the console to explain it.
-    function withTimeout(promiseLike, ms, label) {
-        return Promise.race([
-            Promise.resolve(promiseLike),
-            new Promise((_, reject) => setTimeout(
-                () => reject(new Error(`${label} timed out after ${Math.round(ms / 1000)}s -- check your connection and try again`)),
-                ms
-            ))
-        ]);
-    }
-
     async function generateReorderReport() {
-        const tbody = document.getElementById('reorderTableBody');
-        if (tbody) {
-            tbody.innerHTML = `<tr><td colspan="7" style="text-align: center; padding: 40px; color: #6b7280;">Loading reorder items...</td></tr>`;
-        }
         try {
             const supplierId = document.getElementById('reorderSupplier')?.value || '';
             const categoryId = document.getElementById('reorderCategory')?.value || '';
-
+            
             let query = supabaseClient
                 .from('products')
                 .select('id, product_name, conversion_rate, generic_name_id, supplier_id, category_id');
@@ -625,34 +597,27 @@
                 query = query.eq('category_id', categoryId);
             }
 
-            const { data: products, error } = await withTimeout(query, 20000, 'Loading products');
+            const { data: products, error } = await query;
             if (error) throw error;
 
-            const allIds = products.map(p => p.id);
+            const genericMap = await fetchGenericNames(products);
+            const supplierMap = await fetchSupplierNames(products);
+            const categoryMap = await fetchCategoryNames(products);
+            const stockMap = await fetchStockLevels(products);
 
-            // 🔥 FIX: these six lookups are all independent of one another
-            // (none needs another's result), but were being awaited one
-            // after another -- so the modal's total wait time was the SUM
-            // of every one of them, and any single slow/stalled request
-            // blocked everything after it from ever starting. Running them
-            // together cuts real-world wait time roughly 6x, and each one
-            // is now individually timeout-guarded via withTimeout() above,
-            // so a single bad connection can no longer hang the whole
-            // report -- it surfaces as a visible, retryable error instead.
-            const [genericMap, supplierMap, categoryMap, stockMap, lastPurchaseMap, salesMap] = await Promise.all([
-                withTimeout(fetchGenericNames(products), 20000, 'Loading generic names'),
-                withTimeout(fetchSupplierNames(products), 20000, 'Loading suppliers'),
-                withTimeout(fetchCategoryNames(products), 20000, 'Loading categories'),
-                withTimeout(fetchStockLevels(products), 20000, 'Loading stock levels'),
-                withTimeout(fetchLastPurchaseCosts(allIds), 20000, 'Loading last purchase costs'),
-                withTimeout(fetchLast3MonthSales(allIds), 20000, 'Loading 3-month sales')
-            ]);
+            // 🔥 ADDED: last purchase cost + 3-month sales for every
+            // product in the current filter (not just the ones already
+            // known to be due) -- needed up front now because the "due"
+            // decision itself depends on combined generic-level sales,
+            // computed below.
+            const allIds = products.map(p => p.id);
+            const lastPurchaseMap = await fetchLastPurchaseCosts(allIds);
 
             // 🔥 CHANGED (Minimum Order Qty removed entirely): reorder_qty
             // tops current stock back up to the generic's own trailing
             // 3-month demand, so one order lasts a full reorder cycle
-            // instead of landing right back below the trigger. (salesMap
-            // itself now comes from the parallel Promise.all() above.)
+            // instead of landing right back below the trigger.
+            const salesMap = await fetchLast3MonthSales(allIds);
 
             // 🔥 CHANGED: reorder decisions happen at the GENERIC NAME
             // level, not per individual brand/product. Two brands of the
@@ -743,15 +708,10 @@
             renderReorderReport();
         } catch (error) {
             console.error('Error generating reorder report:', error);
-            // 🔥 FIX: tbody was re-fetched here already, but on a timeout
-            // (see withTimeout() above) there was previously no way back
-            // to a working report short of closing the modal and hoping --
-            // this now leaves a visible error AND a Retry button instead
-            // of an indefinite spinner with nothing to click.
+            const tbody = document.getElementById('reorderTableBody');
             if (tbody) {
                 tbody.innerHTML = `<tr><td colspan="7" style="text-align: center; padding: 40px; color: #dc2626;">
-                    Error loading reorder report: ${error.message}<br>
-                    <button type="button" onclick="generateReorderReport()" style="margin-top:12px; padding:6px 16px; background:#2563eb; color:#fff; border:none; border-radius:6px; cursor:pointer;">Retry</button>
+                    Error loading reorder report: ${error.message}
                 </td></tr>`;
             }
         }
@@ -776,7 +736,7 @@
     }
 
     async function fetchSupplierNames(products) {
-        const supplierIds = products.map(p => p.supplier_id).filter(id => id);
+        const supplierIds = [...new Set(products.map(p => p.supplier_id).filter(id => id))];
         let supplierMap = {};
         if (supplierIds.length > 0) {
             const { data: suppliers, error: supError } = await supabaseClient
@@ -794,7 +754,7 @@
     }
 
     async function fetchCategoryNames(products) {
-        const categoryIds = products.map(p => p.category_id).filter(id => id);
+        const categoryIds = [...new Set(products.map(p => p.category_id).filter(id => id))];
         let categoryMap = {};
         if (categoryIds.length > 0) {
             const { data: categories, error: catError } = await supabaseClient
@@ -836,17 +796,35 @@
         return allRows;
     }
 
+    // 🔥 ADDED: a PostgREST .in() filter is sent in the URL. With ~800
+    // product UUIDs the URL is far too long for the gateway and the request
+    // fails with HTTP 400 (stock levels, last costs and 3-month sales all
+    // failed together, so the reorder report found 0 items). Split the ID
+    // list into small chunks, run each chunk through fetchAllPages (so the
+    // 1000-row cap is still handled), and merge the rows.
+    const IN_CHUNK_SIZE = 100;
+    async function fetchAllPagesChunked(ids, buildQuery) {
+        let rows = [];
+        for (let i = 0; i < ids.length; i += IN_CHUNK_SIZE) {
+            const chunk = ids.slice(i, i + IN_CHUNK_SIZE);
+            const part = await fetchAllPages((from, to) => buildQuery(chunk, from, to));
+            rows = rows.concat(part);
+        }
+        return rows;
+    }
+
     async function fetchStockLevels(products) {
         const productIds = products.map(p => p.id);
         let stockMap = {};
 
         if (productIds.length > 0) {
             try {
-                const batches = await fetchAllPages((from, to) =>
+                const batches = await fetchAllPagesChunked(productIds, (ids, from, to) =>
                     supabaseClient
                         .from('batches')
                         .select('product_id, total_qty')
-                        .in('product_id', productIds)
+                        .in('product_id', ids)
+                        .order('id', { ascending: true })
                         .range(from, to)
                 );
 
@@ -882,14 +860,15 @@
             // 🔥 FIX: was a single unpaged query -- see fetchAllPages()
             // above for why that silently lost real sales history (this
             // is the exact query that was dropping Oxa 100mg and others).
-            const data = await fetchAllPages((from, to) =>
+            const data = await fetchAllPagesChunked(productIds, (ids, from, to) =>
                 supabaseClient
                     .from('sale_items')
-                    .select('product_id, quantity, sales!inner(client_type, is_quotation, created_at)')
-                    .in('product_id', productIds)
+                    .select('id, product_id, quantity, sales!inner(client_type, is_quotation, created_at)')
+                    .in('product_id', ids)
                     .in('sales.client_type', ['RETAIL', 'WHOLESALE'])
                     .neq('sales.is_quotation', true)
                     .gte('sales.created_at', threeMonthsAgo.toISOString())
+                    .order('id', { ascending: true })
                     .range(from, to)
             );
 
@@ -930,14 +909,17 @@
             // 🔥 FIX: paginated for the same reason as fetchLast3MonthSales()
             // above -- small today (22 rows total), but the same silent-
             // truncation trap as the store's purchase history grows.
-            const data = await fetchAllPages((from, to) =>
+            const data = await fetchAllPagesChunked(productIds, (ids, from, to) =>
                 supabaseClient
                     .from('goods_receipt_lines')
                     .select('product_id, purchase_rate, created_at, goods_receipt_notes(currency, exchange_rate, received_date, entry_date)')
-                    .in('product_id', productIds)
+                    .in('product_id', ids)
                     .order('created_at', { ascending: false })
                     .range(from, to)
             );
+            // Chunks are fetched separately, so restore global newest-first
+            // order (the loop below keeps the first row seen per product).
+            data.sort((a, b) => String(b.created_at || '').localeCompare(String(a.created_at || '')));
 
             data.forEach(line => {
                 if (lastPurchaseMap[line.product_id]) return; // already have a more recent row

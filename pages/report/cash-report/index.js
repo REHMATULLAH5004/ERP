@@ -26,13 +26,15 @@
         return;
     }
 
-    const CASH_CODES = ['1111', '1121', '1120'];
+    // 🔥 CHANGED: this is the CASH-IN-HAND report only. Bank (ZMW, 1121) and
+    // Bank (USD, 1120) were removed from here -- they belong in a bank report.
+    // When cash moves to/from the bank (deposit, transfer), the bank account
+    // simply shows up as the "From / To" counterparty on the cash line.
+    const CASH_CODES = ['1111'];
     const ACCOUNT_META = {
-        '1111': { label: 'Cash in Hand (ZMW)', currency: 'K', accent: '#2563eb' },
-        '1121': { label: 'Bank (ZMW)', currency: 'K', accent: '#7c3aed' },
-        '1120': { label: 'Bank (USD)', currency: '$', accent: '#0891b2' }
+        '1111': { label: 'Cash in Hand (ZMW)', currency: 'K', accent: '#2563eb' }
     };
-    const ZMW_CODES = ['1111', '1121'];
+    const ZMW_CODES = ['1111'];
 
     const state = {
         from: null,
@@ -171,7 +173,7 @@
 
         const ledger = allRows.filter(inRange).sort((a, b) => (a.entryDate < b.entryDate ? 1 : -1));
 
-        // Sources / Uses -- ZMW accounts only (Cash in Hand + Bank ZMW),
+        // Sources / Uses -- Cash in Hand only,
         // grouped by the counterparty account name.
         const zmwLedger = ledger.filter(r => ZMW_CODES.includes(r.accountCode));
         const inMap = {}, outMap = {};
@@ -509,33 +511,82 @@
         countLabel.textContent = `${rows.length} movement${rows.length === 1 ? '' : 's'}`;
     };
 
-    window.cashReportExportCsv = function () {
-        const filter = document.getElementById('cashrepAccountFilter').value;
-        const rows = state.ledger.filter(r => filter === 'ALL' || r.accountCode === filter);
-        const header = ['Date', 'Account', 'Reference', 'Description', 'From/To', 'Cash In', 'Cash Out'];
-        const csvRows = [header.join(',')];
-        rows.forEach(r => {
-            const meta = ACCOUNT_META[r.accountCode];
-            const cells = [
-                r.entryDate,
-                meta.label,
-                r.reference,
-                r.description,
-                r.counterName,
-                r.debit > 0 ? r.debit.toFixed(2) : '',
-                r.credit > 0 ? r.credit.toFixed(2) : ''
-            ].map(c => `"${String(c).replace(/"/g, '""')}"`);
-            csvRows.push(cells.join(','));
-        });
-        const blob = new Blob([csvRows.join('\n')], { type: 'text/csv;charset=utf-8;' });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = `cash-report_${state.from}_to_${state.to}.csv`;
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-        URL.revokeObjectURL(url);
+    // ============================================
+    // 🔥 ADDED: EXPORT EXCEL -- the old CSV only held the ledger rows, so
+    // it never showed the Opening / Cash In / Cash Out / Closing numbers on
+    // the account cards, nor the Sources / Uses charts -- which is why the
+    // download and the screen "didn't talk to each other". This workbook
+    // carries everything on the page, built from the same state the screen
+    // is drawn from, so the two always agree (this replaced the old CSV export):
+    //   Summary          -> the three account cards (Opening/In/Out/Closing)
+    //   Cash In Sources  -> "Cash In By Source" chart (ZMW)
+    //   Cash Out Uses    -> "Cash Out By Use" chart (ZMW)
+    //   Ledger           -> every movement, oldest first, with a running
+    //                       balance per account; its last balance for each
+    //                       account equals that account's Closing above.
+    // Always exports ALL accounts (ignores the ledger's account filter) so
+    // the totals tie to the cards.
+    // ============================================
+    window.cashReportExportExcel = function () {
+        if (!window.XLSX || !XLSX.utils) {
+            alert('Excel library did not load -- refresh the page and try again.');
+            return;
+        }
+        if (!state.from || !state.to) { alert('Apply a date range first.'); return; }
+
+        try {
+            const wb = XLSX.utils.book_new();
+            const num = n => Math.round((n || 0) * 100) / 100;
+
+            // Summary
+            const summary = [
+                ['Cash Report', `${state.from} to ${state.to}`],
+                [],
+                ['Account', 'Currency', 'Opening', 'Cash In', 'Cash Out', 'Closing']
+            ];
+            CASH_CODES.forEach(code => {
+                const t = state.accountTotals[code] || { opening: 0, in: 0, out: 0, closing: 0 };
+                summary.push([ACCOUNT_META[code].label, code === '1120' ? 'USD' : 'ZMW', num(t.opening), num(t.in), num(t.out), num(t.closing)]);
+            });
+            const wsSummary = XLSX.utils.aoa_to_sheet(summary);
+            wsSummary['!cols'] = [{ wch: 24 }, { wch: 10 }, { wch: 16 }, { wch: 16 }, { wch: 16 }, { wch: 16 }];
+            XLSX.utils.book_append_sheet(wb, wsSummary, 'Summary');
+
+            // Sources / Uses (ZMW)
+            const srcRows = [['Source (counter account)', 'Amount (K)']].concat(state.inBySource.map(r => [r.label, num(r.value)]));
+            srcRows.push(['Total', num(state.inBySource.reduce((a, r) => a + r.value, 0))]);
+            const wsIn = XLSX.utils.aoa_to_sheet(srcRows);
+            wsIn['!cols'] = [{ wch: 34 }, { wch: 16 }];
+            XLSX.utils.book_append_sheet(wb, wsIn, 'Cash In Sources');
+
+            const useRows = [['Use (counter account)', 'Amount (K)']].concat(state.outByUse.map(r => [r.label, num(r.value)]));
+            useRows.push(['Total', num(state.outByUse.reduce((a, r) => a + r.value, 0))]);
+            const wsOut = XLSX.utils.aoa_to_sheet(useRows);
+            wsOut['!cols'] = [{ wch: 34 }, { wch: 16 }];
+            XLSX.utils.book_append_sheet(wb, wsOut, 'Cash Out Uses');
+
+            // Ledger, oldest first, running balance per account starting
+            // from that account's Opening on the cards.
+            const running = {};
+            CASH_CODES.forEach(code => { running[code] = (state.accountTotals[code] || {}).opening || 0; });
+            const oldestFirst = [...state.ledger].reverse();
+            const ledgerRows = [['Date', 'Account', 'Reference', 'Description', 'From/To', 'Cash In', 'Cash Out', 'Balance After']];
+            oldestFirst.forEach(r => {
+                running[r.accountCode] += r.debit - r.credit;
+                ledgerRows.push([
+                    r.entryDate, ACCOUNT_META[r.accountCode].label, r.reference, r.description, r.counterName,
+                    r.debit > 0 ? num(r.debit) : '', r.credit > 0 ? num(r.credit) : '', num(running[r.accountCode])
+                ]);
+            });
+            const wsLedger = XLSX.utils.aoa_to_sheet(ledgerRows);
+            wsLedger['!cols'] = [{ wch: 12 }, { wch: 20 }, { wch: 26 }, { wch: 60 }, { wch: 28 }, { wch: 14 }, { wch: 14 }, { wch: 16 }];
+            XLSX.utils.book_append_sheet(wb, wsLedger, 'Ledger');
+
+            XLSX.writeFile(wb, `Cash_Report_${state.from}_to_${state.to}.xlsx`);
+        } catch (err) {
+            console.error('Cash Report Excel export failed:', err);
+            alert('Excel export failed -- check the browser console for details.');
+        }
     };
 
     // ============================================

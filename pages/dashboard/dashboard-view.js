@@ -304,14 +304,20 @@
         if (window.currentUserRole !== 'Admin') return;
 
         const card = document.getElementById('dashAdminApprovalsCard');
-        card.style.display = 'block';
         const tbody = document.getElementById('dashAdminApprovalsBody');
+        // Guard: the dashboard view can be swapped out (user navigates to
+        // another module) before this runs, leaving these elements gone.
+        if (!card || !tbody) return;
+        card.style.display = 'block';
 
         const { data, error } = await supabaseClient
             .from('leave_requests')
             .select('*, employees(first_name, last_name)')
             .eq('status', 'Pending')
             .order('requested_at', { ascending: true });
+
+        // View may have been replaced while the query was in flight
+        if (!document.body.contains(tbody)) return;
 
         if (error) {
             tbody.innerHTML = `<tr><td colspan="5" style="text-align:center;padding:20px;color:#dc2626;">Error loading requests.</td></tr>`;
