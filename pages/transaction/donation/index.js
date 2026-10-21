@@ -1406,10 +1406,14 @@
         });
     }
 
-    // 🔥 ADDED: same conservative baseline as retail.js/wholesale.js --
-    // removes the sale and its sale_items rows only, does not touch
-    // stock or the accounting ledger. Admin-only, checked both in the
-    // UI (button hidden from non-Admins above) and here.
+    // 🔥 FIXED: Delete now undoes everything the donation did, the same way
+    // editing a donation does (see the edit-save block in saveDonation):
+    //   1. puts the stock back into the batches it was taken from
+    //   2. removes the accounting entry it posted (matched by reference --
+    //      the donation's own number)
+    //   3. removes the donation lines and the donation itself
+    // Admin-only, checked both in the UI (button hidden from non-Admins
+    // above) and here.
     async function deleteDonationRecord(id, saleNumber) {
         if (currentUserRole !== 'Admin') {
             alert('Only an Admin can delete a donation record.');
@@ -1417,24 +1421,103 @@
         }
 
         const confirmed = confirm(
-            `Delete ${saleNumber}?\n\nThis permanently removes the donation record. ` +
-            `It does NOT restore stock or reverse any accounting entries already posted for it -- ` +
-            `those will need to be corrected separately if this donation affected them.\n\nThis cannot be undone.`
+            `Delete ${saleNumber}?\n\nThis will:\n` +
+            `  - put the stock back into its batches\n` +
+            `  - remove the accounting entry this donation posted\n` +
+            `  - permanently remove the donation\n\nThis cannot be undone.`
         );
         if (!confirmed) return;
 
+        const stockRestored = new Map(); // batch id -> units added back (taken off again if the lines then fail to delete)
         try {
-            const { error: itemsError } = await supabaseClient.from('sale_items').delete().eq('sale_id', id);
+            const { data: sale, error: saleLookupError } = await supabaseClient
+                .from('sales')
+                .select('id, sale_id')
+                .eq('id', id)
+                .maybeSingle();
+            if (saleLookupError) throw saleLookupError;
+            if (!sale) {
+                alert('This donation no longer exists.');
+                searchDonationRecords(document.getElementById('donationSearchInput')?.value || '');
+                return;
+            }
+            const donationNumber = sale.sale_id || saleNumber;
+
+            const { data: items, error: itemsError } = await supabaseClient
+                .from('sale_items')
+                .select('batch_id, quantity, pack_size')
+                .eq('sale_id', id);
             if (itemsError) throw itemsError;
 
-            const { error: saleError } = await supabaseClient.from('sales').delete().eq('id', id);
+            // ---- 1. stock back into the batches ----
+            if (items && items.length > 0) {
+                const qtyByBatch = new Map();
+                for (const item of items) {
+                    if (!item.batch_id) continue;
+                    const packQty = parseInt(item.pack_size) || 1;
+                    qtyByBatch.set(item.batch_id, (qtyByBatch.get(item.batch_id) || 0) + (item.quantity || 0) * packQty);
+                }
+                for (const [batchId, units] of qtyByBatch) {
+                    const { data: batchRow, error: batchError } = await supabaseClient
+                        .from('batches')
+                        .select('id, total_qty')
+                        .eq('id', batchId)
+                        .maybeSingle();
+                    if (batchError) throw batchError;
+                    if (!batchRow) continue; // batch no longer exists -- nothing to put back into
+                    const { error: restoreError } = await supabaseClient
+                        .from('batches')
+                        .update({ total_qty: batchRow.total_qty + units })
+                        .eq('id', batchId);
+                    if (restoreError) throw restoreError;
+                    stockRestored.set(batchId, units);
+                }
+            }
+
+            // ---- 2. lines, then the accounting entry ----
+            const { error: itemsDeleteError } = await supabaseClient
+                .from('sale_items')
+                .delete()
+                .eq('sale_id', id);
+            if (itemsDeleteError) {
+                // the lines are still there, so a retry would put the stock back a second
+                // time -- take back what was just added before reporting the error
+                for (const [batchId, units] of stockRestored) {
+                    const { data: b } = await supabaseClient.from('batches').select('total_qty').eq('id', batchId).maybeSingle();
+                    if (b) await supabaseClient.from('batches').update({ total_qty: b.total_qty - units }).eq('id', batchId);
+                }
+                throw itemsDeleteError;
+            }
+
+            const { data: journals, error: journalLookupError } = await supabaseClient
+                .from('journal_entries')
+                .select('id')
+                .in('reference', [donationNumber, `${donationNumber}-COGS`]);
+            if (journalLookupError) throw journalLookupError;
+            if (journals && journals.length > 0) {
+                const journalIds = journals.map(j => j.id);
+                const { error: linesError } = await supabaseClient
+                    .from('journal_lines').delete().in('journal_entry_id', journalIds);
+                if (linesError) throw linesError;
+                const { error: entriesError } = await supabaseClient
+                    .from('journal_entries').delete().in('id', journalIds);
+                if (entriesError) throw entriesError;
+            }
+
+            // ---- 3. the donation itself ----
+            const { error: saleError } = await supabaseClient
+                .from('sales')
+                .delete()
+                .eq('id', id);
             if (saleError) throw saleError;
 
-            alert(`✅ ${saleNumber} deleted.`);
+            alert(`✅ ${donationNumber} deleted. Stock put back and accounting entry removed.`);
             searchDonationRecords(document.getElementById('donationSearchInput')?.value || '');
         } catch (error) {
             console.error('Error deleting donation:', error);
-            alert('Error deleting donation: ' + error.message);
+            alert('Error deleting donation: ' + error.message +
+                '\n\nIf this says something partly went through, open the donation again and press Delete once more -- ' +
+                'the steps are safe to repeat.');
         }
     }
 

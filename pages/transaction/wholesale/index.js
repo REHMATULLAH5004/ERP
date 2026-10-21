@@ -1193,6 +1193,39 @@
         return map;
     }
 
+    // 🔥 FIX: shared by both product-dropdown loaders below. They fetch the
+    // product list in the background and then REBUILD the <select>'s options,
+    // which silently blanked any item that had been selected in the meantime
+    // -- most visibly when a saved quotation/invoice was loaded into the form
+    // (selecting its customer triggers resetPOSTable(), which starts one of
+    // these reloads; if the reload finished AFTER the saved item had been
+    // filled in, the select went back to "Select Item" while the search box
+    // still showed the name, and Save then said "Please add at least one
+    // item"). Now whatever was selected is remembered and put back.
+    function rebuildItemSelectOptions(select, products, genericMap) {
+        const prevValue = select.value;
+        const prevOpt = select.options[select.selectedIndex];
+        const prevText = prevOpt ? prevOpt.textContent : '';
+        const prevGeneric = prevOpt ? (prevOpt.dataset.generic || '') : '';
+
+        select.innerHTML = `<option value="">Select Item</option>`;
+        products.forEach(p => {
+            select.innerHTML += `<option value="${p.id}" data-generic="${genericMap[p.generic_name_id] || ''}">${p.product_name}</option>`;
+        });
+
+        if (prevValue) {
+            let opt = Array.from(select.options).find(o => o.value === prevValue);
+            if (!opt) {
+                opt = document.createElement('option');
+                opt.value = prevValue;
+                opt.textContent = prevText;
+                opt.dataset.generic = prevGeneric;
+                select.appendChild(opt);
+            }
+            select.value = prevValue;
+        }
+    }
+
     async function loadProductDropdowns() {
         const selects = document.querySelectorAll('.wholesale-pos-item');
         try {
@@ -1215,12 +1248,7 @@
             }));
 
             selects.forEach(select => {
-                if (select) {
-                    select.innerHTML = `<option value="">Select Item</option>`;
-                    products.forEach(p => {
-                        select.innerHTML += `<option value="${p.id}" data-generic="${genericMap[p.generic_name_id] || ''}">${p.product_name}</option>`;
-                    });
-                }
+                if (select) rebuildItemSelectOptions(select, products, genericMap);
             });
         } catch (e) {
             console.warn("Could not load products:", e);
@@ -1248,10 +1276,7 @@
                 generic: genericMap[p.generic_name_id] || ''
             }));
 
-            select.innerHTML = `<option value="">Select Item</option>`;
-            products.forEach(p => {
-                select.innerHTML += `<option value="${p.id}" data-generic="${genericMap[p.generic_name_id] || ''}">${p.product_name}</option>`;
-            });
+            rebuildItemSelectOptions(select, products, genericMap);
         } catch (e) {
             console.warn("Could not load products for row:", e);
         }
@@ -1721,9 +1746,16 @@
         }
     }
 
-    // 🔥 ADDED: same conservative baseline as retail.js -- removes the
-    // sale and its sale_items rows only, does not touch stock or the
-    // accounting ledger. Admin-only, checked both in the UI and here.
+    // 🔥 FIXED: Delete now undoes everything the invoice did, the same way
+    // editing an invoice does (see the edit-save block in saveWholesale...):
+    //   1. puts the stock back into the batches it was taken from
+    //   2. removes the accounting entries it posted (matched by reference:
+    //      the invoice number, and "<invoice number>-COGS")
+    //   3. removes the invoice lines and the invoice itself
+    // A Quotation never moved stock or posted accounting, so only step 3
+    // applies to it. An invoice that already has a customer receipt applied
+    // to it is NOT deleted -- the receipt would be left pointing at nothing;
+    // reverse the receipt first. Admin-only, checked both in the UI and here.
     async function deleteSaleRecord(id, saleNumber) {
         if (currentUserRole !== 'Admin') {
             alert('Only an Admin can delete a sale record.');
@@ -1731,30 +1763,119 @@
         }
 
         const confirmed = confirm(
-            `Delete ${saleNumber}?\n\nThis permanently removes the sale record. ` +
-            `It does NOT restore stock or reverse any accounting entries already posted for it -- ` +
-            `those will need to be corrected separately if this sale affected them.\n\nThis cannot be undone.`
+            `Delete ${saleNumber}?\n\nThis will:\n` +
+            `  - put the stock back into its batches\n` +
+            `  - remove the accounting entries this invoice posted\n` +
+            `  - permanently remove the invoice\n\nThis cannot be undone.`
         );
         if (!confirmed) return;
 
+        const stockRestored = new Map(); // batch id -> units added back (taken off again if the lines then fail to delete)
         try {
-            const { error: itemsError } = await supabaseClient
+            const { data: sale, error: saleLookupError } = await supabaseClient
+                .from('sales')
+                .select('id, sale_id, is_quotation')
+                .eq('id', id)
+                .maybeSingle();
+            if (saleLookupError) throw saleLookupError;
+            if (!sale) {
+                alert('This invoice no longer exists.');
+                searchSalesRecords(document.getElementById('wholesaleSearchInput')?.value || '');
+                return;
+            }
+            const invoiceNumber = sale.sale_id || saleNumber;
+            const isQuotationRecord = !!sale.is_quotation;
+
+            if (!isQuotationRecord) {
+                const { data: receiptLinks, error: receiptError } = await supabaseClient
+                    .from('customer_receipt_invoices')
+                    .select('id')
+                    .eq('sale_id', id)
+                    .limit(1);
+                if (receiptError) throw receiptError;
+                if (receiptLinks && receiptLinks.length > 0) {
+                    alert(`❌ ${invoiceNumber} cannot be deleted because a customer receipt has been applied to it.\n\nReverse that receipt first, then delete the invoice. Nothing was changed.`);
+                    return;
+                }
+            }
+
+            const { data: items, error: itemsError } = await supabaseClient
                 .from('sale_items')
-                .delete()
+                .select('batch_id, quantity, pack_size')
                 .eq('sale_id', id);
             if (itemsError) throw itemsError;
 
+            // ---- 1. stock back into the batches (invoices only) ----
+            if (!isQuotationRecord && items && items.length > 0) {
+                const qtyByBatch = new Map();
+                for (const item of items) {
+                    if (!item.batch_id) continue;
+                    const packQty = parseInt(item.pack_size) || 1;
+                    qtyByBatch.set(item.batch_id, (qtyByBatch.get(item.batch_id) || 0) + (item.quantity || 0) * packQty);
+                }
+                for (const [batchId, units] of qtyByBatch) {
+                    const { data: batchRow, error: batchError } = await supabaseClient
+                        .from('batches')
+                        .select('id, total_qty')
+                        .eq('id', batchId)
+                        .maybeSingle();
+                    if (batchError) throw batchError;
+                    if (!batchRow) continue; // batch no longer exists -- nothing to put back into
+                    const { error: restoreError } = await supabaseClient
+                        .from('batches')
+                        .update({ total_qty: batchRow.total_qty + units })
+                        .eq('id', batchId);
+                    if (restoreError) throw restoreError;
+                    stockRestored.set(batchId, units);
+                }
+            }
+
+            // ---- 2. lines, then accounting entries (invoices only) ----
+            const { error: itemsDeleteError } = await supabaseClient
+                .from('sale_items')
+                .delete()
+                .eq('sale_id', id);
+            if (itemsDeleteError) {
+                // the lines are still there, so a retry would put the stock back a second
+                // time -- take back what was just added before reporting the error
+                for (const [batchId, units] of stockRestored) {
+                    const { data: b } = await supabaseClient.from('batches').select('total_qty').eq('id', batchId).maybeSingle();
+                    if (b) await supabaseClient.from('batches').update({ total_qty: b.total_qty - units }).eq('id', batchId);
+                }
+                throw itemsDeleteError;
+            }
+
+            if (!isQuotationRecord) {
+                const { data: journals, error: journalLookupError } = await supabaseClient
+                    .from('journal_entries')
+                    .select('id')
+                    .in('reference', [invoiceNumber, `${invoiceNumber}-COGS`]);
+                if (journalLookupError) throw journalLookupError;
+                if (journals && journals.length > 0) {
+                    const journalIds = journals.map(j => j.id);
+                    const { error: linesError } = await supabaseClient
+                        .from('journal_lines').delete().in('journal_entry_id', journalIds);
+                    if (linesError) throw linesError;
+                    const { error: entriesError } = await supabaseClient
+                        .from('journal_entries').delete().in('id', journalIds);
+                    if (entriesError) throw entriesError;
+                }
+            }
+
+            // ---- 3. the invoice itself ----
             const { error: saleError } = await supabaseClient
                 .from('sales')
                 .delete()
                 .eq('id', id);
             if (saleError) throw saleError;
 
-            alert(`✅ ${saleNumber} deleted.`);
+            alert(`✅ ${invoiceNumber} deleted${isQuotationRecord ? '.' : '. Stock put back and accounting entries removed.'}`);
             searchSalesRecords(document.getElementById('wholesaleSearchInput')?.value || '');
         } catch (error) {
             console.error('Error deleting sale:', error);
-            alert('Error deleting sale: ' + error.message);
+            alert('Error deleting sale: ' + error.message +
+                '\n\nIf this says something partly went through, open the invoice again and press Delete once more -- ' +
+                'the steps are safe to repeat.');
         }
     }
 
@@ -2066,9 +2187,55 @@
             console.log(`✅ Wholesale accounting entries created for ${saleId}`);
             
         } catch (error) {
+            // 🔥 FIX: this used to just log a console warning and carry on,
+            // so a failed accounting post left an invoice with stock taken
+            // out but half (or none) of its accounting entries -- while the
+            // user still saw "saved successfully". Now: clean up any entry
+            // this call managed to write, then re-throw so saveTransaction()
+            // knows the save did not complete.
             console.error('Error creating wholesale accounting entries:', error);
-            console.warn('⚠️ Accounting entries failed but sale was saved successfully.');
+            try {
+                const ref = saleData && saleData.sale_id;
+                if (ref) {
+                    const { data: partial } = await supabaseClient
+                        .from('journal_entries').select('id').in('reference', [ref, `${ref}-COGS`]);
+                    if (partial && partial.length > 0) {
+                        const ids = partial.map(j => j.id);
+                        await supabaseClient.from('journal_lines').delete().in('journal_entry_id', ids);
+                        await supabaseClient.from('journal_entries').delete().in('id', ids);
+                    }
+                }
+            } catch (cleanupError) {
+                console.warn('Could not clean up partial accounting entries:', cleanupError);
+            }
+            throw error;
         }
+    }
+
+    // 🔥 ADDED: undoes a NEW invoice whose stock/accounting step failed, so
+    // nothing half-saved is left behind (stock put back, accounting entries
+    // removed, lines and invoice deleted). Every step is best-effort and
+    // independent, so one failing doesn't stop the rest.
+    async function rollbackFailedNewSale(dbId, invoiceNumber, deductedByBatch) {
+        try {
+            for (const [batchId, units] of (deductedByBatch || new Map())) {
+                const { data: b } = await supabaseClient.from('batches').select('total_qty').eq('id', batchId).maybeSingle();
+                if (b) await supabaseClient.from('batches').update({ total_qty: b.total_qty + units }).eq('id', batchId);
+            }
+        } catch (e) { console.warn('Rollback: could not restore stock', e); }
+        try {
+            const { data: js } = await supabaseClient
+                .from('journal_entries').select('id').in('reference', [invoiceNumber, `${invoiceNumber}-COGS`]);
+            if (js && js.length > 0) {
+                const ids = js.map(j => j.id);
+                await supabaseClient.from('journal_lines').delete().in('journal_entry_id', ids);
+                await supabaseClient.from('journal_entries').delete().in('id', ids);
+            }
+        } catch (e) { console.warn('Rollback: could not remove accounting entries', e); }
+        try {
+            await supabaseClient.from('sale_items').delete().eq('sale_id', dbId);
+            await supabaseClient.from('sales').delete().eq('id', dbId);
+        } catch (e) { console.warn('Rollback: could not remove the invoice', e); }
     }
 
     // ============================================
@@ -2446,14 +2613,14 @@
     // 🔥 ADDED: STOCK TRANSFER NOTE (Griffins Medicals Limited ->
     // Griffins Pharmaceuticals)
     // ============================================
-    // When a wholesale invoice is raised to Griffins Pharmaceuticals, the
-    // goods are really a transfer between the two companies. The invoice,
-    // inventory deduction and accounting all stay exactly as they are --
-    // this is ONLY an extra printed page that rides along with the invoice
-    // and delivery note, so the stock leaving can be matched on paper:
-    // Product / Batch / Expiry / Qty. No prices, no database writes of any
-    // kind. Not printed for a Quotation (nothing has moved yet), and only
-    // printed when the customer on the invoice is Griffins Pharmaceuticals.
+    // Every wholesale invoice is also recorded internally as a stock
+    // transfer from Griffins Medicals Limited to Griffins Pharmaceuticals.
+    // This is ONLY an extra printed page that rides along with the invoice
+    // and delivery note, for our own records: Product / Batch / Expiry /
+    // Qty. No prices, no database writes of any kind -- it never touches
+    // inventory (the wholesale invoice already deducts that) or accounting.
+    // Printed on every invoice, whoever the customer is; not printed for a
+    // Quotation (nothing has moved yet).
     const TRANSFER_FROM_COMPANY = 'Griffins Medicals Limited';
     const TRANSFER_TO_COMPANY = 'Griffins Pharmaceuticals';
 
@@ -2669,7 +2836,7 @@
             ${!isQuotation ? buildWholesaleDeliveryNoteHTML(saleData, 'CUSTOMER') : ''}
             ${buildWholesaleCopyHTML(saleData, 'MERCHANT')}
             ${!isQuotation ? buildWholesaleDeliveryNoteHTML(saleData, 'MERCHANT') : ''}
-            ${!isQuotation && isGriffinsPharmaceuticalsSale(saleData) ? buildStockTransferNoteHTML(saleData) : ''}
+            ${!isQuotation ? buildStockTransferNoteHTML(saleData) : ''}
         </body>
         </html>`;
 
@@ -2861,6 +3028,22 @@
                         // regenerate the id and try once more instead of just
                         // failing the whole sale on a rare timestamp collision.
                         if (error.code === '23505' || error.message?.includes('duplicate key')) {
+                            // 🔥 FIX: if an invoice with this SAME number, customer and
+                            // total is already saved, this is a second click on an
+                            // invoice that already went through -- NOT a rare number
+                            // collision. Regenerating a new number here is what used to
+                            // silently create a duplicate invoice. Stop instead.
+                            const { data: alreadySaved } = await supabaseClient
+                                .from('sales')
+                                .select('id, grand_total, customer_id')
+                                .eq('sale_id', dbRecord.sale_id)
+                                .maybeSingle();
+                            if (alreadySaved &&
+                                Number(alreadySaved.grand_total) === Number(dbRecord.grand_total) &&
+                                (alreadySaved.customer_id || null) === (dbRecord.customer_id || null)) {
+                                alert(`ℹ️ ${dbRecord.sale_id} was already saved -- nothing was duplicated.\n\nUse Search to open it, or press Reset to start a new invoice.`);
+                                return;
+                            }
                             console.log('⚠️ Duplicate key error, regenerating sale_id...');
 
                             const timestamp = Date.now().toString().slice(-6);
@@ -2931,17 +3114,22 @@
             }
 
             if (status === 'COMPLETED') {
-                // 🔥 PERF FIX: same fix as retail.js -- this used to
-                // fetch-then-update stock one batch at a time in a
-                // sequential loop (2 round-trips per line item, one after
-                // another), then only afterwards post the accounting
-                // entries. Now: quantities are aggregated per batch_id
-                // first (so a batch on more than one line is only
-                // read/written once), all batches are fetched in a single
+                // 🔥 PERF FIX: same fix as retail.js -- quantities are
+                // aggregated per batch_id, all batches are fetched in one
                 // query, the updates fire together via Promise.all(), and
-                // the whole stock step runs CONCURRENTLY with posting the
-                // accounting entries below instead of waiting for it first
-                // -- neither depends on the other's writes.
+                // the stock step runs CONCURRENTLY with posting the
+                // accounting entries -- neither depends on the other's
+                // writes.
+                //
+                // 🔥 FIX: both steps used to swallow their own errors, so a
+                // failure in either still ended in "saved successfully"
+                // with stock or accounting silently missing (and, because
+                // the form wasn't reset on the stuck/slow saves, a second
+                // click -- see the duplicate-sale_id handling above). Now
+                // both report failure, and a NEW invoice that didn't fully
+                // save is rolled back completely so the user can simply
+                // press Save again.
+                const deductedByBatch = new Map(); // batch id -> units actually taken off
                 const stockUpdatePromise = (async () => {
                     const qtyByBatch = new Map();
                     for (const item of saleData.items) {
@@ -2957,10 +3145,7 @@
                         .select('id, total_qty')
                         .in('id', batchIds);
 
-                    if (fetchError) {
-                        console.error('Stock fetch error:', fetchError);
-                        return;
-                    }
+                    if (fetchError) throw new Error('Could not read stock: ' + fetchError.message);
 
                     await Promise.all((batches || []).map(async (batchData) => {
                         const totalQtyToDeduct = qtyByBatch.get(batchData.id) || 0;
@@ -2970,19 +3155,29 @@
                             .update({ total_qty: newQty })
                             .eq('id', batchData.id);
 
-                        if (updateError) {
-                            console.error('Stock update error for batch:', batchData.id, updateError);
-                        } else {
-                            console.log(`Stock updated for batch ${batchData.id}: ${batchData.total_qty} -> ${newQty}`);
-                        }
+                        if (updateError) throw new Error('Stock update failed: ' + updateError.message);
+                        deductedByBatch.set(batchData.id, totalQtyToDeduct);
+                        console.log(`Stock updated for batch ${batchData.id}: ${batchData.total_qty} -> ${newQty}`);
                     }));
                 })();
 
-                const accountingPromise = createWholesaleAccountingEntries(saleData, savedData)
-                    .catch(accError => console.error('Accounting entry error:', accError));
+                const accountingPromise = createWholesaleAccountingEntries(saleData, savedData);
 
-                await Promise.all([stockUpdatePromise, accountingPromise]);
-
+                const stepResults = await Promise.allSettled([stockUpdatePromise, accountingPromise]);
+                const failedSteps = stepResults.filter(r => r.status === 'rejected');
+                if (failedSteps.length > 0) {
+                    const reason = failedSteps.map(f => (f.reason && f.reason.message) || String(f.reason)).join(' | ');
+                    console.error('Stock/accounting step failed:', reason);
+                    if (!editingWholesaleDbId) {
+                        await rollbackFailedNewSale(savedData[0].id, saleData.sale_id, deductedByBatch);
+                        alert('❌ The invoice could NOT be saved completely, so nothing was kept -- stock and accounting are unchanged.\n\nPlease press Save again.\n\nDetails: ' + reason);
+                    } else {
+                        // editing: pressing Save again safely redoes the whole step
+                        // (it restores the old stock and removes the old entries first)
+                        alert('❌ The changes could not be saved completely.\n\nPlease press Save again to retry.\n\nDetails: ' + reason);
+                    }
+                    return;
+                }
             } else {
                 console.log('Quotation saved - stock not affected');
             }
@@ -3009,11 +3204,19 @@
                 }
             }
 
-            if (status === 'COMPLETED') {
-                showPrintDialog(saleData);
-            } else {
-                await new Promise(resolve => setTimeout(resolve, 500));
-                printSale();
+            // 🔥 FIX: the invoice is fully saved by this point. If opening the
+            // print window fails (pop-up blocked, etc.), that must not leave
+            // the form un-reset with the same invoice number still on it --
+            // pressing Save again on it is what produced a duplicate invoice.
+            try {
+                if (status === 'COMPLETED') {
+                    showPrintDialog(saleData);
+                } else {
+                    await new Promise(resolve => setTimeout(resolve, 500));
+                    printSale();
+                }
+            } catch (printError) {
+                console.error('Print step failed after a successful save:', printError);
             }
 
             alert(`✅ ${status === 'QUOTATION' ? 'Quotation' : 'Sale'} saved successfully!\nID: ${saleData.sale_id}\nGrand Total: K${saleData.totals.grand_total.toFixed(2)}`);

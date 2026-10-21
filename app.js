@@ -197,6 +197,12 @@ document.addEventListener('DOMContentLoaded', async () => {
         window.initQueueBar();
     }
 
+    // Top-bar "Prescriptions" button: pending online-shop prescriptions.
+    // Only mounts for Admin / Manager / Pharmacist (checked inside).
+    if (typeof window.initPrescriptionAlert === 'function') {
+        window.initPrescriptionAlert();
+    }
+
     // ============================================
     // TOP MENU LOGIC
     // ============================================

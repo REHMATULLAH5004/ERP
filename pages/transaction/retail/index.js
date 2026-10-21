@@ -4414,15 +4414,18 @@
         }
     }
 
-    // 🔥 ADDED: delete a sale record. Deliberately conservative for now --
-    // removes the sale and its sale_items rows only. Does NOT touch stock
-    // quantities or the accounting ledger (journal_entries/journal_lines),
-    // since a completed sale that was ever counted in stock/accounting
-    // reports shouldn't silently vanish from them without a clear decision
-    // on how that reversal should work. Admin-only, checked twice: the
-    // button itself is hidden from non-Admins in renderSearchResults(),
-    // and the role is re-verified here before anything actually deletes,
-    // so this can't be triggered just by knowing the button exists.
+    // 🔥 FIXED: Delete now undoes everything the invoice did, the same way
+    // editing an invoice does (see the edit-save block in saveTransaction):
+    //   1. puts the stock back (bundle/kit lines go back to their component
+    //      products, per the bundle recipe -- same as the edit path)
+    //   2. removes the accounting entries it posted (matched by reference:
+    //      the invoice number, and "<invoice number>-COGS")
+    //   3. removes the invoice lines and the invoice itself
+    // A Quotation never moved stock or posted accounting, so only step 3
+    // applies to it. An invoice that already has a customer receipt applied
+    // to it is NOT deleted -- reverse the receipt first. Admin-only, checked
+    // twice: the button is hidden from non-Admins in renderSearchResults(),
+    // and the role is re-verified here.
     async function deleteSaleRecord(id, saleNumber) {
         if (currentUserRole !== 'Admin') {
             alert('Only an Admin can delete a sale record.');
@@ -4430,32 +4433,161 @@
         }
 
         const confirmed = confirm(
-            `Delete ${saleNumber}?\n\nThis permanently removes the sale record. ` +
-            `It does NOT restore stock or reverse any accounting entries already posted for it -- ` +
-            `those will need to be corrected separately if this sale affected them.\n\nThis cannot be undone.`
+            `Delete ${saleNumber}?\n\nThis will:\n` +
+            `  - put the stock back\n` +
+            `  - remove the accounting entries this invoice posted\n` +
+            `  - permanently remove the invoice\n\nThis cannot be undone.`
         );
         if (!confirmed) return;
 
+        const stockRestored = new Map(); // batch id -> units added back (taken off again if the lines then fail to delete)
         try {
-            const { error: itemsError } = await supabaseClient
+            const { data: sale, error: saleLookupError } = await supabaseClient
+                .from('sales')
+                .select('id, sale_id, is_quotation')
+                .eq('id', id)
+                .maybeSingle();
+            if (saleLookupError) throw saleLookupError;
+            if (!sale) {
+                alert('This invoice no longer exists.');
+                searchSalesRecords(document.getElementById('retailSearchInput')?.value || '');
+                return;
+            }
+            const invoiceNumber = sale.sale_id || saleNumber;
+            const isQuotationRecord = !!sale.is_quotation;
+
+            if (!isQuotationRecord) {
+                const { data: receiptLinks, error: receiptError } = await supabaseClient
+                    .from('customer_receipt_invoices')
+                    .select('id')
+                    .eq('sale_id', id)
+                    .limit(1);
+                if (receiptError) throw receiptError;
+                if (receiptLinks && receiptLinks.length > 0) {
+                    alert(`❌ ${invoiceNumber} cannot be deleted because a customer receipt has been applied to it.\n\nReverse that receipt first, then delete the invoice. Nothing was changed.`);
+                    return;
+                }
+            }
+
+            const { data: items, error: itemsError } = await supabaseClient
+                .from('sale_items')
+                .select('product_id, batch_id, quantity, pack_size')
+                .eq('sale_id', id);
+            if (itemsError) throw itemsError;
+
+            // ---- 1. stock back (invoices only) ----
+            if (!isQuotationRecord && items && items.length > 0) {
+                const { data: productFlags, error: flagError } = await supabaseClient
+                    .from('products')
+                    .select('id, is_bundle')
+                    .in('id', [...new Set(items.map(i => i.product_id))]);
+                if (flagError) throw flagError;
+                const bundleProductIds = new Set((productFlags || []).filter(p => p.is_bundle).map(p => p.id));
+
+                const qtyToRestoreByBatch = new Map();
+                const bundleItems = [];
+                for (const item of items) {
+                    if (bundleProductIds.has(item.product_id)) { bundleItems.push(item); continue; }
+                    if (!item.batch_id) continue;
+                    const packQty = item.pack_size === 'EACH' ? 1 : (parseInt(item.pack_size) || 1);
+                    qtyToRestoreByBatch.set(item.batch_id, (qtyToRestoreByBatch.get(item.batch_id) || 0) + (item.quantity || 0) * packQty);
+                }
+
+                if (bundleItems.length > 0) {
+                    const { data: recipeRows, error: recipeError } = await supabaseClient
+                        .from('bundle_components')
+                        .select('bundle_product_id, component_product_id, qty_per_bundle')
+                        .in('bundle_product_id', [...new Set(bundleItems.map(i => i.product_id))]);
+                    if (recipeError) throw recipeError;
+
+                    const restoreByComponent = new Map();
+                    for (const item of bundleItems) {
+                        for (const r of (recipeRows || []).filter(r => r.bundle_product_id === item.product_id)) {
+                            restoreByComponent.set(r.component_product_id, (restoreByComponent.get(r.component_product_id) || 0) + (item.quantity || 0) * r.qty_per_bundle);
+                        }
+                    }
+                    if (restoreByComponent.size > 0) {
+                        // same rule as the edit path: credit the component's earliest-expiry real batch
+                        const { data: compBatches, error: compError } = await supabaseClient
+                            .from('batches')
+                            .select('id, product_id, total_qty')
+                            .in('product_id', [...restoreByComponent.keys()])
+                            .order('expiry_date', { ascending: true });
+                        if (compError) throw compError;
+                        for (const [componentId, qty] of restoreByComponent.entries()) {
+                            const target = (compBatches || []).find(b => b.product_id === componentId);
+                            if (target) {
+                                qtyToRestoreByBatch.set(target.id, (qtyToRestoreByBatch.get(target.id) || 0) + qty);
+                            } else {
+                                console.warn(`Could not restore ${qty} units to component ${componentId} -- no batch found.`);
+                            }
+                        }
+                    }
+                }
+
+                for (const [batchId, units] of qtyToRestoreByBatch) {
+                    const { data: batchRow, error: batchError } = await supabaseClient
+                        .from('batches')
+                        .select('id, total_qty')
+                        .eq('id', batchId)
+                        .maybeSingle();
+                    if (batchError) throw batchError;
+                    if (!batchRow) continue; // batch no longer exists -- nothing to put back into
+                    const { error: restoreError } = await supabaseClient
+                        .from('batches')
+                        .update({ total_qty: batchRow.total_qty + units })
+                        .eq('id', batchId);
+                    if (restoreError) throw restoreError;
+                    stockRestored.set(batchId, units);
+                }
+            }
+
+            // ---- 2. lines, then accounting entries (invoices only) ----
+            const { error: itemsDeleteError } = await supabaseClient
                 .from('sale_items')
                 .delete()
                 .eq('sale_id', id);
+            if (itemsDeleteError) {
+                // the lines are still there, so a retry would put the stock back a second
+                // time -- take back what was just added before reporting the error
+                for (const [batchId, units] of stockRestored) {
+                    const { data: b } = await supabaseClient.from('batches').select('total_qty').eq('id', batchId).maybeSingle();
+                    if (b) await supabaseClient.from('batches').update({ total_qty: b.total_qty - units }).eq('id', batchId);
+                }
+                throw itemsDeleteError;
+            }
 
-            if (itemsError) throw itemsError;
+            if (!isQuotationRecord) {
+                const { data: journals, error: journalLookupError } = await supabaseClient
+                    .from('journal_entries')
+                    .select('id')
+                    .in('reference', [invoiceNumber, `${invoiceNumber}-COGS`]);
+                if (journalLookupError) throw journalLookupError;
+                if (journals && journals.length > 0) {
+                    const journalIds = journals.map(j => j.id);
+                    const { error: linesError } = await supabaseClient
+                        .from('journal_lines').delete().in('journal_entry_id', journalIds);
+                    if (linesError) throw linesError;
+                    const { error: entriesError } = await supabaseClient
+                        .from('journal_entries').delete().in('id', journalIds);
+                    if (entriesError) throw entriesError;
+                }
+            }
 
+            // ---- 3. the invoice itself ----
             const { error: saleError } = await supabaseClient
                 .from('sales')
                 .delete()
                 .eq('id', id);
-
             if (saleError) throw saleError;
 
-            alert(`✅ ${saleNumber} deleted.`);
+            alert(`✅ ${invoiceNumber} deleted${isQuotationRecord ? '.' : '. Stock put back and accounting entries removed.'}`);
             searchSalesRecords(document.getElementById('retailSearchInput')?.value || '');
         } catch (error) {
             console.error('Error deleting sale:', error);
-            alert('Error deleting sale: ' + error.message);
+            alert('Error deleting sale: ' + error.message +
+                '\n\nIf this says something partly went through, open the invoice again and press Delete once more -- ' +
+                'the steps are safe to repeat.');
         }
     }
 
@@ -5487,6 +5619,9 @@
                 </table>
 
                 <div class="totals-box">
+                    ${(saleData.payment && Number(saleData.payment.discount_amount) > 0) ? `
+                    <div class="totals-row"><span>Items Total</span><span>K${(saleData.totals.grand_total + Number(saleData.payment.discount_amount)).toFixed(2)}</span></div>
+                    <div class="totals-row"><span>Discount (${Number(saleData.payment.discount_percent || 0)}%)</span><span>-K${Number(saleData.payment.discount_amount).toFixed(2)}</span></div>` : ''}
                     <div class="totals-row"><span>Subtotal (Excl. Tax)</span><span>K${saleData.totals.subtotal.toFixed(2)}</span></div>
                     <div class="totals-row"><span>Total Tax</span><span>K${saleData.totals.tax.toFixed(2)}</span></div>
                     <div class="totals-row grand"><span>GRAND TOTAL</span><span>K${saleData.totals.grand_total.toFixed(2)}</span></div>
@@ -6635,6 +6770,578 @@
     // the plain .retail-pos-qty input (see index.html), still wired by the
     // 'input' listener further up exactly as before.
     // ============================================
+
+
+    // ============================================
+    // 🔥 ADDED: QUICK SALE (WALK-IN) -- collapsed "+" POS grid on the Retail POS page
+    // ============================================
+    // A stripped-down Regular Retail sale with no patient details. It saves
+    // the SAME shape as Retail POS's "Walk-in" button (client_type RETAIL,
+    // client_sub_type REGULAR, customer_id null, customer_data.walk_in
+    // true) so everything downstream -- the server-side accounting trigger
+    // (post_retail_sale_accounting), stock deduction, the Dispensing queue
+    // and invoice reprint -- treats it like any other regular retail sale.
+    //
+    // Pricing is the identical Regular Retail formula from retail/index.js's
+    // updateRowRate(): pack cost (batch cost_price x pack size) marked up by
+    // the exponential curve in company_settings. Quantity is in PACKS
+    // (pack size = products.conversion_rate), stock comes off the
+    // earliest-expiry batch first, spilling into the next batch if one
+    // isn't enough (each batch part priced from its own cost).
+    //
+    // Discount: header-level only. sales.grand_total (what the till
+    // collects and what the accounting trigger books) is AFTER discount;
+    // the line items keep their full list rate/total. The discount itself
+    // is recorded in sales.payment.discount_percent / discount_amount.
+    // Bundle/kit products are not offered here (use Retail POS for those).
+    // Retail POS's own showToast(message, type) is used for notifications;
+    // everything below calls showToastSimple(message[, type]) -- warnings by default.
+    function showToastSimple(message, type) { showToast(message, type || 'warning'); }
+
+    // Prints a saved Quick Sale with Retail POS's own A4 invoice
+    // (buildInvoiceHTML / printHTMLViaHiddenFrame), same as a normal sale.
+    async function printQuickSaleInvoice(sale) {
+        const saleData = {
+            sale_id: sale.sale_id,
+            is_quotation: false,
+            customer: sale.customer_data || {},
+            items: sale.items || [],
+            payment: sale.payment || { type: 'Cash', note: '' },
+            totals: {
+                subtotal: Number(sale.subtotal) || 0,
+                tax: Number(sale.tax) || 0,
+                grand_total: Number(sale.grand_total) || 0
+            },
+            date: new Date(sale.created_at).toLocaleString()
+        };
+        if ((saleData.items || []).some(i => !i.generic_name)) {
+            saleData.items = await enrichItemsForPrint(saleData.items);
+        }
+        printHTMLViaHiddenFrame(buildInvoiceHTML(saleData));
+    }
+
+    function initQuickSale() {
+        const card = document.getElementById('retailQsCard');
+        if (!card) return;
+
+        // Same gate as the Sales shortcut: roles that can't open the
+        // Transaction module can't sell from here either.
+        try {
+            if (typeof ROLE_ACCESS !== 'undefined' && window.currentUserRole) {
+                const allowed = ROLE_ACCESS[window.currentUserRole];
+                if (Array.isArray(allowed) && !allowed.includes('transaction')) return;
+            }
+        } catch (e) { /* undetermined -> show */ }
+        card.style.display = '';
+
+        const toggleBtn = document.getElementById('retailQsToggleBtn');
+        const body = document.getElementById('retailQsBody');
+        const rowsEl = document.getElementById('retailQsRows');
+        const discInput = document.getElementById('retailQsDiscPct');
+        const saveBtn = document.getElementById('retailQsSaveBtn');
+        const savePrintBtn = document.getElementById('retailQsSavePrintBtn');
+        const clearBtn = document.getElementById('retailQsClearBtn');
+
+        let catalog = null;          // [{id, product_name, conversion_rate, tax_percent, total_stock}]
+        let catalogLoading = null;
+        let saving = false;
+
+        const money = n => 'K' + (Number(n) || 0).toFixed(2);
+        const round2 = n => Math.round((Number(n) + Number.EPSILON) * 100) / 100;
+        const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+        // Same exponential curve as retail/index.js
+        const cs = {
+            max: Number(companySettings.retail_regular_markup_max_percent) || 60,
+            min: Number(companySettings.retail_regular_markup_min_percent) || 30,
+            costMin: Number(companySettings.markup_cost_min) || 1,
+            costMax: Number(companySettings.markup_cost_max) || 600
+        };
+        function markupPercent(cost) {
+            if (!(cs.costMax > cs.costMin) || cs.max <= 0 || cs.min <= 0) return cs.max;
+            const c = Math.min(Math.max(cost, cs.costMin), cs.costMax);
+            const t = (c - cs.costMin) / (cs.costMax - cs.costMin);
+            return cs.max * Math.pow(cs.min / cs.max, t);
+        }
+        function packRate(batch, pack) {
+            const costPerPack = (Number(batch.cost_price) || 0) * pack;
+            return round2(costPerPack * (1 + markupPercent(costPerPack) / 100));
+        }
+
+        async function ensureCatalog() {
+            if (catalog) return catalog;
+            if (!catalogLoading) {
+                catalogLoading = (async () => {
+                    const all = [];
+                    for (let from = 0; ; from += 1000) {
+                        const { data, error } = await supabaseClient
+                            .from('products')
+                            .select('id, product_name, generic_name_id, conversion_rate, tax_percent, total_stock, is_bundle')
+                            .order('product_name', { ascending: true })
+                            .range(from, from + 999);
+                        if (error) throw error;
+                        all.push(...(data || []));
+                        if (!data || data.length < 1000) break;
+                    }
+                    // Generic names, so an item can be found by either name.
+                    const genericMap = {};
+                    for (let from = 0; ; from += 1000) {
+                        const { data: gens, error: gerr } = await supabaseClient
+                            .from('generic_names')
+                            .select('id, name')
+                            .range(from, from + 999);
+                        if (gerr) { console.warn('Quick sale: could not load generic names', gerr); break; }
+                        (gens || []).forEach(g => { genericMap[g.id] = g.name; });
+                        if (!gens || gens.length < 1000) break;
+                    }
+                    catalog = all.filter(p => !p.is_bundle).map(p => ({
+                        ...p,
+                        generic_name: genericMap[p.generic_name_id] || ''
+                    }));
+                    return catalog;
+                })().catch(err => { catalogLoading = null; throw err; });
+            }
+            return catalogLoading;
+        }
+
+        async function fetchBatches(productId) {
+            const { data, error } = await supabaseClient
+                .from('batches')
+                .select('id, batch_number, expiry_date, total_qty, cost_price')
+                .eq('product_id', productId)
+                .gt('total_qty', 0)
+                .order('expiry_date', { ascending: true });
+            if (error) throw error;
+            return data || [];
+        }
+
+        // Splits `packs` across batches, earliest expiry first, whole packs only.
+        function allocate(batches, pack, packs) {
+            const parts = [];
+            let remaining = packs;
+            for (const b of batches) {
+                if (remaining <= 0) break;
+                const avail = Math.floor((Number(b.total_qty) || 0) / pack);
+                if (avail <= 0) continue;
+                const take = Math.min(avail, remaining);
+                parts.push({ batch: b, packs: take, rate: packRate(b, pack) });
+                remaining -= take;
+            }
+            return { parts, short: remaining };
+        }
+        function maxPacks(batches, pack) {
+            return batches.reduce((s, b) => s + Math.floor((Number(b.total_qty) || 0) / pack), 0);
+        }
+
+        // ---------- rows ----------
+        function newRow() {
+            const tr = document.createElement('tr');
+            tr._d = { product: null, batches: [], parts: [], short: 0, gross: 0 };
+            tr.innerHTML = `
+                <td style="position:relative;">
+                    <input type="text" class="qs-in qs-item" placeholder="Type item name..." autocomplete="off">
+                    <div class="qs-suggest"></div>
+                </td>
+                <td class="qs-pack" style="color:#475569;">--</td>
+                <td class="num qs-rate" style="color:#475569;">--</td>
+                <td><input type="number" class="qs-in qs-qty" min="1" step="1" inputmode="numeric" disabled></td>
+                <td class="num"><div class="qs-total-cell" tabindex="0">0.00</div></td>
+                <td><button type="button" class="qs-del" title="Remove row">&times;</button></td>`;
+            wireRow(tr);
+            return tr;
+        }
+
+        function addRow(focus) {
+            const tr = newRow();
+            rowsEl.appendChild(tr);
+            if (focus) tr.querySelector('.qs-item').focus();
+            return tr;
+        }
+
+        function lastRow() { return rowsEl.lastElementChild; }
+        function rowIsFilled(tr) { return !!(tr._d.product && tr._d.parts.length && !tr._d.short); }
+
+        function renderRow(tr) {
+            const d = tr._d;
+            const qtyEl = tr.querySelector('.qs-qty');
+            const rateEl = tr.querySelector('.qs-rate');
+            const packEl = tr.querySelector('.qs-pack');
+            const totalEl = tr.querySelector('.qs-total-cell');
+            if (!d.product) {
+                packEl.textContent = '--'; rateEl.textContent = '--'; totalEl.textContent = '0.00';
+                qtyEl.disabled = true; qtyEl.value = ''; qtyEl.classList.remove('bad');
+                return;
+            }
+            const pack = Number(d.product.conversion_rate) || 1;
+            packEl.textContent = pack + 's';
+            const first = d.batches[0];
+            rateEl.textContent = first ? Number(packRate(first, pack)).toFixed(2) : '--';
+            rateEl.title = d.parts.length > 1 ? `Spans ${d.parts.length} batches (each priced from its own cost)` : '';
+            totalEl.textContent = Number(d.gross).toFixed(2);
+            qtyEl.classList.toggle('bad', d.short > 0);
+            qtyEl.title = d.short > 0 ? `Only ${maxPacks(d.batches, pack)} pack(s) in stock` : '';
+        }
+
+        function recalcRow(tr) {
+            const d = tr._d;
+            if (!d.product) { d.parts = []; d.short = 0; d.gross = 0; return renderRow(tr); }
+            const pack = Number(d.product.conversion_rate) || 1;
+            const qty = parseInt(tr.querySelector('.qs-qty').value, 10) || 0;
+            if (qty <= 0) { d.parts = []; d.short = 0; d.gross = 0; }
+            else {
+                const a = allocate(d.batches, pack, qty);
+                d.parts = a.parts; d.short = a.short;
+                d.gross = round2(a.parts.reduce((s, p) => s + p.packs * p.rate, 0));
+            }
+            renderRow(tr);
+        }
+
+        // Totals computed from the rows' current state (also used at save).
+        function computeTotals(rows) {
+            const pct = Math.min(Math.max(parseFloat(discInput.value) || 0, 0), 100);
+            let grossAll = 0, grossTax = 0;
+            rows.forEach(tr => {
+                const d = tr._d;
+                if (!d.product || !d.gross) return;
+                const t = Number(d.product.tax_percent) || 0;
+                grossAll += d.gross;
+                if (t > 0) grossTax += d.gross * (t / (100 + t));
+            });
+            grossAll = round2(grossAll);
+            grossTax = round2(grossTax);
+            const discount = round2(grossAll * pct / 100);
+            const grand = round2(grossAll - discount);
+            // Stored split (after discount): tax scales with the discount.
+            const taxNet = round2(grossTax * (1 - pct / 100));
+            return { pct, grossAll, grossTax, subtotalGross: round2(grossAll - grossTax), discount, grand, taxNet, subtotalNet: round2(grand - taxNet) };
+        }
+
+        function refreshTotals() {
+            const t = computeTotals([...rowsEl.children]);
+            document.getElementById('retailQsSubtotal').textContent = money(t.subtotalGross);
+            document.getElementById('retailQsTax').textContent = money(t.grossTax);
+            document.getElementById('retailQsDiscAmt').textContent = '-' + money(t.discount);
+            document.getElementById('retailQsGrand').textContent = money(t.grand);
+            return t;
+        }
+
+        async function pickProduct(tr, product) {
+            const d = tr._d;
+            const itemEl = tr.querySelector('.qs-item');
+            try {
+                const batches = await fetchBatches(product.id);
+                if (!batches.length) {
+                    showToastSimple(`${product.product_name}: no stock available.`);
+                    return;
+                }
+                const pack = Number(product.conversion_rate) || 1;
+                if (!maxPacks(batches, pack)) {
+                    showToastSimple(`${product.product_name}: less than one full pack (${pack}) in stock -- use Retail POS for loose units.`);
+                    return;
+                }
+                d.product = product; d.batches = batches;
+                itemEl.value = product.product_name;
+                const qtyEl = tr.querySelector('.qs-qty');
+                qtyEl.disabled = false;
+                qtyEl.value = '1';
+                recalcRow(tr);
+                refreshTotals();
+                qtyEl.focus(); qtyEl.select();
+            } catch (err) {
+                console.error('Quick sale: could not load batches', err);
+                showToastSimple('Could not load stock for that item. Please try again.');
+            }
+        }
+
+        function clearRowProduct(tr) {
+            tr._d = { product: null, batches: [], parts: [], short: 0, gross: 0 };
+            recalcRow(tr);
+            refreshTotals();
+        }
+
+        function wireRow(tr) {
+            const itemEl = tr.querySelector('.qs-item');
+            const sg = tr.querySelector('.qs-suggest');
+            const qtyEl = tr.querySelector('.qs-qty');
+            const totalEl = tr.querySelector('.qs-total-cell');
+            let matches = [];
+            let active = -1;
+
+            const hide = () => { sg.style.display = 'none'; active = -1; };
+            const paintActive = () => [...sg.children].forEach((c, i) => c.classList.toggle('active', i === active));
+
+            async function showMatches() {
+                const q = itemEl.value.trim().toLowerCase();
+                if (!q) { hide(); return; }
+                let cat;
+                try { cat = await ensureCatalog(); } catch (e) { showToastSimple('Could not load the item list.'); return; }
+                const tokens = q.split(/\s+/).filter(Boolean);
+                matches = cat.filter(p => {
+                    const hay = ((p.product_name || '') + ' ' + (p.generic_name || '')).toLowerCase();
+                    return tokens.every(t => hay.includes(t));
+                }).sort((a, b) => {
+                    const ai = (a.total_stock > 0 ? 0 : 1), bi = (b.total_stock > 0 ? 0 : 1);
+                    if (ai !== bi) return ai - bi;
+                    const rank = p => (p.product_name.toLowerCase().startsWith(q) ? 0 : (p.generic_name || '').toLowerCase().startsWith(q) ? 1 : 2);
+                    const r = rank(a) - rank(b);
+                    return r !== 0 ? r : a.product_name.localeCompare(b.product_name);
+                }).slice(0, 15);
+                if (!matches.length) { sg.innerHTML = '<div class="qs-sg" style="color:#94a3b8; cursor:default;">No matching item</div>'; sg.style.display = 'block'; active = -1; return; }
+                sg.innerHTML = matches.map((p, i) =>
+                    `<div class="qs-sg" data-i="${i}"><span><span style="font-weight:600; color:#0f172a;">${esc(p.product_name)}</span>${p.generic_name ? `<br><small style="color:#64748b;">${esc(p.generic_name)}</small>` : ''}</span><small style="${p.total_stock > 0 ? '' : 'color:#dc2626;'}">${p.total_stock > 0 ? p.total_stock + ' in stock' : 'out of stock'}</small></div>`).join('');
+                sg.style.display = 'block';
+                active = 0; paintActive();
+            }
+
+            itemEl.addEventListener('input', () => {
+                if (tr._d.product) clearRowProduct(tr);
+                showMatches();
+            });
+            const scrollActive = () => { const el = sg.children[active]; if (el && el.scrollIntoView) el.scrollIntoView({ block: 'nearest' }); };
+            const listOpen = () => sg.style.display === 'block' && matches.length > 0;
+            itemEl.addEventListener('keydown', e => {
+                if (e.key === 'ArrowDown') {
+                    e.preventDefault();
+                    if (!listOpen()) { showMatches(); return; }
+                    active = (active + 1) % matches.length; paintActive(); scrollActive();
+                } else if (e.key === 'ArrowUp') {
+                    e.preventDefault();
+                    if (!listOpen()) return;
+                    active = (active - 1 + matches.length) % matches.length; paintActive(); scrollActive();
+                } else if (e.key === 'Enter' || (e.key === 'Tab' && !e.shiftKey)) {
+                    // Enter or Tab takes the highlighted item and jumps to Qty.
+                    if (listOpen() && matches[active]) { e.preventDefault(); const p = matches[active]; hide(); pickProduct(tr, p); }
+                } else if (e.key === 'Escape') { hide(); }
+            });
+            itemEl.addEventListener('focus', () => { if (itemEl.value.trim() && !tr._d.product) showMatches(); });
+            itemEl.addEventListener('blur', () => setTimeout(hide, 150));
+            sg.addEventListener('mousemove', e => {
+                const el = e.target.closest('.qs-sg[data-i]');
+                if (el) { const i = parseInt(el.dataset.i, 10); if (i !== active) { active = i; paintActive(); } }
+            });
+            sg.addEventListener('mousedown', e => {
+                const el = e.target.closest('.qs-sg[data-i]');
+                if (!el) return;
+                e.preventDefault();
+                const p = matches[parseInt(el.dataset.i, 10)];
+                hide();
+                if (p) pickProduct(tr, p);
+            });
+
+            qtyEl.addEventListener('input', () => { recalcRow(tr); refreshTotals(); });
+            qtyEl.addEventListener('keydown', e => {
+                if (e.key === 'Enter') { e.preventDefault(); totalEl.focus(); }
+            });
+
+            // Arriving at Total (Tab/Enter from Qty) starts the next row.
+            totalEl.addEventListener('focus', () => {
+                if (tr === lastRow() && rowIsFilled(tr)) addRow(true);
+                else if (tr === lastRow() && tr._d.short > 0) { qtyEl.focus(); }
+            });
+
+            tr.querySelector('.qs-del').addEventListener('click', () => {
+                if (rowsEl.children.length <= 1) { resetAll(); return; }
+                tr.remove();
+                refreshTotals();
+            });
+        }
+
+        function resetAll() {
+            rowsEl.innerHTML = '';
+            addRow(false);
+            discInput.value = '0';
+            document.getElementById('retailQsNote').value = '';
+            document.getElementById('retailQsPayType').value = 'Cash';
+            refreshTotals();
+        }
+
+        function setOpen(open) {
+            body.style.display = open ? 'block' : 'none';
+            toggleBtn.classList.toggle('open', open);
+            toggleBtn.setAttribute('aria-expanded', open ? 'true' : 'false');
+            toggleBtn.title = open ? 'Close quick sale' : 'Open quick sale';
+            if (open) {
+                if (!rowsEl.children.length) addRow(false);
+                ensureCatalog().catch(() => showToastSimple('Could not load the item list.'));
+                const first = rowsEl.querySelector('.qs-item');
+                if (first) first.focus();
+            }
+        }
+        toggleBtn.addEventListener('click', () => setOpen(body.style.display === 'none'));
+        discInput.addEventListener('input', refreshTotals);
+        clearBtn.addEventListener('click', resetAll);
+
+        // ---------- save ----------
+        async function deductStock(qtyByBatch) {
+            for (const [batchId, units] of qtyByBatch.entries()) {
+                let done = false;
+                for (let attempt = 0; attempt < 4 && !done; attempt++) {
+                    const { data: cur, error: readErr } = await supabaseClient.from('batches').select('total_qty').eq('id', batchId).maybeSingle();
+                    if (readErr || !cur) throw new Error('Could not read stock to deduct: ' + (readErr?.message || 'batch missing'));
+                    const { data: upd, error: updErr } = await supabaseClient.from('batches')
+                        .update({ total_qty: cur.total_qty - units })
+                        .eq('id', batchId).eq('total_qty', cur.total_qty).select('id');
+                    if (updErr) throw new Error('Stock deduction failed: ' + updErr.message);
+                    if (upd && upd.length) done = true;
+                }
+                if (!done) throw new Error('Stock changed while saving (another sale?). Please try again.');
+            }
+        }
+
+        async function save(andPrint) {
+            if (saving) return;
+            saving = true;
+            [saveBtn, savePrintBtn, clearBtn].forEach(b => b.disabled = true);
+            const origSave = saveBtn.innerHTML, origPrint = savePrintBtn.innerHTML;
+            (andPrint ? savePrintBtn : saveBtn).innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Saving...';
+            try {
+                const rows = [...rowsEl.children].filter(tr => tr._d.product && (parseInt(tr.querySelector('.qs-qty').value, 10) || 0) > 0);
+                if (!rows.length) { showToastSimple('Add at least one item.'); return; }
+
+                // Re-read live stock for every item so a stale screen can't oversell.
+                const shownGrand = computeTotals(rows).grand;
+                for (const tr of rows) {
+                    tr._d.batches = await fetchBatches(tr._d.product.id);
+                    recalcRow(tr);
+                }
+                const bad = rows.find(tr => tr._d.short > 0 || !tr._d.parts.length);
+                if (bad) {
+                    refreshTotals();
+                    alert(`Not enough stock for ${bad._d.product.product_name}. Only ${maxPacks(bad._d.batches, Number(bad._d.product.conversion_rate) || 1)} pack(s) available. Please reduce the quantity.`);
+                    return;
+                }
+                const t = computeTotals(rows);
+                refreshTotals();
+                if (Math.abs(t.grand - shownGrand) > 0.005) {
+                    alert('Prices or stock changed since you entered these items. The totals have been refreshed -- please check them and press Save again.');
+                    return;
+                }
+                if (t.grand <= 0) { showToastSimple('Total is zero -- nothing to save.'); return; }
+
+                const payType = document.getElementById('retailQsPayType').value || 'Cash';
+                const payNote = document.getElementById('retailQsNote').value.trim();
+                const prefix = companySettings.retail_prefix_regular || companySettings.invoice_prefix || 'GRI';
+
+                const items = [];
+                const qtyByBatch = new Map();
+                for (const tr of rows) {
+                    const p = tr._d.product;
+                    const pack = Number(p.conversion_rate) || 1;
+                    for (const part of tr._d.parts) {
+                        items.push({
+                            product_id: p.id,
+                            product_name: p.product_name,
+                            generic_name: p.generic_name || '',
+                            batch_id: part.batch.id,
+                            batch_number: part.batch.batch_number,
+                            expiry: part.batch.expiry_date ? new Date(part.batch.expiry_date).toLocaleDateString() : '',
+                            qty: part.packs,
+                            rate: part.rate,
+                            pack_size: pack + 's',
+                            tax_rate: Number(p.tax_percent) || 0,
+                            total: round2(part.packs * part.rate),
+                            days_supplied: 0,
+                            how_to_take: '',
+                            cost_per_unit: Number(part.batch.cost_price) || 0,
+                            available_qty: part.batch.total_qty
+                        });
+                        qtyByBatch.set(part.batch.id, (qtyByBatch.get(part.batch.id) || 0) + part.packs * pack);
+                    }
+                }
+
+                const makeId = () => `${prefix}-${new Date().getFullYear()}-${Date.now().toString().slice(-6)}-${Math.floor(Math.random() * 10000).toString().padStart(4, '0')}`;
+                const nowIso = new Date().toISOString();
+                const record = {
+                    sale_id: makeId(),
+                    type: 'COMPLETED',
+                    prefix: prefix,
+                    client_type: 'RETAIL',
+                    client_sub_type: 'REGULAR',
+                    customer_data: { type: 'REGULAR', walk_in: true, quick_sale: true, full_name: 'Walk-in Customer' },
+                    customer_id: null,
+                    claim_number: null,
+                    bypass_number: null,
+                    items: items,
+                    payment: { type: payType, note: payNote, discount_percent: t.pct, discount_amount: t.discount },
+                    subtotal: t.subtotalNet,
+                    tax: t.taxNet,
+                    grand_total: t.grand,
+                    status: 'COMPLETED',
+                    is_quotation: false,
+                    created_at: nowIso,
+                    updated_at: nowIso
+                };
+
+                let ins = await withAuthRetry(() => supabaseClient.from('sales').insert([record]).select());
+                if (ins.error && (ins.error.code === '23505' || /duplicate key/i.test(ins.error.message || ''))) {
+                    record.sale_id = makeId();
+                    ins = await withAuthRetry(() => supabaseClient.from('sales').insert([record]).select());
+                }
+                if (ins.error || !ins.data || !ins.data.length) {
+                    alert('❌ Error saving sale:\n' + (ins.error?.message || 'no row returned'));
+                    return;
+                }
+                const saved = ins.data[0];
+
+                const saleItems = items.map(i => ({
+                    sale_id: saved.id,
+                    product_id: i.product_id,
+                    batch_id: i.batch_id,
+                    quantity: i.qty,
+                    unit_price: i.rate,
+                    pack_size: i.pack_size,
+                    tax_rate: i.tax_rate,
+                    total: i.total,
+                    days_supplied: 0,
+                    cost_per_unit: i.cost_per_unit
+                }));
+                const itemRes = await withAuthRetry(() => supabaseClient.from('sale_items').insert(saleItems));
+                if (itemRes.error) {
+                    await supabaseClient.from('sales').delete().eq('id', saved.id);
+                    alert('❌ Failed to save sale items. Sale cancelled.\n' + itemRes.error.message);
+                    return;
+                }
+
+                try {
+                    await deductStock(qtyByBatch);
+                } catch (stockErr) {
+                    console.error('Quick sale stock error:', stockErr);
+                    alert(`⚠️ Sale ${saved.sale_id} was saved but stock could NOT be fully deducted:\n${stockErr.message}\n\nPlease tell an admin so stock can be corrected.`);
+                }
+
+                try {
+                    const { data: posted } = await supabaseClient.rpc('sale_accounting_entry_exists', { p_sale_id: saved.sale_id });
+                    if (posted === false) {
+                        alert(`⚠️ Sale ${saved.sale_id} saved and stock deducted, but its accounting entries were NOT found. Please tell an admin/accountant.`);
+                    }
+                } catch (accErr) { console.warn('Could not verify accounting entry:', accErr); }
+
+                showToastSimple(`Sale ${saved.sale_id} saved -- ${money(t.grand)}.`, 'success');
+                if (andPrint) {
+                    try { await printQuickSaleInvoice(saved); } catch (pe) { console.error('Quick sale print failed:', pe); }
+                }
+                resetAll();
+                rowsEl.querySelector('.qs-item')?.focus();
+            } catch (err) {
+                console.error('Quick sale error:', err);
+                alert('❌ Error saving sale:\n' + (err.message || err));
+            } finally {
+                saving = false;
+                [saveBtn, savePrintBtn, clearBtn].forEach(b => b.disabled = false);
+                saveBtn.innerHTML = origSave; savePrintBtn.innerHTML = origPrint;
+            }
+        }
+        saveBtn.addEventListener('click', () => save(false));
+        savePrintBtn.addEventListener('click', () => save(true));
+
+        resetAll();
+    }
+
+
+
+    // 🔥 ADDED: start the Quick Sale (+) card -- isolated so a problem there
+    // can never stop the main POS from initialising.
+    try { initQuickSale(); } catch (qsErr) { console.error('Quick Sale failed to initialise:', qsErr); }
 
 })();
 // ============================================
