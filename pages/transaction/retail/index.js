@@ -1227,7 +1227,35 @@
         return str;
     }
 
+    // SPEED (Oct 2026): the customer is already looked up / created the
+    // moment an NHIMA member or phone is picked on screen, and then the
+    // SAME lookups ran again at Save (2-4 extra round trips to the server
+    // while the cashier waits). The id found the first time is remembered
+    // here for 10 minutes so Save can skip them. Anything unusual (a
+    // failed save, no id found) clears/ignores the cache and falls back to
+    // the full lookup below, exactly as before.
+    const CUSTOMER_ID_CACHE_TTL_MS = 10 * 60 * 1000;
+    const retailCustomerIdCache = new Map();
+
+    function customerCacheKey(customerData, clientType) {
+        if (!customerData) return null;
+        if (clientType === 'NHIMA' && customerData.nhima_number) return `N|${customerData.nhima_number}`;
+        if (customerData.phone) return `P|${customerData.phone}`;
+        return null;
+    }
+
     async function ensureCustomerExists(customerData, clientType) {
+        const key = customerCacheKey(customerData, clientType);
+        if (key) {
+            const hit = retailCustomerIdCache.get(key);
+            if (hit && (Date.now() - hit.at) < CUSTOMER_ID_CACHE_TTL_MS) return hit.id;
+        }
+        const id = await ensureCustomerExistsUncached(customerData, clientType);
+        if (key && id) retailCustomerIdCache.set(key, { id, at: Date.now() });
+        return id;
+    }
+
+    async function ensureCustomerExistsUncached(customerData, clientType) {
         try {
             let phone = customerData.phone;
             let fullName = toProperCaseIfAllCaps(customerData.full_name || 'Unknown Customer');
@@ -4847,6 +4875,21 @@
     // ============================================
     // SAVE TRANSACTION - WITH ACCOUNTING, CUSTOMER, AND sale_items SUPPORT
     // ============================================
+    // SPEED (Oct 2026): after the sale + its items are saved, the stock
+    // deduction and accounting check now finish IN THE BACKGROUND while the
+    // invoice prints, instead of the cashier waiting for them first. These
+    // track that background work so (a) the next sale's stock step waits
+    // for the previous one to finish (no two stock updates on the same
+    // batch at once), and (b) closing the page mid-way gives a warning.
+    let retailBackgroundWork = Promise.resolve();
+    let retailBackgroundPending = 0;
+    window.addEventListener('beforeunload', (e) => {
+        if (retailBackgroundPending > 0) {
+            e.preventDefault();
+            e.returnValue = '';
+        }
+    });
+
     async function saveTransaction(status, prefix) {
         // 🔥 FIX: root cause of the duplicate-invoice bug found on 11
         // September -- two NHIMA invoices for the same claim number,
@@ -5158,6 +5201,7 @@
                 }
             } catch (dbError) {
                 console.error('Database error:', dbError);
+                retailCustomerIdCache.clear(); // in case a stale customer id was the cause
                 alert('❌ Error saving transaction:\n' + dbError.message);
                 return;
             }
@@ -5215,7 +5259,19 @@
                 // posting the accounting entries below, instead of waiting
                 // for it to finish first -- the two don't depend on each
                 // other's writes.
+                const previousBackgroundWork = retailBackgroundWork;
                 const stockUpdatePromise = (async () => {
+                    // Wait for the previous sale's background stock/accounting
+                    // work (usually already finished) before touching stock.
+                    await previousBackgroundWork;
+                    const stockProblems = []; // human-readable list of what did NOT go through
+                    const describeBatches = (ids) => {
+                        const names = [];
+                        for (const it of saleData.items) {
+                            if (!it.is_bundle && ids.includes(it.batch_id)) names.push(`${it.product_name || 'item'} x${it.qty}`);
+                        }
+                        return names.length ? names.join(', ') : 'unknown items';
+                    };
                     const qtyByBatch = new Map();
                     const bundleItems = [];
                     for (const item of saleData.items) {
@@ -5252,6 +5308,7 @@
 
                             if (compFetchError) {
                                 console.error('Bundle component batch fetch error:', compFetchError);
+                                stockProblems.push('bundle/kit component stock could not be read, so those components were not deducted');
                             } else {
                                 // Track how much of each fetched batch is still free
                                 // to allocate -- starts at its live total_qty minus
@@ -5286,7 +5343,7 @@
                     }
 
                     const batchIds = [...qtyByBatch.keys()];
-                    if (batchIds.length === 0) return;
+                    if (batchIds.length === 0) return stockProblems;
 
                     const { data: batches, error: fetchError } = await supabaseClient
                         .from('batches')
@@ -5295,7 +5352,8 @@
 
                     if (fetchError) {
                         console.error('Stock fetch error:', fetchError);
-                        return;
+                        stockProblems.push(`stock could not be read, nothing deducted for: ${describeBatches(batchIds)}`);
+                        return stockProblems;
                     }
 
                     await Promise.all((batches || []).map(async (batchData) => {
@@ -5308,10 +5366,12 @@
 
                         if (updateError) {
                             console.error('Stock update error for batch:', batchData.id, updateError);
+                            stockProblems.push(`not deducted: ${describeBatches([batchData.id])}`);
                         } else {
                             console.log(`Stock updated for batch ${batchData.id}: ${batchData.total_qty} -> ${newQty}`);
                         }
                     }));
+                    return stockProblems;
                 })();
 
                 // 🔥 CHANGED: accounting entries are now posted SERVER-SIDE
@@ -5358,33 +5418,56 @@
                     }
                 })();
 
-                const [, accountingOk] = await Promise.all([stockUpdatePromise, accountingPromise]);
+                // SPEED (Oct 2026): stock + accounting now finish in the
+                // background -- the invoice prints as soon as the sale and
+                // its items are saved. If ANYTHING in this step fails, a
+                // red banner stays on screen saying exactly what did not
+                // go through (same banner the accounting failure used).
+                // Editing an existing invoice still waits for it (below).
+                const afterSaleWork = (async () => {
+                    try {
+                        let stockProblems = [];
+                        let accountingOk = true;
+                        try {
+                            const [stockResult, accResult] = await Promise.all([
+                                stockUpdatePromise.catch(e => {
+                                    console.error('Stock step crashed:', e);
+                                    return [`stock step failed unexpectedly (${e?.message || e}) -- check stock for this sale's items`];
+                                }),
+                                accountingPromise
+                            ]);
+                            stockProblems = Array.isArray(stockResult) ? stockResult : [];
+                            accountingOk = accResult;
+                        } catch (e) {
+                            console.error('After-sale step crashed:', e);
+                            accountingOk = false;
+                        }
 
-                // 🔥 ADDED: a failed accounting post used to be logged to
-                // the console ONLY -- the sale saved and stock deducted
-                // normally, but zero journal entries were created and
-                // nothing on screen ever showed it. This happened for real
-                // (3 NHIMA sales, Sep 2026 -- traced to journal_entries'
-                // row-level-security policy rejecting the insert whenever
-                // the login session had gone stale/expired) and went
-                // unnoticed until a mismatch turned up in the financial
-                // statements. Now: an impossible-to-miss alert so whoever
-                // is at the till knows to flag it, instead of it silently
-                // vanishing.
-                if (accountingOk === false) {
-                    // 🔥 CHANGED: was a blocking alert() -- easy to
-                    // dismiss/miss in a busy till queue, and it froze the
-                    // page until clicked. Now a persistent banner that
-                    // stays on screen (across this page's other actions)
-                    // until someone explicitly dismisses it, so it can't
-                    // vanish unnoticed the way it did for real on
-                    // 2026-09-05.
-                    showPersistentFailureBanner(
-                        `⚠️ Sale ${saleData.sale_id} saved and stock deducted, but the accounting entries FAILED to post ` +
-                        `(often a stale login session -- try logging out and back in). Tell an admin/accountant so the ` +
-                        `journal entries can be posted manually for this sale.`
-                    );
-                }
+                        const esc = (t) => String(t).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+                        const failed = [];
+                        if (stockProblems.length > 0) {
+                            failed.push(`<strong>STOCK was NOT fully deducted:</strong> ${stockProblems.map(esc).join('; ')}`);
+                        }
+                        if (accountingOk === false) {
+                            failed.push('<strong>ACCOUNTING entries were NOT posted</strong> (often a stale login session -- try logging out and back in)');
+                        }
+                        if (failed.length > 0) {
+                            showPersistentFailureBanner(
+                                `⚠️ Sale ${esc(saleData.sale_id)} was saved and the invoice printed, but: ${failed.join(' &nbsp;|&nbsp; ')}. ` +
+                                `Tell an admin so this can be corrected.`
+                            );
+                        }
+                    } catch (e) {
+                        console.error('After-sale reporting failed:', e);
+                    }
+                })();
+
+                retailBackgroundPending++;
+                retailBackgroundWork = afterSaleWork.finally(() => { retailBackgroundPending--; });
+                // Editing an existing invoice is rarer and has already
+                // restored/removed the old stock + journals above, so keep
+                // that path fully sequential (wait for it to finish).
+                if (editingSaleDbId) await afterSaleWork;
             } else {
                 console.log('Quotation saved - stock not affected');
             }
@@ -5405,7 +5488,7 @@
             // token queue ticket (i.e. the cashier got here via "Open in
             // POS" on the queue bar). A normal walk-in sale with no
             // ticket gets no popup at all, just the print.
-            await new Promise(resolve => setTimeout(resolve, 500));
+            await new Promise(resolve => setTimeout(resolve, 100));
             printSale();
 
             if (status === 'COMPLETED' && !isQuotation && typeof window.__onRetailSaleSaved === 'function') {
