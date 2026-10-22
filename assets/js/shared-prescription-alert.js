@@ -21,7 +21,7 @@
 (function () {
     // ---- settings you may want to change -------------------------------
     // Address of the shop admin page (opened when the button is clicked).
-    const SHOP_ADMIN_URL = 'https://gogriffins.com/pages/admin/index.html#prescriptions';
+    const SHOP_ADMIN_URL = 'https://griffinsmedicals.com/pages/admin/index.html#prescriptions';
     // Shop database (public anon key -- it can only call the count function).
     const SHOP_SUPABASE_URL = 'https://depqlvzajukhhbiztnhj.supabase.co';
     const SHOP_SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImRlcHFsdnphanVraGhiaXp0bmhqIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjQ1MzQ2MTgsImV4cCI6MjA4MDExMDYxOH0.W4R4XFbc8-a6OrX3sNLF4QPaP8pJH0A10o-m2WwqSN8';
