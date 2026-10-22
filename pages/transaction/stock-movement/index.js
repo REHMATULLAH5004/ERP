@@ -374,13 +374,18 @@
                 // Use opening_qty from batches
                 openingStock = productBatches.reduce((sum, b) => sum + (b.opening_qty || 0), 0);
             } else if (productBatches.length > 0) {
-                // Fallback: First batch's total_qty is opening stock
-                // Sort by created_at to get the earliest batch
-                const sortedBatches = [...productBatches].sort((a, b) => 
+                // Fallback (no opening_qty recorded anywhere): the earliest batch counts as
+                // opening stock -- but ONLY if it did not come in through a purchase. A batch
+                // that matches a GRN line is stock-in (Purchases), not opening; treating its
+                // current quantity as opening double-counted it (e.g. Lycorva: opening 75 +
+                // purchases 200 - sales 125 shown as 75 on hand).
+                const cameFromGRN = b => state.grnLines.some(gl =>
+                    gl.product_id === product.id && String(gl.batch_number) === String(b.batch_number));
+                const sortedBatches = [...productBatches].sort((a, b) =>
                     new Date(a.created_at) - new Date(b.created_at)
                 );
-                // The first batch's total quantity is the opening stock
-                openingStock = sortedBatches[0]?.total_qty || 0;
+                const first = sortedBatches[0];
+                openingStock = (first && !cameFromGRN(first)) ? (first.total_qty || 0) : 0;
             }
 
             // ---- PURCHASES (Stock In) ----
@@ -476,13 +481,16 @@
 
             // ---- CALCULATE TOTALS ----
             const totalStockOut = totalSold + totalDonated + totalWrittenOff + totalExpired;
-            const totalStockIn = totalPurchased;
+            // Total Stock In = everything that came in: opening stock + purchases.
+            // (It used to show purchases only, so a product with opening stock looked like it
+            // had less coming in than it started with.)
+            const totalStockIn = openingStock + totalPurchased;
 
             // 🔥 ADDED: the actual "Opening + Movement = Closing" check --
             // now that Stock Take Variance is included, this should hold
             // for every product. If it doesn't, something else is moving
             // stock without going through any of the tracked channels.
-            const expectedClosing = openingStock + totalStockIn - totalStockOut + totalStockTakeVariance;
+            const expectedClosing = totalStockIn - totalStockOut + totalStockTakeVariance;
             const isReconciled = Math.abs(expectedClosing - currentStock) < 0.01;
 
             return {
