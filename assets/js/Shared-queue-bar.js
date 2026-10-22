@@ -14,7 +14,8 @@
 // sessionStorage.getItem('staffCounter'). This file just reads that
 // value and derives which queue to show from it:
 //   'Counter 1' / 'Counter 2' / 'Counter 3'  -> billing stage
-//   'Dispatch'                                -> dispensing stage
+//   'Dispensing 1' / 'Dispensing 2' / 'Dispensing 3' -> dispensing stage
+//   (the old single 'Dispatch' counter is treated as 'Dispensing 1')
 //   nothing stored (skipped at login)         -> no bar at all
 //
 // Talks to the same `queue_tickets` table + RPC functions
@@ -32,15 +33,19 @@ window.initQueueBar = function initQueueBar() {
         return;
     }
 
-    const ALL_COUNTER_OPTIONS = ['Counter 1', 'Counter 2', 'Counter 3', 'Dispatch'];
+    const ALL_COUNTER_OPTIONS = ['Counter 1', 'Counter 2', 'Counter 3', 'Dispensing 1', 'Dispensing 2', 'Dispensing 3'];
 
     function stageForCounter(c) {
-        if (c === 'Dispatch') return 'dispensing';
+        if (c === 'Dispatch' || c === 'Dispensing 1' || c === 'Dispensing 2' || c === 'Dispensing 3') return 'dispensing';
         if (c === 'Counter 1' || c === 'Counter 2' || c === 'Counter 3') return 'billing';
         return null; // unrecognized -- e.g. someone skipped at login
     }
 
     let counter = sessionStorage.getItem('staffCounter') || null;
+    // 🔥 CHANGED: dispensing now has 3 counters (Dispensing 1/2/3). A tab that
+    // was signed in before this change may still hold the old 'Dispatch' --
+    // treat it as Dispensing 1 so the TV and the queue show the same counter.
+    if (counter === 'Dispatch') { counter = 'Dispensing 1'; sessionStorage.setItem('staffCounter', counter); }
     let stage = stageForCounter(counter);
 
     // Nothing chosen at login (skipped, or an Admin/Manager/Accountant
@@ -127,8 +132,8 @@ window.initQueueBar = function initQueueBar() {
         document.getElementById('queueBarChangeCounterBtn').addEventListener('click', () => {
             askForCounter(newCounter => {
                 const newStage = stageForCounter(newCounter);
-                counter = newCounter;
-                sessionStorage.setItem('staffCounter', newCounter);
+                counter = newCounter === 'Dispatch' ? 'Dispensing 1' : newCounter;
+                sessionStorage.setItem('staffCounter', counter);
 
                 if (newStage !== stage) {
                     // Switched from billing to dispensing (or vice versa) --
@@ -189,7 +194,7 @@ window.initQueueBar = function initQueueBar() {
         renderServingState();
         // 🔥 ADDED: let any other queue UI on this same page (e.g. the
         // Dashboard's own "Dispensing Queue" card, shown only for
-        // Dispatch logins) know the serving ticket changed, so both stay
+        // Dispensing logins) know the serving ticket changed, so both stay
         // in sync immediately without a page reload.
         window.dispatchEvent(new CustomEvent('queueServingChanged', { detail: { stage, ticket } }));
     }
@@ -396,7 +401,8 @@ window.initQueueBar = function initQueueBar() {
                 .select('*')
                 .eq('queue_date', today)
                 .eq('status', servingStatus)
-                .eq(counterField, counter)
+                // tickets called before the rename may still say 'Dispatch' (= Dispensing 1)
+                .in(counterField, counter === 'Dispensing 1' ? ['Dispensing 1', 'Dispatch'] : [counter])
                 .order(isBilling ? 'called_billing_at' : 'called_dispensing_at', { ascending: false })
                 .limit(1)
                 .maybeSingle();

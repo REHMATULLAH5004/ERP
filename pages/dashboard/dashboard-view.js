@@ -1293,7 +1293,8 @@
     // ============================================
     // 🔥 ADDED: CALL NEXT PATIENT (DISPATCH ONLY)
     // ============================================
-    // Shown only when THIS login chose "Dispatch" as their counter at
+    // Shown only when THIS login chose a Dispensing counter (Dispensing 1/2/3;
+    // the old single "Dispatch" counts as Dispensing 1) as their counter at
     // login (assets/js/auth.js's counter picker, stored in
     // sessionStorage.staffCounter) -- a role check alone isn't enough,
     // since a Pharmacist login might not be covering dispatch today.
@@ -1311,7 +1312,10 @@
         const card = document.getElementById('dashDispatchQueueCard');
         if (!card) return;
 
-        if (sessionStorage.getItem('staffCounter') !== 'Dispatch') return; // not covering dispatch today
+        // 🔥 CHANGED: dispensing has 3 counters now -- this card works for whichever one this login chose
+        let myDispCounter = sessionStorage.getItem('staffCounter');
+        if (myDispCounter === 'Dispatch') myDispCounter = 'Dispensing 1';
+        if (myDispCounter !== 'Dispensing 1' && myDispCounter !== 'Dispensing 2' && myDispCounter !== 'Dispensing 3') return; // not covering dispensing today
         card.style.display = 'block';
 
         const SERVING_KEY = 'queueServingTicket_dispensing';
@@ -1532,7 +1536,7 @@
             btn.disabled = true;
             btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Calling...';
             try {
-                const { data, error } = await supabaseClient.rpc('call_next_ticket', { p_stage: 'dispensing', p_counter: 'Dispatch' });
+                const { data, error } = await supabaseClient.rpc('call_next_ticket', { p_stage: 'dispensing', p_counter: myDispCounter });
                 if (error) throw error;
                 // 🔥 FIX: call_next_ticket() is declared to RETURN a single
                 // queue_tickets row (not SETOF), so when there's genuinely

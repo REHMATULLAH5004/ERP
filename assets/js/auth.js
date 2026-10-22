@@ -31,7 +31,7 @@ document.addEventListener('DOMContentLoaded', () => {
     // 🔥 ADDED: counter picker shown right after a FRESH sign-in
     // ============================================
     // Asks which counter the person is working from (Counter 1/2/3 for
-    // billing, or Dispatch for the pharmacist's dispensing station) so
+    // billing, or Dispensing 1/2/3 for the pharmacist's dispensing stations) so
     // assets/js/shared-queue-bar.js knows which "Call Next" queue to show
     // app-wide, without asking again itself on every page. Built
     // dynamically here (same pattern as other in-app modals, e.g.
@@ -49,11 +49,13 @@ document.addEventListener('DOMContentLoaded', () => {
                     <i class="fa-solid fa-cash-register" style="font-size:2rem; color:#2563eb;"></i>
                     <h3 style="margin:12px 0 4px;">Which counter are you working from?</h3>
                     <p style="color:#64748b; font-size:0.85rem; margin:0 0 18px;">Used to call patients and show the right counter on their token.</p>
-                    <div id="loginCounterOptions" style="display:grid; grid-template-columns:1fr 1fr; gap:8px;">
+                    <div id="loginCounterOptions" style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:8px;">
                         <button type="button" class="login-counter-btn" data-opt="Counter 1" style="padding:14px 8px; border:1px solid #e2e8f0; border-radius:8px; background:white; color:#0f172a; font-weight:600; cursor:pointer; font-size:0.9rem;">Counter 1</button>
                         <button type="button" class="login-counter-btn" data-opt="Counter 2" style="padding:14px 8px; border:1px solid #e2e8f0; border-radius:8px; background:white; color:#0f172a; font-weight:600; cursor:pointer; font-size:0.9rem;">Counter 2</button>
                         <button type="button" class="login-counter-btn" data-opt="Counter 3" style="padding:14px 8px; border:1px solid #e2e8f0; border-radius:8px; background:white; color:#0f172a; font-weight:600; cursor:pointer; font-size:0.9rem;">Counter 3</button>
-                        <button type="button" class="login-counter-btn" data-opt="Dispatch" style="padding:14px 8px; border:1px solid #e2e8f0; border-radius:8px; background:white; color:#0f172a; font-weight:600; cursor:pointer; font-size:0.9rem;">Dispatch</button>
+                        <button type="button" class="login-counter-btn" data-opt="Dispensing 1" style="padding:14px 8px; border:1px solid #e2e8f0; border-radius:8px; background:white; color:#0f172a; font-weight:600; cursor:pointer; font-size:0.9rem;">Dispensing 1</button>
+                        <button type="button" class="login-counter-btn" data-opt="Dispensing 2" style="padding:14px 8px; border:1px solid #e2e8f0; border-radius:8px; background:white; color:#0f172a; font-weight:600; cursor:pointer; font-size:0.9rem;">Dispensing 2</button>
+                        <button type="button" class="login-counter-btn" data-opt="Dispensing 3" style="padding:14px 8px; border:1px solid #e2e8f0; border-radius:8px; background:white; color:#0f172a; font-weight:600; cursor:pointer; font-size:0.9rem;">Dispensing 3</button>
                     </div>
                     <a href="#" id="loginCounterSkip" style="display:inline-block; margin-top:16px; color:#94a3b8; font-size:0.8rem; text-decoration:none;">I'm not working a counter today</a>
                 </div>

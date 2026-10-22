@@ -33,109 +33,112 @@
     counters (Counter 1/2/3) that can all be serving different patients
     at once, so a single "now serving" box was hiding whichever ones
     weren't the most-recently-called. See COUNTERS/renderStage() below.
+
+    🔥 CHANGED AGAIN: the board is now ANIMATED -- waiting patients stand
+    in a waiting area, walk to the counter when called, and walk on to the
+    dispensing queue / out when finished (Billing: Counter 1-3, Dispensing:
+    Dispensing 1-3). See "ANIMATED BOARD" in the script below. Voice, chime,
+    realtime, the 5s poll and the 3 AM reload are unchanged.
     -->
 
     <style>
-        * { box-sizing: border-box; }
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        html, body { width: 100%; height: 100%; overflow: hidden; }
         body {
-            margin: 0;
-            min-height: 100vh;
-            background: #0f172a;
-            color: #f1f5f9;
-            font-family: 'Segoe UI', Arial, sans-serif;
-            display: flex;
-            flex-direction: column;
+            position: relative;
+            font-family: 'Segoe UI', 'Helvetica Neue', Arial, sans-serif;
+            background: #e9f1f8;
+            color: #0f172a;
         }
-        header {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            padding: 20px 40px;
-            border-bottom: 1px solid #1e293b;
+        /* Everything is laid out on a fixed 1920x1080 board that is scaled to
+           fit whatever screen/TV the page is opened on (see fitBoard()). */
+        #tv {
+            position: absolute; left: 0; top: 0; width: 1920px; height: 1080px;
+            transform-origin: 0 0; overflow: hidden;
+            background: linear-gradient(180deg, #e9f1f8 0%, #f5f9fc 100%);
         }
-        header .brand { font-size: 1.4rem; font-weight: 700; display: flex; align-items: center; gap: 10px; }
-        header .brand i { color: #3b82f6; }
-        header .clock { font-size: 1.3rem; font-weight: 600; color: #94a3b8; font-variant-numeric: tabular-nums; }
+        .abs { position: absolute; }
+        .top { left: 0; top: 0; width: 1920px; height: 64px; display: flex; align-items: center; justify-content: space-between; padding: 0 40px; background: #fff; border-bottom: 1px solid #d6e2ee; }
+        .brand { font-size: 26px; font-weight: 700; color: #0f3d7a; letter-spacing: .3px; display: flex; align-items: center; gap: 10px; }
+        .brand i { color: #2563eb; }
+        .top-right { display: flex; align-items: center; gap: 20px; }
+        .clock { font-size: 28px; font-weight: 600; color: #475569; font-variant-numeric: tabular-nums; }
+        #voiceToggleBtn { background: #f1f5f9; border: 1px solid #cbd5e1; color: #475569; border-radius: 8px; padding: 8px 14px; font-size: 20px; cursor: pointer; }
 
-        main {
-            flex: 1;
-            display: grid;
-            grid-template-columns: 1fr 1fr;
-            gap: 24px;
-            padding: 24px 40px 40px;
-        }
-        .col {
-            background: #111827;
-            border-radius: 16px;
-            border: 1px solid #1e293b;
-            display: flex;
-            flex-direction: column;
-            overflow: hidden;
-        }
-        .col-header {
-            padding: 16px 28px;
-            font-size: 1rem;
-            font-weight: 700;
-            text-transform: uppercase;
-            letter-spacing: 0.08em;
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-        }
-        .col-header.billing { background: rgba(37,99,235,0.15); color: #60a5fa; }
-        .col-header.dispensing { background: rgba(217,119,6,0.15); color: #fbbf24; }
+        .b { --c: #0f4fa8; --c2: #2563eb; --soft: #e3eefc; --floor: #eef4fc; }
+        .g { --c: #0e7a4a; --c2: #16a05f; --soft: #e2f4ea; --floor: #eef8f2; }
 
-        /* 🔥 ADDED: "Now Serving" table -- Counter | Patient, one row per
-           counter, so every counter's current patient is visible at once. */
-        .counter-table { width: 100%; border-collapse: collapse; }
-        .counter-table thead th {
-            text-align: left;
-            font-size: 0.72rem;
-            text-transform: uppercase;
-            letter-spacing: 0.08em;
-            color: #64748b;
-            font-weight: 700;
-            padding: 12px 28px;
-            background: #0b1220;
-            border-bottom: 1px solid #1e293b;
-        }
-        .counter-table tbody td {
-            padding: 18px 28px;
-            border-bottom: 1px solid #1e293b;
-            vertical-align: middle;
-        }
-        .counter-table td.counter-name { font-weight: 700; color: #94a3b8; font-size: 1rem; width: 38%; white-space: nowrap; }
-        .counter-table tr.serving td.patient-cell { font-size: 1.5rem; font-weight: 700; color: #f1f5f9; }
-        .counter-table tr.idle td.patient-cell { font-size: 1.1rem; font-style: italic; color: #475569; }
-        .counter-table .token-badge {
-            display: inline-block;
-            background: rgba(255,255,255,0.08);
-            padding: 3px 10px;
-            border-radius: 6px;
-            font-weight: 800;
-            margin-right: 10px;
-            font-variant-numeric: tabular-nums;
-        }
-        .counter-table.billing .token-badge { color: #60a5fa; }
-        .counter-table.dispensing .token-badge { color: #fbbf24; }
-        .counter-table tr.pulse { animation: rowPulse 1.1s ease; }
-        @keyframes rowPulse {
-            0% { background: rgba(37,99,235,0.4); }
-            100% { background: transparent; }
-        }
+        .banner { position: relative; width: 912px; height: 100px; border-radius: 12px; background: var(--c); color: #fff; text-align: center; padding-top: 10px; box-shadow: 0 4px 14px rgba(0,0,0,.12); }
+        .banner h1 { font-size: 54px; line-height: 1; font-weight: 800; letter-spacing: 2px; }
+        .banner p { font-size: 24px; margin-top: 4px; font-weight: 600; opacity: .95; }
+        .bl, .br { position: absolute; top: 0; height: 100px; display: flex; align-items: center; gap: 12px; }
+        .bl { left: 26px; } .br { right: 26px; }
+        .bl .n { font-size: 60px; font-weight: 800; line-height: 1; min-width: 40px; text-align: center; }
+        .bl .t { font-size: 22px; font-weight: 600; opacity: .9; text-align: left; }
+        .br .nx { display: flex; flex-direction: column; align-items: center; gap: 2px; font-size: 15px; font-weight: 700; letter-spacing: 2px; }
+        .br .nx b { font-size: 40px; letter-spacing: 0; background: #fff; color: var(--c); border-radius: 10px; padding: 0 16px; line-height: 1.15; font-variant-numeric: tabular-nums; min-width: 90px; }
 
-        .waiting-strip { padding: 10px 28px; font-size: 0.85rem; color: #94a3b8; border-bottom: 1px solid #1e293b; }
-        .waiting-strip strong { color: #f1f5f9; }
+        /* counter card */
+        .cc { position: absolute; width: 288px; height: 396px; background: #fff; border-radius: 14px; border: 3px solid var(--soft); overflow: hidden; box-shadow: 0 3px 10px rgba(15,23,42,.08); transition: border-color .3s, box-shadow .3s; }
+        .plate { height: 56px; background: var(--c2); color: #fff; font-size: 26px; font-weight: 700; text-align: center; padding-top: 12px; padding-left: 44px; position: relative; }
+        .circle { position: absolute; left: 12px; top: 7px; width: 40px; height: 40px; border-radius: 50%; background: #fff; color: var(--c); font-weight: 800; font-size: 24px; display: flex; align-items: center; justify-content: center; border: 3px solid var(--c); padding: 0; }
+        .art { position: relative; height: 150px; background: linear-gradient(#f4f8fc, #e8eff7); overflow: hidden; }
+        .art .clerk { position: absolute; left: 112px; top: 14px; width: 64px; height: 128px; }
+        .desk { position: absolute; left: 0; right: 0; bottom: 0; height: 70px; background: var(--c); border-top: 8px solid var(--c2); }
+        .desk:after { content: ""; position: absolute; left: 18px; right: 18px; top: 14px; height: 6px; border-radius: 3px; background: rgba(255,255,255,.25); }
+        .monitor { position: absolute; left: 30px; bottom: 66px; width: 54px; height: 38px; background: #1e293b; border-radius: 4px; border: 3px solid #334155; }
+        .monitor:after { content: ""; position: absolute; left: 12px; right: 12px; bottom: -12px; height: 9px; background: #334155; }
+        .monitor i { position: absolute; left: 6px; right: 6px; top: 7px; height: 3px; background: #38bdf8; box-shadow: 0 7px 0 #38bdf8, 0 14px 0 #7dd3fc; }
+        .zone { position: relative; height: 190px; background: var(--floor); border-top: 3px solid var(--soft); }
+        .info { position: absolute; left: 98px; right: 2px; top: 12px; text-align: center; }
+        .lab { font-size: 15px; white-space: nowrap; font-weight: 700; letter-spacing: 1px; text-transform: uppercase; color: #64748b; min-height: 20px; }
+        .tok { font-size: 60px; line-height: 1.05; font-weight: 800; color: var(--c); font-variant-numeric: tabular-nums; }
+        .pn { font-size: 23px; font-weight: 600; color: #1e293b; line-height: 1.15; word-break: break-word; }
+        .cc.idle .tok { font-size: 48px; color: #b6c2d0; }
+        .cc.idle .pn { color: #94a3b8; font-size: 20px; font-weight: 500; }
+        .cc.serving { border-color: var(--c2); }
+        .cc.called { border-color: #f59e0b; box-shadow: 0 0 0 7px rgba(245,158,11,.30), 0 3px 10px rgba(15,23,42,.1); animation: pulse 1s ease-in-out infinite; }
+        .cc.called .lab { color: #b45309; }
+        @keyframes pulse { 50% { box-shadow: 0 0 0 13px rgba(245,158,11,.10), 0 3px 10px rgba(15,23,42,.1); } }
 
-        .recent-list { flex: 1; overflow-y: auto; padding: 10px 0; }
-        .recent-row { display: flex; justify-content: space-between; align-items: center; padding: 10px 28px; font-size: 1rem; color: #cbd5e1; }
-        .recent-row .rn { font-weight: 700; }
-        .recent-row .rc { color: #64748b; font-size: 0.85rem; }
-        .recent-row.done { opacity: 0.55; }
+        /* waiting area */
+        .qz { width: 912px; height: 190px; border-radius: 14px; background: var(--floor); border: 3px solid var(--soft); }
+        .qz .floor { position: absolute; left: 0; right: 0; bottom: 12px; height: 3px; background: repeating-linear-gradient(90deg, #cbd8e6 0 18px, transparent 18px 30px); }
+        .qz .empty { position: absolute; left: 0; right: 0; top: 70px; text-align: center; font-size: 28px; color: #94a3b8; font-weight: 600; }
+        .more { position: absolute; right: 18px; top: 12px; font-size: 24px; font-weight: 700; color: var(--c); background: #fff; border-radius: 30px; padding: 6px 16px; border: 2px solid var(--soft); }
+        .pill { width: 912px; height: 74px; background: var(--c); color: #fff; border-radius: 40px; padding: 0 28px; font-size: 26px; font-weight: 600; display: flex; align-items: center; gap: 18px; box-shadow: 0 4px 12px rgba(0,0,0,.14); }
 
-        .empty-state { padding: 40px 28px; text-align: center; color: #475569; }
-
-        footer { text-align: center; padding: 10px; font-size: 0.75rem; color: #334155; }
+        /* people */
+        #stage { position: absolute; left: 0; top: 0; width: 1920px; height: 1080px; pointer-events: none; z-index: 10; }
+        .fig { position: absolute; left: 0; top: 0; width: 64px; height: 128px; will-change: transform; }
+        .fig .flip { position: absolute; inset: 0; transition: transform .2s; }
+        .fig svg { width: 64px; height: 128px; overflow: visible; display: block; }
+        .fig .shadow { position: absolute; left: 8px; bottom: -4px; width: 48px; height: 10px; border-radius: 50%; background: rgba(15,23,42,.14); }
+        .tag { position: absolute; left: 50%; top: -36px; transform: translateX(-50%); white-space: nowrap; background: var(--c2, #2563eb); color: #fff; font-weight: 800; font-size: 24px; border-radius: 10px; padding: 1px 12px; font-variant-numeric: tabular-nums; box-shadow: 0 2px 6px rgba(0,0,0,.18); }
+        .tag.pri { box-shadow: 0 0 0 3px #f59e0b; }
+        .tag.next:after { content: "UP NEXT"; position: absolute; left: 50%; transform: translateX(-50%); top: -17px; font-size: 12px; letter-spacing: 1.5px; color: #fff; background: #f59e0b; border-radius: 6px; padding: 0 6px; }
+        .nm { position: absolute; left: 50%; top: 136px; transform: translateX(-50%); font-size: 18px; font-weight: 600; color: #475569; white-space: nowrap; max-width: 110px; overflow: hidden; text-overflow: ellipsis; }
+        .fig.hidetag .tag, .fig.hidetag .nm { display: none; }
+        .fig .lg { transform-box: fill-box; transform-origin: 50% 0; }
+        .fig .ar { transform-box: fill-box; transform-origin: 50% 8%; }
+        .fig.walk .legL { animation: swA .5s ease-in-out infinite alternate; }
+        .fig.walk .legR { animation: swB .5s ease-in-out infinite alternate; }
+        .fig.walk .armL { animation: swB .5s ease-in-out infinite alternate; }
+        .fig.walk .armR { animation: swA .5s ease-in-out infinite alternate; }
+        .fig.walk .flip { animation: bob .25s ease-in-out infinite alternate; }
+        @keyframes swA { from { transform: rotate(-26deg); } to { transform: rotate(26deg); } }
+        @keyframes swB { from { transform: rotate(26deg); } to { transform: rotate(-26deg); } }
+        @keyframes bob { from { margin-top: 0; } to { margin-top: -4px; } }
+        .fig.idle .flip { animation: breathe 3.2s ease-in-out infinite; animation-delay: var(--d, 0s); }
+        @keyframes breathe { 50% { margin-top: -2px; } }
+        .fig.serve .armR { animation: give 2.4s ease-in-out infinite; }
+        @keyframes give { 0%, 100% { transform: rotate(0); } 30%, 60% { transform: rotate(-70deg); } }
+        .clerk .armL { animation: type .5s ease-in-out infinite alternate; }
+        .clerk .armR { animation: type .5s ease-in-out infinite alternate-reverse; }
+        .clerk .ar { transform-box: fill-box; transform-origin: 50% 8%; }
+        @keyframes type { from { transform: rotate(-10deg); } to { transform: rotate(14deg); } }
+        .clerk .hd { animation: nod 3s ease-in-out infinite; transform-box: fill-box; transform-origin: 50% 100%; }
+        @keyframes nod { 50% { transform: rotate(4deg); } }
 
         #soundGate {
             position: fixed; inset: 0; background: rgba(15,23,42,0.92);
@@ -153,40 +156,19 @@
         <button id="soundGateBtn"><i class="fa-solid fa-volume-high"></i> Tap to Start Display (Sound &amp; Voice)</button>
     </div>
 
-    <header>
-        <div class="brand"><i class="fa-solid fa-globe"></i> Griffins Medicals Limited</div>
-        <div style="display:flex; align-items:center; gap:16px;">
-            <button id="voiceToggleBtn" title="Turn voice announcements on/off" style="background:#1e293b; border:1px solid #334155; color:#cbd5e1; border-radius:8px; padding:8px 12px; font-size:1rem; cursor:pointer;">
-                <i class="fa-solid fa-volume-high"></i>
-            </button>
-            <div class="clock" id="tvClock">--:--:--</div>
+    <div id="tv">
+        <div class="abs top">
+            <div class="brand"><i class="fa-solid fa-globe"></i> Griffins Medicals Limited</div>
+            <div class="top-right">
+                <button id="voiceToggleBtn" title="Turn voice announcements on/off">
+                    <i class="fa-solid fa-volume-high"></i>
+                </button>
+                <div class="clock" id="tvClock">--:--:--</div>
+            </div>
         </div>
-    </header>
-
-    <main>
-        <section class="col">
-            <div class="col-header billing"><span><i class="fa-solid fa-cash-register"></i> Billing</span></div>
-            <table class="counter-table billing">
-                <thead><tr><th>Counter</th><th>Patient</th></tr></thead>
-                <tbody id="billingCounterTableBody"></tbody>
-            </table>
-            <div class="waiting-strip"><strong id="billingWaitingCount">0</strong> waiting</div>
-            <div class="recent-list" id="billingRecentList"></div>
-        </section>
-
-        <section class="col">
-            <div class="col-header dispensing"><span><i class="fa-solid fa-pills"></i> Dispensing</span></div>
-            <table class="counter-table dispensing">
-                <thead><tr><th>Counter</th><th>Patient</th></tr></thead>
-                <tbody id="dispensingCounterTableBody"></tbody>
-            </table>
-            <div class="waiting-strip"><strong id="dispensingWaitingCount">0</strong> waiting</div>
-            <div class="recent-list" id="dispensingRecentList"></div>
-        </section>
-    </main>
-
-    <footer>Queue display -- updates automatically</footer>
-
+        <div id="root"></div>
+        <div id="stage"></div>
+    </div>
     <script>
     (function initTvDisplay() {
         if (typeof supabaseClient === 'undefined') {
@@ -513,7 +495,7 @@
             btn.innerHTML = voiceEnabled
                 ? '<i class="fa-solid fa-volume-high"></i>'
                 : '<i class="fa-solid fa-volume-xmark"></i>';
-            btn.style.color = voiceEnabled ? '#cbd5e1' : '#f87171';
+            btn.style.color = voiceEnabled ? '#475569' : '#dc2626';
         }
         updateVoiceToggleIcon();
 
@@ -624,119 +606,305 @@
         }
 
         // ============================================
-        // 🔥 ADDED: "Now Serving" TABLE (Counter | Patient)
+        // 🔥 CHANGED: ANIMATED BOARD (people in the queue / at the counters)
         // ============================================
-        // One row per counter, not one hero box per stage -- Billing has
-        // 3 counters (Counter 1/2/3) that can each be serving a
-        // different patient at the same time, so a single "now serving"
-        // number was silently hiding whichever two weren't the
-        // most-recently-called. Dispensing only ever has one counter
-        // ("Dispatch"), so that table just has one row.
-        const COUNTERS = { billing: ['Counter 1', 'Counter 2', 'Counter 3'], dispensing: ['Dispatch'] };
+        // Replaces the old "Counter | Patient" tables and the waiting list.
+        // Each ticket that is waiting or being served is drawn as a small
+        // person: waiting patients stand in the waiting area with their
+        // token above them; when a counter calls someone, that person walks
+        // to the counter; when billing is finished they walk along the
+        // corridor to the dispensing queue; when dispensing is finished they
+        // walk off the screen. Everything is driven ONLY by the rows in
+        // queue_tickets (same query, same 5s poll + realtime as before) --
+        // nothing is stored, and the voice/chime logic below is unchanged.
+        //
+        // Counter names in the database: billing = 'Counter 1/2/3',
+        // dispensing = 'Dispensing 1/2/3'. The old single dispensing counter
+        // was called 'Dispatch' -- any ticket still carrying that name today
+        // is shown at Dispensing 1.
+        const COUNTERS = {
+            billing: ['Counter 1', 'Counter 2', 'Counter 3'],
+            dispensing: ['Dispensing 1', 'Dispensing 2', 'Dispensing 3']
+        };
+        function normCounter(stage, name) {
+            if (stage === 'dispensing' && name === 'Dispatch') return 'Dispensing 1';
+            return name;
+        }
 
-        // Keyed by "stage:counterName" -> last-seen ticket id for that
-        // counter, so a change is detected (and announced) per counter
-        // instead of per stage. A key that's never been set means "first
-        // time this counter has been rendered this session" -- that case
-        // is intentionally NOT announced, so loading the page doesn't
-        // read out everyone who's already mid-service.
+        // Board geometry (fixed 1920x1080 board, scaled to the screen)
+        const CARD_Y = 120, CARD_H = 396, LANE_Y = 736, QUEUE_FEET_Y = 912, MAX_SLOTS = 7;
+        const rootEl = document.getElementById('root');
+        const stageEl = document.getElementById('stage');
+        const tvEl = document.getElementById('tv');
+
+        function fitBoard() {
+            const s = Math.min(window.innerWidth / 1920, window.innerHeight / 1080);
+            tvEl.style.transform = 'scale(' + s + ')';
+            tvEl.style.left = ((window.innerWidth - 1920 * s) / 2) + 'px';
+            tvEl.style.top = ((window.innerHeight - 1080 * s) / 2) + 'px';
+        }
+        fitBoard();
+        window.addEventListener('resize', fitBoard);
+
+        function el(html) { const d = document.createElement('div'); d.innerHTML = html.trim(); return d.firstChild; }
+        function esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
+        const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+        // ---------- people (original simple figures) ----------
+        const SKIN = ['#f1c9a5', '#e0a97d', '#c68863', '#a66a48', '#7a4a2f', '#5a3520'];
+        const HAIR = ['#1f1a17', '#2b1d14', '#3a2a1e', '#111827', '#4b3621'];
+        const SHIRT = ['#e11d48', '#f59e0b', '#8b5cf6', '#0ea5e9', '#14b8a6', '#ef4444', '#f97316', '#84cc16', '#ec4899', '#64748b'];
+        const PANTS = ['#334155', '#1e3a5f', '#475569', '#3f3f46', '#27272a'];
+        // Same ticket always gets the same-looking person (stable across polls/reloads)
+        function seeded(seed) { let a = (seed >>> 0) || 1; return () => { a = (a + 0x6D2B79F5) >>> 0; let t = a; t = Math.imul(t ^ (t >>> 15), t | 1); t ^= t + Math.imul(t ^ (t >>> 7), t | 61); return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }; }
+        function lookFor(seed) {
+            const r = seeded(seed * 2654435761);
+            const pick = a => a[Math.floor(r() * a.length)];
+            return { skin: pick(SKIN), hair: pick(HAIR), shirt: pick(SHIRT), pants: pick(PANTS), female: r() < 0.5 };
+        }
+        function svgPerson(o) {
+            const { skin, hair, shirt, pants, female } = o;
+            const legs = female
+                ? `<g class="lg legL"><rect x="21" y="88" width="8" height="26" rx="4" fill="${skin}"/><rect x="19" y="110" width="12" height="7" rx="3" fill="#1f2937"/></g>
+                   <g class="lg legR"><rect x="31" y="88" width="8" height="26" rx="4" fill="${skin}"/><rect x="29" y="110" width="12" height="7" rx="3" fill="#1f2937"/></g>`
+                : `<g class="lg legL"><rect x="20" y="70" width="10" height="44" rx="4" fill="${pants}"/><rect x="18" y="110" width="14" height="7" rx="3" fill="#1f2937"/></g>
+                   <g class="lg legR"><rect x="30" y="70" width="10" height="44" rx="4" fill="${pants}"/><rect x="28" y="110" width="14" height="7" rx="3" fill="#1f2937"/></g>`;
+            const body = female ? `<path d="M18 40 Q30 34 42 40 L49 94 L11 94 Z" fill="${shirt}"/>` : `<rect x="17" y="38" width="26" height="38" rx="9" fill="${shirt}"/>`;
+            const hairBack = female ? `<path d="M16 22 Q16 6 30 6 Q44 6 44 22 L46 48 Q30 54 14 48 Z" fill="${hair}"/>` : '';
+            const hairTop = female ? `<path d="M18 20 Q20 8 30 8 Q40 8 42 20 Q30 13 18 20Z" fill="${hair}"/>` : `<path d="M18 21 Q17 7 30 7 Q43 7 42 21 Q30 12 18 21Z" fill="${hair}"/>`;
+            return `<svg viewBox="0 0 60 120">${legs}
+                <g class="ar armL"><rect x="9" y="40" width="8" height="34" rx="4" fill="${shirt}"/><circle cx="13" cy="76" r="4.5" fill="${skin}"/></g>
+                ${hairBack}${body}
+                <g class="ar armR"><rect x="43" y="40" width="8" height="34" rx="4" fill="${shirt}"/><circle cx="47" cy="76" r="4.5" fill="${skin}"/></g>
+                <rect x="26" y="31" width="8" height="9" fill="${skin}"/>
+                <g class="hd"><circle cx="30" cy="22" r="12.5" fill="${skin}"/>${hairTop}
+                <circle cx="25.5" cy="23" r="1.7" fill="#1f2937"/><circle cx="34.5" cy="23" r="1.7" fill="#1f2937"/>
+                <path d="M25.5 28 Q30 32 34.5 28" stroke="#7c2d12" stroke-width="1.6" fill="none" stroke-linecap="round"/></g></svg>`;
+        }
+
+        // ---------- movement ----------
+        function place(f, x, y) {
+            f.x = x; f.y = y;
+            f.el.style.transition = 'opacity .5s';
+            f.el.style.transform = `translate(${x - 32}px,${y - 128}px)`;
+        }
+        function move(f, x, y, speed) {
+            speed = speed || 170;
+            const dx = x - f.x, dy = y - f.y, d = Math.hypot(dx, dy);
+            if (d < 2) return Promise.resolve();
+            const dur = Math.max(250, d / speed * 1000), id = (f.mid = (f.mid || 0) + 1);
+            f.el.classList.remove('idle'); f.el.classList.add('walk');
+            if (Math.abs(dx) > 6) f.flip.style.transform = `scaleX(${dx < 0 ? -1 : 1})`;
+            f.el.style.transition = `transform ${dur}ms linear, opacity .5s`;
+            f.el.style.transform = `translate(${x - 32}px,${y - 128}px)`;
+            f.x = x; f.y = y;
+            return sleep(dur).then(() => { if (f.mid === id) { f.el.classList.remove('walk'); f.flip.style.transform = ''; f.el.classList.add('idle'); } });
+        }
+        // Walk through waypoints; a newer route for the same person cancels this one.
+        async function route(f, pts, speed) {
+            const id = (f.rid = (f.rid || 0) + 1);
+            for (const p of pts) {
+                if (f.rid !== id) return false;
+                await move(f, p[0], p[1], speed);
+            }
+            return f.rid === id;
+        }
+
+        // ---------- the two sides of the board ----------
+        const clerkCoat = { billing: '#1e3a8a', dispensing: '#f8fafc' };
+        const sides = {};
+        [
+            { key: 'billing', title: 'BILLING', plate: 'Billing', x0: 36, cls: 'b' },
+            { key: 'dispensing', title: 'DISPENSING', plate: 'Dispensing', x0: 972, cls: 'g' }
+        ].forEach(cfg => {
+            const wrap = el(`<div class="abs ${cfg.cls}" style="left:${cfg.x0}px;top:90px;width:912px;height:900px"></div>`);
+            rootEl.appendChild(wrap);
+            const add = (html, y) => { const e = el(html); e.style.top = y + 'px'; e.style.left = '0'; wrap.appendChild(e); return e; };
+            const banner = add(`<div class="abs banner"><h1>${cfg.title}</h1><p>(3 Counters)</p><div class="bl"><span class="n">0</span><span class="t">waiting</span></div><div class="br"><span class="nx"><span>UP NEXT</span><b>&mdash;</b></span></div></div>`, 0);
+            const cards = [];
+            for (let i = 0; i < 3; i++) {
+                const clerk = svgPerson({ skin: SKIN[(i * 2 + (cfg.key === 'billing' ? 1 : 3)) % SKIN.length], hair: HAIR[(i + 1) % HAIR.length], shirt: clerkCoat[cfg.key], pants: '#334155', female: i !== 1 });
+                const c = el(`<div class="cc idle" style="left:${i * 312}px;top:${CARD_Y}px">
+                    <div class="plate"><span class="circle">${i + 1}</span>${cfg.plate}</div>
+                    <div class="art"><div class="clerk">${clerk}</div><div class="monitor"><i></i></div><div class="desk"></div></div>
+                    <div class="zone"><div class="info"><div class="lab"></div><div class="tok">&mdash;</div><div class="pn">Free &ndash; waiting for next patient</div></div></div></div>`);
+                wrap.appendChild(c); cards.push(c);
+            }
+            const qz = add(`<div class="abs qz"><div class="floor"></div><div class="empty">No one waiting</div><div class="more" style="display:none"></div></div>`, 650);
+            add(`<div class="abs pill"><svg width="40" height="40" viewBox="0 0 40 40" fill="none" stroke="#fff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><circle cx="16" cy="8" r="4"/><path d="M14 14l2 10h10l4 8M16 24l-4 8M22 17h5"/></svg>Please sit in the ${cfg.key} queue until your number is called.</div>`, 852);
+            sides[cfg.key] = { cfg, banner, cards, qz, cardTicket: [null, null, null] };
+        });
+
+        function slotPos(stage, k) { return { x: sides[stage].cfg.x0 + 80 + Math.min(k, MAX_SLOTS - 1) * 118, y: QUEUE_FEET_Y }; }
+        function spotPos(stage, i) { return { x: sides[stage].cfg.x0 + i * 312 + 62, y: 90 + CARD_Y + CARD_H - 28 }; }
+
+        function setCard(stage, i, state, t) {
+            const c = sides[stage].cards[i];
+            c.classList.remove('idle', 'called', 'serving'); c.classList.add(state);
+            c.querySelector('.lab').textContent = state === 'called' ? 'Please proceed' : state === 'serving' ? 'Now serving' : '';
+            c.querySelector('.tok').innerHTML = t ? '#' + esc(t.token_number) : '&mdash;';
+            c.querySelector('.pn').textContent = t ? (t.patient_name || '') : 'Free – waiting for next patient';
+        }
+
+        // ---------- people on the board, keyed by ticket id ----------
+        const figs = new Map();
+        function makeFig(t, stage) {
+            const e = el(`<div class="fig ${stage === 'billing' ? 'b' : 'g'} idle" style="--d:${(seeded(t.id * 7 + 1)() * 3).toFixed(1)}s"><div class="flip">${svgPerson(lookFor(Number(t.id) || Number(t.token_number) || 1))}</div><div class="shadow"></div><div class="tag"></div><div class="nm"></div></div>`);
+            stageEl.appendChild(e);
+            return { el: e, flip: e.querySelector('.flip'), tag: e.querySelector('.tag'), nm: e.querySelector('.nm'), x: 0, y: 0, state: null, id: t.id };
+        }
+        function styleFig(f, t, stage, kind, idx) {
+            f.el.classList.toggle('b', stage === 'billing');
+            f.el.classList.toggle('g', stage !== 'billing');
+            f.el.classList.toggle('serve', kind === 'serve');
+            f.el.classList.toggle('hidetag', kind === 'serve');
+            f.tag.textContent = '#' + t.token_number;
+            f.tag.classList.toggle('pri', !!t.priority);
+            f.tag.classList.toggle('next', kind === 'wait' && idx === 0);
+            f.nm.textContent = (t.patient_name || '').split(' ')[0];
+            const hidden = kind === 'wait' && idx >= MAX_SLOTS;
+            f.el.style.opacity = hidden ? 0 : 1;
+        }
+        function exitFig(f, prev) {
+            // Leaves along the corridor: finished dispensing -> right edge; anything else drops out toward its own side
+            f.el.classList.remove('serve'); f.el.classList.add('hidetag');
+            const toRight = !prev || prev.stage === 'dispensing';
+            const endX = toRight ? 2000 : -100;
+            route(f, [[f.x, LANE_Y], [endX, LANE_Y]], 170).then(ok => { if (ok) f.el.remove(); });
+            // safety net: never leave an orphan on screen
+            setTimeout(() => { if (f.el.parentNode && f.dead) f.el.remove(); }, 20000);
+            f.dead = true;
+        }
+
+        let firstPaint = true;
         let lastServingByCounter = {};
 
-        function renderStage(stage, servingRows, waitingRows, recentRows) {
-            const counterField = stage === 'billing' ? 'billing_counter' : 'dispensing_counter';
-            const tbody = document.getElementById(stage + 'CounterTableBody');
-            const countEl = document.getElementById(stage + 'WaitingCount');
-            const listEl = document.getElementById(stage + 'RecentList');
+        function paintStageHeader(stage, waitingRows) {
+            const s = sides[stage];
+            s.banner.querySelector('.bl .n').textContent = waitingRows.length;
+            s.banner.querySelector('.br .nx b').innerHTML = waitingRows.length ? '#' + esc(waitingRows[0].token_number) : '&mdash;';
+            s.qz.querySelector('.empty').style.display = waitingRows.length ? 'none' : '';
+            const more = s.qz.querySelector('.more');
+            more.style.display = waitingRows.length > MAX_SLOTS ? '' : 'none';
+            more.textContent = '+ ' + (waitingRows.length - MAX_SLOTS) + ' more';
+        }
 
+        function renderBoard(billingServing, billingWaiting, dispensingServing, dispensingWaiting) {
             const changedCounters = [];
+            const desired = new Map(); // ticket id -> { t, stage, kind, idx }
 
-            tbody.innerHTML = COUNTERS[stage].map(counterName => {
-                const ticket = servingRows.find(r => r[counterField] === counterName) || null;
-                const key = stage + ':' + counterName;
-                let pulse = false;
+            [['billing', billingServing, billingWaiting], ['dispensing', dispensingServing, dispensingWaiting]].forEach(([stage, serving, waiting]) => {
+                const field = stage === 'billing' ? 'billing_counter' : 'dispensing_counter';
+                const names = COUNTERS[stage];
+                const taken = new Set();
+                const placed = [];
+                serving.forEach(t => {
+                    let i = names.indexOf(normCounter(stage, t[field]));
+                    if (i < 0 || taken.has(i)) i = -1;
+                    placed.push({ t, i });
+                    if (i >= 0) taken.add(i);
+                });
+                // a serving ticket whose counter name isn't one of ours still gets shown, at the first free card
+                placed.forEach(p => { if (p.i < 0) { for (let k = 0; k < names.length; k++) if (!taken.has(k)) { p.i = k; taken.add(k); break; } } });
+                placed.forEach(p => { if (p.i >= 0) desired.set(p.t.id, { t: p.t, stage, kind: 'serve', idx: p.i }); });
+                waiting.forEach((t, k) => desired.set(t.id, { t, stage, kind: 'wait', idx: k }));
+                paintStageHeader(stage, waiting);
 
-                if (ticket) {
-                    if ((key in lastServingByCounter) && lastServingByCounter[key] !== ticket.id) {
-                        pulse = true;
-                        changedCounters.push({ counterName, ticket });
+                // counter cards + announcements
+                names.forEach((counterName, i) => {
+                    const p = placed.find(x => x.i === i);
+                    const ticket = p ? p.t : null;
+                    const side = sides[stage];
+                    const key = stage + ':' + counterName;
+                    if (ticket) {
+                        if ((key in lastServingByCounter) && lastServingByCounter[key] !== ticket.id) {
+                            changedCounters.push({ counterName, ticket });
+                        }
+                        lastServingByCounter[key] = ticket.id;
+                        if (side.cardTicket[i] !== ticket.id) {
+                            side.cardTicket[i] = ticket.id;
+                            // first paint / page load: show as already serving; a new call: highlight until they arrive
+                            setCard(stage, i, firstPaint ? 'serving' : 'called', ticket);
+                        } else {
+                            const c = side.cards[i];
+                            c.querySelector('.pn').textContent = ticket.patient_name || '';
+                        }
+                    } else {
+                        // 🔥 FIX: a counter that is idle when the page loads has never been "seen" serving anyone, so the
+                        // FIRST patient called there after that was treated like page-load state and never announced.
+                        // Marking it as seen (with no ticket) on the first paint means that first call IS announced.
+                        if (firstPaint && !(key in lastServingByCounter)) lastServingByCounter[key] = null;
+                        if (side.cardTicket[i] !== null) {
+                            side.cardTicket[i] = null;
+                            setCard(stage, i, 'idle', null);
+                        }
                     }
-                    lastServingByCounter[key] = ticket.id;
+                    // (no `delete lastServingByCounter[key]` on idle -- see the earlier FIX note: the next call after an idle gap must still be announced)
+                });
+            });
+
+            // people who are no longer waiting/being served leave the screen
+            figs.forEach((f, id) => { if (!desired.has(id)) { figs.delete(id); exitFig(f, f.state); } });
+
+            // everyone else: create / move
+            desired.forEach((d, id) => {
+                let f = figs.get(id);
+                const target = d.kind === 'serve' ? spotPos(d.stage, d.idx) : slotPos(d.stage, d.idx);
+                const prev = f ? f.state : null;
+                const isNew = !f;
+                if (isNew) { f = makeFig(d.t, d.stage); figs.set(id, f); }
+                styleFig(f, d.t, d.stage, d.kind, d.idx);
+                f.state = { stage: d.stage, kind: d.kind, idx: d.idx };
+
+                if (isNew) {
+                    if (firstPaint) { place(f, target.x, target.y); }
+                    else if (d.kind === 'wait' && d.stage === 'billing') {
+                        // new patient walks in from the door and joins the end of the queue
+                        place(f, target.x + 40, target.y + 60); f.el.style.opacity = 0;
+                        setTimeout(() => { styleFig(f, d.t, d.stage, d.kind, d.idx); route(f, [[target.x, target.y]], 130); }, 30);
+                    } else if (d.kind === 'wait') {
+                        place(f, target.x, LANE_Y); f.el.style.opacity = 0;
+                        setTimeout(() => { styleFig(f, d.t, d.stage, d.kind, d.idx); route(f, [[target.x, target.y]], 140); }, 30);
+                    } else {
+                        // called while this screen wasn't watching their queue: start from the front of the queue
+                        const s0 = slotPos(d.stage, 0); place(f, s0.x, s0.y);
+                        setTimeout(() => walkToCounter(f, d, target), 30);
+                    }
+                    return;
                 }
-                // 🔥 FIX: no `else { delete lastServingByCounter[key]; }` here
-                // anymore -- THIS was why "Call Next" went silent in real use.
-                // Deleting the key the moment a counter went idle made the
-                // NEXT patient called there look identical to "this counter
-                // has never been rendered this session" (the case that's
-                // deliberately never announced, so loading the page doesn't
-                // read out everyone already mid-service). So the very first
-                // call after any idle gap -- i.e. the completely normal
-                // "finish one patient, wait, call the next" flow -- silently
-                // never announced, even though the visual table updated
-                // fine. Confirmed from a real test: the display updated but
-                // no [voice] log appeared at all for that call. Leaving the
-                // last-served id in place through the idle gap means the
-                // next real ticket at this counter is correctly recognized
-                // as a change and announced, same as any other call.
 
-                const patientCell = ticket
-                    ? `<span class="token-badge">#${ticket.token_number}</span>${ticket.patient_name}`
-                    : 'Waiting&hellip;';
+                const moved = Math.abs(f.x - target.x) > 1 || Math.abs(f.y - target.y) > 1;
+                if (!moved) return;
+                if (d.kind === 'serve') {
+                    walkToCounter(f, d, target);
+                } else if (prev && prev.kind === 'serve') {
+                    // finished at billing (or sent back): out through the corridor to the right queue
+                    route(f, [[f.x, LANE_Y], [target.x, LANE_Y], [target.x, target.y]], 170);
+                } else {
+                    route(f, [[target.x, target.y]], 150);
+                }
+            });
+            firstPaint = false;
 
-                return `<tr class="${ticket ? 'serving' : 'idle'}${pulse ? ' pulse' : ''}">
-                    <td class="counter-name">${counterName}</td>
-                    <td class="patient-cell">${patientCell}</td>
-                </tr>`;
-            }).join('');
-
-            // 🔥 CHANGED: each changed counter is now handed to the
-            // global announcement queue (declared above, near speak())
-            // instead of being scheduled with its own local setTimeout.
-            // The old per-call `chime(); ...forEach(i => setTimeout(...,
-            // 700 + i*2500))` only staggered counters changed within
-            // THIS SAME renderStage() call -- it had no way to know
-            // about the other stage (billing vs dispensing) changing at
-            // the same moment, or a previous announcement from an
-            // earlier tick still playing. The queue fixes both: every
-            // announcement, from either stage, now plays strictly one
-            // after another.
             changedCounters.forEach(c => {
                 enqueueAnnouncement(`Token number ${c.ticket.token_number}. ${c.ticket.patient_name}. Please proceed to ${c.counterName}.`);
             });
+        }
 
-            countEl.textContent = waitingRows.length;
-
-            // 🔥 CHANGED: this used to be a "recently called" HISTORY list
-            // -- everyone called today, most of them already long done with
-            // this stage. Confirmed from real feedback (viewed on a phone)
-            // that this genuinely doesn't answer the one question someone
-            // sitting in the waiting room actually has: "how many people
-            // are ahead of me, and who's next?" A history of who's already
-            // been served answers a completely different question. This
-            // now shows exactly that instead -- everyone still WAITING for
-            // this stage, in the order they'll be called (same token-number
-            // order the query already sorts by), with the very next person
-            // called out clearly. Nobody in this list has a counter yet
-            // (that's only assigned the moment they're actually called),
-            // so there's nothing counter-related to show per row anymore --
-            // the earlier "Counter 1 ... Done" confusion this replaces
-            // doesn't apply here by construction.
-            if (!waitingRows.length) {
-                listEl.innerHTML = '<div class="empty-state">No one waiting.</div>';
-                return;
-            }
-
-            listEl.innerHTML = waitingRows.map((r, i) => `
-                <div class="recent-row">
-                    <span>${r.priority ? '<i class="fa-solid fa-star" style="color:#fbbf24;" title="Priority"></i> ' : ''}<span class="rn">#${r.token_number}</span> &nbsp; ${r.patient_name}</span>
-                    ${i === 0 ? '<span class="rc" style="color:#34d399; font-weight:700;">Up Next</span>' : ''}
-                </div>
-            `).join('');
+        function walkToCounter(f, d, target) {
+            route(f, [[target.x, target.y]], 190).then(ok => {
+                if (!ok) return;
+                const side = sides[d.stage];
+                if (side.cardTicket[d.idx] === d.t.id) setCard(d.stage, d.idx, 'serving', d.t);
+            });
         }
 
         // ============================================
         // LOAD + RENDER BOTH COLUMNS
         // ============================================
+        let loadSeq = 0, appliedSeq = 0;
         async function loadAll() {
+            const mySeq = ++loadSeq;
             const today = new Date().toISOString().split('T')[0];
             const { data, error } = await supabaseClient
                 .from('queue_tickets')
@@ -748,36 +916,23 @@
                 console.error('Error loading queue for TV display:', error);
                 return;
             }
+            // two loads can overlap (realtime burst + poll): never let an older answer overwrite a newer one
+            if (mySeq < appliedSeq) return;
+            appliedSeq = mySeq;
 
             const rows = data || [];
-
-            // 🔥 CHANGED: ALL currently-serving rows for the stage, not
-            // just the most-recently-called one -- the table shows every
-            // counter at once, so every one of them needs its ticket.
+            // priority tickets are called first (see call_next_ticket()), so the on-screen waiting order matches who is really next
+            const byPriority = (a, b) => (b.priority ? 1 : 0) - (a.priority ? 1 : 0);
             const billingServing = rows.filter(r => r.status === 'serving_billing');
-            // 🔥 ADDED: priority tickets are always called before
-            // everyone else in the stage (see call_next_ticket() /
-            // priority column) -- sorting the on-screen waiting order to
-            // match keeps "Up Next" here honest with who's actually
-            // called next. Array.filter preserves the original
-            // token_number-ascending order, so this stable sort only
-            // moves priority rows to the front without disturbing order
-            // within each group.
-            const billingWaiting = rows.filter(r => r.status === 'waiting_billing').sort((a, b) => (b.priority ? 1 : 0) - (a.priority ? 1 : 0));
-            const billingRecent = rows
-                .filter(r => r.called_billing_at)
-                .sort((a, b) => new Date(b.called_billing_at) - new Date(a.called_billing_at))
-                .slice(0, 8);
-
+            const billingWaiting = rows.filter(r => r.status === 'waiting_billing').sort(byPriority);
             const dispensingServing = rows.filter(r => r.status === 'serving_dispensing');
-            const dispensingWaiting = rows.filter(r => r.status === 'waiting_dispensing').sort((a, b) => (b.priority ? 1 : 0) - (a.priority ? 1 : 0));
-            const dispensingRecent = rows
-                .filter(r => r.called_dispensing_at)
-                .sort((a, b) => new Date(b.called_dispensing_at) - new Date(a.called_dispensing_at))
-                .slice(0, 8);
+            const dispensingWaiting = rows.filter(r => r.status === 'waiting_dispensing').sort(byPriority);
 
-            renderStage('billing', billingServing, billingWaiting, billingRecent);
-            renderStage('dispensing', dispensingServing, dispensingWaiting, dispensingRecent);
+            try {
+                renderBoard(billingServing, billingWaiting, dispensingServing, dispensingWaiting);
+            } catch (e) {
+                console.error('TV board render failed (non-fatal, will retry on next update):', e);
+            }
         }
 
         // ============================================
