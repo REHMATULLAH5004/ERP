@@ -68,6 +68,21 @@
     // FETCH + AGGREGATE
     // ============================================
 
+
+    // The database returns at most 1000 rows per request; with ~80 sales a day
+    // that cut off the newest sales on any busy range. Read page by page.
+    async function fetchAllPaged(buildQuery) {
+        const PAGE = 1000;
+        let all = [];
+        for (let from = 0; ; from += PAGE) {
+            const { data, error } = await buildQuery().range(from, from + PAGE - 1);
+            if (error) return { data: null, error };
+            all = all.concat(data || []);
+            if (!data || data.length < PAGE) break;
+        }
+        return { data: all, error: null };
+    }
+
     async function loadKPIsAndCharts() {
         const now = new Date();
         const todayKey = dateKey(now);
@@ -79,13 +94,14 @@
         const rangeEnd = `${todayKey}T23:59:59`;
 
         const [salesResult, payablesResult, batchesResult] = await Promise.all([
-            supabaseClient
+            fetchAllPaged(() => supabaseClient
                 .from('sales')
                 .select('grand_total, client_type, client_sub_type, created_at')
                 .in('client_type', ['RETAIL', 'WHOLESALE'])
                 .neq('is_quotation', true)
                 .gte('created_at', rangeStart)
-                .lte('created_at', rangeEnd),
+                .lte('created_at', rangeEnd)
+                .order('id')),
             supabaseClient
                 .from('supplier_payables')
                 .select('currency, amount_remaining'),

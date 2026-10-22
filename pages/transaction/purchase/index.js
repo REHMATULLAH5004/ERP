@@ -113,7 +113,11 @@
         // back to us when goods are returned against a Cash-paid GRN (no
         // supplier_payables row exists to reduce, so the credit is tracked
         // here instead, and drawn down against future purchases).
-        { code: '1205', name: 'Advances to Suppliers', type: 'Asset', category: 'Current Asset', normal_balance: 'Debit' }
+        { code: '1205', name: 'Advances to Suppliers', type: 'Asset', category: 'Current Asset', normal_balance: 'Debit' },
+        // Delivery-note receipts: stock is in, invoice not yet -- the value sits here until the invoice is attached.
+        { code: '2010', name: 'Goods Received Not Invoiced', type: 'Liability', category: 'Current Liability', normal_balance: 'Credit' },
+        // Used only when an invoice rate differs from the delivery-note rate on stock that has already been sold.
+        { code: '5001', name: 'COGS - Retail', type: 'Expense', category: 'Cost of Goods Sold', normal_balance: 'Debit' }
     ];
 
     async function ensureChartOfAccounts() {
@@ -182,7 +186,9 @@
                 inventory: accountMap['inventory'] || '1400',
                 accounts_payable: accountMap['accounts_payable'] || '2001',
                 opening_balance_equity: accountMap['opening_balance_equity'] || '3000',
-                advances_to_suppliers: accountMap['advances_to_suppliers'] || '1205'
+                advances_to_suppliers: accountMap['advances_to_suppliers'] || '1205',
+                grni: accountMap['goods_received_not_invoiced'] || '2010',
+                cogs: accountMap['cogs___retail'] || '5001'
             };
         } catch (error) {
             console.error('Error fetching account codes:', error);
@@ -192,12 +198,14 @@
                 inventory: '1400',
                 accounts_payable: '2001',
                 opening_balance_equity: '3000',
-                advances_to_suppliers: '1205'
+                advances_to_suppliers: '1205',
+                grni: '2010',
+                cogs: '5001'
             };
         }
     }
 
-    async function createGRNAccountingEntries(grnNumber, grnTotal, currency, exchangeRate, paymentType) {
+    async function createGRNAccountingEntries(grnNumber, grnTotal, currency, exchangeRate, paymentType, receiptMode = 'Invoice') {
         try {
             await ensureChartOfAccounts();
             const accountCodes = await getAccountCodesFromChartOfAccounts();
@@ -205,15 +213,18 @@
             // Ledger is ZMW-based -- convert if the PO/GRN was raised in USD.
             const zmwAmount = currency === 'USD' ? grnTotal * (exchangeRate || 1) : grnTotal;
 
-            const creditAccount = paymentType === 'Credit' ? accountCodes.accounts_payable : accountCodes.cash_zmw;
-            const creditDescription = paymentType === 'Credit'
-                ? `Credit purchase via ${grnNumber}`
-                : `Cash purchase via ${grnNumber}`;
+            const isDN = receiptMode === 'Delivery Note';
+            const creditAccount = isDN ? accountCodes.grni : (paymentType === 'Credit' ? accountCodes.accounts_payable : accountCodes.cash_zmw);
+            const creditDescription = isDN
+                ? `Goods received on delivery note, invoice awaited - ${grnNumber}`
+                : (paymentType === 'Credit'
+                    ? `Credit purchase via ${grnNumber}`
+                    : `Cash purchase via ${grnNumber}`);
 
             const journal = {
                 entry_date: new Date().toISOString().split('T')[0],
                 reference: grnNumber,
-                description: `Goods received - ${grnNumber}` + (currency === 'USD' ? ` (USD ${formatNumber(grnTotal)} @ ${exchangeRate})` : ''),
+                description: (isDN ? `Goods received on delivery note - ${grnNumber}` : `Goods received - ${grnNumber}`) + (currency === 'USD' ? ` (USD ${formatNumber(grnTotal)} @ ${exchangeRate})` : ''),
                 journal_number: `GRN-${new Date().getFullYear()}-${String(Math.floor(Math.random() * 10000)).padStart(4, '0')}`,
                 status: 'Posted',
                 created_at: new Date().toISOString()
@@ -239,7 +250,7 @@
             ]));
             if (jlError) throw jlError;
 
-            console.log(`✅ GRN accounting entries created for ${grnNumber} (${paymentType}, ZK${zmwAmount.toFixed(2)})`);
+            console.log(`✅ GRN accounting entries created for ${grnNumber} (${isDN ? 'Delivery Note' : paymentType}, ZK${zmwAmount.toFixed(2)})`);
         } catch (error) {
             console.error('Error creating GRN accounting entries:', error);
             showToast('GRN posted, but the accounting entry failed -- please check manually.', 'warning');
@@ -310,6 +321,7 @@
             renderPurchaseOrders();
             updateStats(state.orders);
             checkOverduePOs(state.orders);
+            loadPendingInvoiceGRNs();
         } catch (error) {
             console.error('Error loading purchase orders:', error);
             state.orders = [];
@@ -328,81 +340,90 @@
     // first 20 products (alphabetical) so it behaves like a normal
     // dropdown you can click straight into; typing still filters as
     // before.
+    // Smooth product search (same feel as the Retail item search): the whole
+    // product list is loaded ONCE and filtered in memory, so typing never waits
+    // on the network and results never arrive out of order. "Last paid" prices
+    // are filled in a moment later without disturbing the highlighted row.
+    let poCatalog = null;
+    let poCatalogPromise = null;
+    let poSearchSeq = 0;
+    let poSuppressFocusOpen = false;
+    const poLastPaidCache = {};
+
+    function ensurePOCatalog() {
+        if (poCatalog) return Promise.resolve(poCatalog);
+        if (!poCatalogPromise) {
+            poCatalogPromise = (async () => {
+                const products = await fetchAllPages((from, to) =>
+                    supabaseClient.from('products')
+                        .select('id, product_name, conversion_rate, generic_name_id')
+                        .order('product_name', { ascending: true })
+                        .range(from, to));
+                let genericMap = {};
+                try {
+                    const generics = await fetchAllPages((from, to) =>
+                        supabaseClient.from('generic_names').select('id, name').order('id').range(from, to));
+                    generics.forEach(g => { genericMap[g.id] = g.name; });
+                } catch (e) { console.warn('Could not load generic names:', e); }
+                poCatalog = (products || []).map(p => {
+                    const generic = genericMap[p.generic_name_id] || '';
+                    return {
+                        id: p.id,
+                        product_name: p.product_name,
+                        generic_name: generic,
+                        conversion_rate: p.conversion_rate || 1,
+                        _hay: ((p.product_name || '') + ' ' + generic).toLowerCase()
+                    };
+                });
+                return poCatalog;
+            })().catch(err => { poCatalogPromise = null; throw err; });
+        }
+        return poCatalogPromise;
+    }
+
     async function searchProducts() {
         const searchInput = document.getElementById('poProductSearch');
-        const searchTerm = searchInput ? searchInput.value.trim() : '';
+        const term = searchInput ? searchInput.value.trim().toLowerCase() : '';
         const resultsDiv = document.getElementById('poSearchResults');
-
         if (!resultsDiv) return;
+        const seq = ++poSearchSeq;
 
+        let catalog;
         try {
-            let query = supabaseClient
-                .from('products')
-                .select('id, product_name, conversion_rate, generic_name_id')
-                .order('product_name', { ascending: true })
-                .limit(searchTerm ? 30 : 20);
-
-            if (searchTerm) {
-                // 🔥 CHANGED: match on generic name too, not just product
-                // name -- staff often know a drug by its generic name
-                // rather than the brand name it's stocked under. Finds any
-                // generic_names rows matching the term first, then ORs
-                // their ids into the same products query alongside the
-                // existing product_name match.
-                const escapedTerm = searchTerm.replace(/[%_]/g, '\\$&').replace(/[,()]/g, ' ');
-                const { data: matchingGenerics } = await supabaseClient
-                    .from('generic_names')
-                    .select('id')
-                    .ilike('name', `%${escapedTerm}%`);
-                const genericIds = (matchingGenerics || []).map(g => g.id);
-
-                const orClauses = [`product_name.ilike.%${escapedTerm}%`];
-                if (genericIds.length > 0) {
-                    orClauses.push(`generic_name_id.in.(${genericIds.join(',')})`);
-                }
-                query = query.or(orClauses.join(','));
-            }
-
-            const { data: products, error } = await query;
-
-            if (error) throw error;
-
-            let allProducts = [];
-            
-            if (products && products.length > 0) {
-                const genericIds = [...new Set(products.map(p => p.generic_name_id).filter(id => id))];
-                let genericMap = {};
-                
-                if (genericIds.length > 0) {
-                    const { data: generics, error: genError } = await supabaseClient
-                        .from('generic_names')
-                        .select('id, name')
-                        .in('id', genericIds);
-                        
-                    if (!genError && generics) {
-                        generics.forEach(g => {
-                            genericMap[g.id] = g.name;
-                        });
-                    }
-                }
-                
-                allProducts = products.map(p => ({
-                    id: p.id,
-                    product_name: p.product_name,
-                    generic_name: genericMap[p.generic_name_id] || '',
-                    conversion_rate: p.conversion_rate || 1
-                }));
-
-                // 🔥 ADDED: last purchase cost, shown in the dropdown so
-                // you can eyeball pricing before deciding what to add.
-                const lastPurchaseMap = await fetchLastPurchaseCosts(allProducts.map(p => p.id));
-                allProducts = allProducts.map(p => ({ ...p, last_purchase: lastPurchaseMap[p.id] || null }));
-            }
-
-            displaySearchResults(allProducts);
+            catalog = await ensurePOCatalog();
         } catch (error) {
-            console.error('Error searching products:', error);
+            console.error('Error loading products:', error);
             displaySearchResults([]);
+            return;
+        }
+        if (seq !== poSearchSeq) return; // a newer keystroke already took over
+
+        let matches;
+        if (!term) {
+            matches = catalog.slice(0, 20);
+        } else {
+            const tokens = term.split(/\s+/).filter(Boolean);
+            matches = catalog.filter(p => tokens.every(t => p._hay.includes(t)));
+            matches.sort((a, b) => {
+                const an = a.product_name.toLowerCase(), bn = b.product_name.toLowerCase();
+                const as = an.startsWith(term) ? 0 : (an.includes(term) ? 1 : 2);
+                const bs = bn.startsWith(term) ? 0 : (bn.includes(term) ? 1 : 2);
+                return as - bs || an.localeCompare(bn);
+            });
+            matches = matches.slice(0, 30);
+        }
+        matches = matches.map(p => ({ ...p, last_purchase: poLastPaidCache[p.id] || null }));
+        displaySearchResults(matches);
+
+        // Fill in "Last paid" for anything not looked up yet, then redraw in place.
+        const need = matches.filter(p => !(p.id in poLastPaidCache)).map(p => p.id);
+        if (need.length) {
+            const lastMap = await fetchLastPurchaseCosts(need);
+            need.forEach(id => { poLastPaidCache[id] = lastMap[id] || null; });
+            if (seq === poSearchSeq && resultsDiv.style.display !== 'none') {
+                productSearchResults.forEach(p => { p.last_purchase = poLastPaidCache[p.id] || null; });
+                renderSearchResultsList();
+            }
         }
     }
 
@@ -432,8 +453,11 @@
             return;
         }
 
+        const keepScroll = resultsDiv.scrollTop;
+        resultsDiv.style.maxHeight = '280px';
+        resultsDiv.style.overscrollBehavior = 'contain';
         resultsDiv.innerHTML = productSearchResults.map((p, i) => `
-            <div class="result-item" data-index="${i}" onclick="addProductToPO('${p.id}')" style="${i === productSearchHighlightIndex ? 'background:#eff6ff;' : ''}">
+            <div class="result-item" data-index="${i}" data-id="${p.id}" style="${i === productSearchHighlightIndex ? 'background:#eff6ff;' : ''}">
                 <div>
                     <strong>${p.product_name}</strong>
                     <div style="font-size: 0.75rem; color: #94a3b8;">${p.generic_name || 'No generic'}</div>
@@ -442,12 +466,27 @@
                 <span style="color: #94a3b8; font-size: 0.8rem; background: #f1f5f9; padding: 2px 8px; border-radius: 4px;">Pack: ${p.conversion_rate || 1}</span>
             </div>
         `).join('');
+        resultsDiv.scrollTop = keepScroll;
     }
 
+    // Scrolls ONLY the dropdown list (scrollIntoView also scrolled the whole
+    // modal, which made the screen jump while arrowing down).
     function scrollProductHighlightIntoView() {
         const resultsDiv = document.getElementById('poSearchResults');
         const el = resultsDiv?.querySelector(`.result-item[data-index="${productSearchHighlightIndex}"]`);
-        if (el) el.scrollIntoView({ block: 'nearest' });
+        if (!resultsDiv || !el) return;
+        const top = el.offsetTop, bottom = top + el.offsetHeight;
+        if (top < resultsDiv.scrollTop) resultsDiv.scrollTop = top;
+        else if (bottom > resultsDiv.scrollTop + resultsDiv.clientHeight) resultsDiv.scrollTop = bottom - resultsDiv.clientHeight;
+    }
+
+    // After a pick the box is empty, the list is closed and the cursor stays in
+    // the box, ready to type the next product.
+    function refocusProductSearch() {
+        const search = document.getElementById('poProductSearch');
+        if (!search) return;
+        poSuppressFocusOpen = true;
+        try { search.focus(); } finally { poSuppressFocusOpen = false; }
     }
 
     // ============================================
@@ -466,7 +505,9 @@
             // ("select the products") feel sluggish/messy. Reuse the
             // already-fetched entry; only hit the DB again as a fallback,
             // in case the id somehow isn't in the current result set.
-            let product = productSearchResults.find(p => p.id === productId);
+            let product = productSearchResults.find(p => p.id === productId)
+                || (poCatalog ? poCatalog.find(p => p.id === productId) : null);
+            if (product && product.last_purchase === undefined) product = { ...product, last_purchase: poLastPaidCache[productId] || null };
 
             if (!product) {
                 const { data, error } = await supabaseClient
@@ -502,6 +543,7 @@
                 renderPOLines();
                 updatePOTotal();
                 clearSearchResults();
+                refocusProductSearch();
                 return;
             }
 
@@ -519,6 +561,7 @@
             renderPOLines();
             updatePOTotal();
             clearSearchResults();
+            refocusProductSearch();
         } catch (error) {
             console.error('Error adding product:', error);
             showToast('Error adding product: ' + error.message, 'error');
@@ -528,6 +571,7 @@
     function clearSearchResults() {
         const results = document.getElementById('poSearchResults');
         const search = document.getElementById('poProductSearch');
+        poSearchSeq++; // cancel any search still in flight so it cannot reopen the list
         if (results) results.style.display = 'none';
         if (search) search.value = '';
         productSearchResults = [];
@@ -2005,7 +2049,7 @@
     // RENDER GRN LINES - NO CANCELLATION COLUMN
     // ============================================
 
-    function renderGRNLines(readonly = false) {
+    function renderGRNLines(readonly = false, patchIndex = null) {
         const tbody = document.getElementById('grnLinesBody');
         if (!tbody) return;
         
@@ -2021,7 +2065,7 @@
         const currency = state.currentGRNCurrency || 'USD';
         const symbol = currency === 'ZMW' ? 'ZK' : '$';
 
-        tbody.innerHTML = state.grnLines.map((line, index) => {
+        const grnRowsHtml = state.grnLines.map((line, index) => {
             const totalOrderedQty = (line.pack_size || 1) * (line.order_quantity || 0);
             const remainingQty = (line.order_quantity || 0) - (line.received_quantity || 0) - (line.cancelled_quantity || 0);
             const isFullyReceived = remainingQty <= 0 && (line.received_quantity || 0) > 0;
@@ -2112,13 +2156,72 @@
                         onchange="toggleGRNLineReceive(${index}, this.checked)"
                         ${readonly || isCancelled ? 'disabled' : ''}
                         ${(line.cancelled_quantity || 0) > 0 ? 'disabled' : ''}
+                        tabindex="-1"
                         title="Receive items">
                 </td>
             </tr>
             `;
-        }).join('');
-        
+        });
+
+        // Editing one field must NOT rebuild the table: the change event fires
+        // as Tab leaves the field, and rebuilding destroyed the field Tab was
+        // about to focus, so the cursor jumped away. Patch just that row,
+        // leaving every input element (and the focused one) untouched.
+        if (patchIndex !== null) {
+            const existingRow = tbody.querySelectorAll('tr')[patchIndex];
+            if (existingRow && tbody.querySelectorAll('tr').length === state.grnLines.length) {
+                const tpl = document.createElement('template');
+                tpl.innerHTML = `<table><tbody>${grnRowsHtml[patchIndex]}</tbody></table>`;
+                const freshRow = tpl.content.querySelector('tr');
+                if (freshRow) {
+                    morphGRNNode(existingRow, freshRow);
+                    document.getElementById('grnLineCount').textContent = `${state.grnLines.length} items`;
+                    return;
+                }
+            }
+        }
+
+        tbody.innerHTML = grnRowsHtml.join('');
         document.getElementById('grnLineCount').textContent = `${state.grnLines.length} items`;
+    }
+
+    // Updates `oldEl` in place so it matches `newEl`. Inputs keep their identity
+    // (and the one being typed in keeps its value); text, badges and styles update.
+    function morphGRNNode(oldEl, newEl) {
+        if (oldEl.nodeType !== newEl.nodeType || oldEl.nodeName !== newEl.nodeName) {
+            oldEl.replaceWith(newEl.cloneNode(true));
+            return;
+        }
+        if (oldEl.nodeType === Node.TEXT_NODE) {
+            if (oldEl.textContent !== newEl.textContent) oldEl.textContent = newEl.textContent;
+            return;
+        }
+        if (oldEl.nodeType !== Node.ELEMENT_NODE) return;
+
+        // attributes
+        Array.from(oldEl.attributes).forEach(a => { if (!newEl.hasAttribute(a.name) && a.name !== 'value') oldEl.removeAttribute(a.name); });
+        Array.from(newEl.attributes).forEach(a => {
+            if (a.name === 'value') return;
+            if (oldEl.getAttribute(a.name) !== a.value) oldEl.setAttribute(a.name, a.value);
+        });
+
+        if (oldEl.nodeName === 'INPUT') {
+            if (oldEl.type === 'checkbox') {
+                oldEl.checked = newEl.hasAttribute('checked');
+            } else if (oldEl !== document.activeElement) {
+                const v = newEl.getAttribute('value') || '';
+                if (oldEl.value !== v) oldEl.value = v;
+            }
+            return;
+        }
+
+        // children
+        const oldKids = Array.from(oldEl.childNodes);
+        const newKids = Array.from(newEl.childNodes);
+        const n = Math.min(oldKids.length, newKids.length);
+        for (let i = 0; i < n; i++) morphGRNNode(oldKids[i], newKids[i]);
+        for (let i = n; i < oldKids.length; i++) oldKids[i].remove();
+        for (let i = n; i < newKids.length; i++) oldEl.appendChild(newKids[i].cloneNode(true));
     }
 
     function renderGRNStatusBadges(line, isCancelled, isFullyReceived, isFullyCancelled, isPartiallyProcessed) {
@@ -3028,7 +3131,10 @@
             }
 
             // If there were received items, create supplier payable
-            if (hasReceived && order.total_received_amount > 0) {
+            // Goods received on a delivery note are still awaiting their invoice -- no payable for those yet.
+            const dnHeld = await getUnmatchedDNTotal(poId);
+            const receivedForPayable = Math.max(0, (order.total_received_amount || 0) - dnHeld);
+            if (hasReceived && receivedForPayable > 0) {
                 const { data: existingPayable } = await supabaseClient
                     .from('supplier_payables')
                     .select('id')
@@ -3042,9 +3148,9 @@
                         invoice_number: `CLOSED-${order.po_number}`,
                         invoice_date: new Date().toISOString().split('T')[0],
                         due_date: new Date(new Date().setDate(new Date().getDate() + 30)).toISOString().split('T')[0],
-                        total_amount: order.total_received_amount || 0,
+                        total_amount: receivedForPayable,
                         amount_paid: 0,
-                        amount_remaining: order.total_received_amount || 0,
+                        amount_remaining: receivedForPayable,
                         currency: order.currency || 'USD',
                         exchange_rate: order.exchange_rate || 1,
                         status: 'Pending',
@@ -3208,7 +3314,10 @@
             }
 
             // If there were received items, create supplier payable for received amount
-            if (hasReceived && order.total_received_amount > 0) {
+            // Goods received on a delivery note are still awaiting their invoice -- no payable for those yet.
+            const dnHeld = await getUnmatchedDNTotal(poId);
+            const receivedForPayable = Math.max(0, (order.total_received_amount || 0) - dnHeld);
+            if (hasReceived && receivedForPayable > 0) {
                 // Check if payable already exists
                 const { data: existingPayable } = await supabaseClient
                     .from('supplier_payables')
@@ -3224,9 +3333,9 @@
                         invoice_number: `CLOSED-${order.po_number}`,
                         invoice_date: new Date().toISOString().split('T')[0],
                         due_date: new Date(new Date().setDate(new Date().getDate() + 30)).toISOString().split('T')[0],
-                        total_amount: order.total_received_amount || 0,
+                        total_amount: receivedForPayable,
                         amount_paid: 0,
-                        amount_remaining: order.total_received_amount || 0,
+                        amount_remaining: receivedForPayable,
                         currency: order.currency || 'USD',
                         exchange_rate: order.exchange_rate || 1,
                         status: 'Pending',
@@ -3448,6 +3557,11 @@
         if (notes) notes.value = '';
         if (invoiceTotal) invoiceTotal.value = '';
         if (paymentType) paymentType.value = 'Credit';
+        const dnNo = document.getElementById('grnDeliveryNoteNumber');
+        if (dnNo) dnNo.value = '';
+        const modeInv = document.getElementById('grnReceiptModeInvoice');
+        if (modeInv) modeInv.checked = true;
+        toggleGRNReceiptMode();
 
         if (currencyDisplay) {
             currencyDisplay.textContent = state.currentGRNCurrency;
@@ -3751,8 +3865,14 @@
                 <span class="value">${formatDate(grn.entry_date)}</span>
             </div>
             <div class="detail-row">
+                <span class="label">Receipt Type</span>
+                <span class="value">${grn.receipt_mode === 'Delivery Note'
+                    ? `<span style="color:#b45309;font-weight:600;">Delivery Note${grn.delivery_note_number ? ' #' + grn.delivery_note_number : ''} - invoice awaited</span> <button class="btn btn-sm btn-primary" style="margin-left:8px;" onclick="openMatchInvoiceModal('${grn.id}')"><i class="fa-solid fa-file-invoice"></i> Add Invoice</button>`
+                    : 'Invoice'}</span>
+            </div>
+            <div class="detail-row">
                 <span class="label">Invoice Number</span>
-                <span class="value">${grn.invoice_number || 'N/A'}</span>
+                <span class="value">${grn.receipt_mode === 'Delivery Note' ? 'Pending' : (grn.invoice_number || 'N/A')}</span>
             </div>
             <div class="detail-row">
                 <span class="label">Invoice Date</span>
@@ -3885,7 +4005,7 @@
                                     <tr>
                                         <td><strong>${grn.grn_number}</strong></td>
                                         <td>${formatDate(grn.entry_date)}</td>
-                                        <td>${grn.invoice_number || 'N/A'}</td>
+                                        <td>${grn.receipt_mode === 'Delivery Note' ? '<span style="color:#b45309;">DN - awaiting invoice</span>' : (grn.invoice_number || 'N/A')}</td>
                                         <td style="text-align: right;">${symbol} ${formatNumber(grn.total_amount || 0)}</td>
                                         <td><span class="status-badge status-goods-received">Posted</span></td>
                                         <td style="text-align: center;">
@@ -4034,7 +4154,7 @@
             line.expiry_date = value;
         }
         
-        renderGRNLines();
+        renderGRNLines(false, index);
         updateGRNTotal();
     }
 
@@ -4142,12 +4262,24 @@
     }
 
     async function generateGRNNumber(attempt = 0) {
-        const { count, error } = await supabaseClient
+        // Next number = highest existing number of this year + 1 (not COUNT+1:
+        // deleted/renumbered GRNs make the count lag behind and cause
+        // "duplicate grn_number" collisions).
+        const year = new Date().getFullYear();
+        const prefix = `GRN-${year}-`;
+        const { data, error } = await supabaseClient
             .from('goods_receipt_notes')
-            .select('id', { count: 'exact', head: true });
+            .select('grn_number')
+            .like('grn_number', prefix + '%')
+            .order('grn_number', { ascending: false })
+            .limit(1);
         if (error) throw error;
-        const next = (count || 0) + 1 + attempt;
-        return `GRN-${new Date().getFullYear()}-${String(next).padStart(5, '0')}`;
+        let last = 0;
+        if (data && data.length) {
+            const m = String(data[0].grn_number).match(/(\d+)$/);
+            if (m) last = parseInt(m[1], 10) || 0;
+        }
+        return `${prefix}${String(last + 1 + attempt).padStart(5, '0')}`;
     }
 
     // 🔥 FIX: GRN numbers were generated as COUNT(*)+1 and inserted
@@ -4167,18 +4299,23 @@
         const invoiceDate = document.getElementById('grnInvoiceDate')?.value || new Date().toISOString().split('T')[0];
         const notes = document.getElementById('grnNotes')?.value || '';
         const grnNumber = await generateGRNNumber(attempt);
+        const isDN = getGRNReceiptMode() === 'Delivery Note';
+        const deliveryNoteNumber = (document.getElementById('grnDeliveryNoteNumber')?.value || '').trim() || null;
 
         const record = {
             grn_number: grnNumber,
             purchase_order_id: orderId,
             supplier_id: supplierId,
             entry_date: entryDate,
-            invoice_number: invoiceNumber,
-            invoice_date: invoiceDate,
+            receipt_mode: isDN ? 'Delivery Note' : 'Invoice',
+            delivery_note_number: isDN ? deliveryNoteNumber : null,
+            // Delivery-note receipts have no invoice yet -- these are filled in later by submitMatchInvoice().
+            invoice_number: isDN ? null : invoiceNumber,
+            invoice_date: isDN ? null : invoiceDate,
             currency: currency,
             exchange_rate: exchangeRate,
             total_amount: grnTotal,
-            invoice_total: invoiceTotal,
+            invoice_total: isDN ? null : invoiceTotal,
             freight: freight,
             insurance: insurance,
             notes: notes,
@@ -4382,9 +4519,11 @@
 
         const totalReceived = state.grnLines.reduce((sum, l) => sum + (l.received_quantity || 0), 0);
         const grnTotal = parseFloat(document.getElementById('grnGrandTotal')?.textContent?.replace(/[^0-9.]/g, '')) || 0;
-        const invoiceNumber = document.getElementById('grnInvoiceNumber')?.value || null;
+        const receiptMode = getGRNReceiptMode();
+        const isDN = receiptMode === 'Delivery Note';
+        const invoiceNumber = isDN ? null : (document.getElementById('grnInvoiceNumber')?.value || null);
 
-        if (!invoiceNumber && totalReceived > 0) {
+        if (!isDN && !invoiceNumber && totalReceived > 0) {
             showToast('Please enter invoice number', 'error');
             return;
         }
@@ -4396,13 +4535,15 @@
         // freight/insurance the supplier billed differently, etc.).
         // Previously the field was editable but not actually required,
         // and the payable/accounting entries used grnTotal instead of it.
-        const invoiceTotal = parseFloat(document.getElementById('grnInvoiceTotal')?.value) || 0;
-        if (totalReceived > 0 && invoiceTotal <= 0) {
+        const invoiceTotal = isDN ? 0 : (parseFloat(document.getElementById('grnInvoiceTotal')?.value) || 0);
+        if (!isDN && totalReceived > 0 && invoiceTotal <= 0) {
             showToast("Please enter the Invoice Total (the actual amount on the supplier's invoice) before posting.", 'error');
             return;
         }
 
-        let confirmMessage = `Confirm receiving ${totalReceived} items with invoice ${invoiceNumber || 'N/A'}?`;
+        let confirmMessage = isDN
+            ? `Confirm receiving ${totalReceived} items on DELIVERY NOTE?\n\nStock will be added now. No payable is created until you attach the supplier's invoice (Purchase page -> Awaiting Invoice).`
+            : `Confirm receiving ${totalReceived} items with invoice ${invoiceNumber || 'N/A'}?`;
 
         if (!confirm(confirmMessage)) {
             return;
@@ -4431,7 +4572,7 @@
                 // Only Credit purchases create a payable -- Cash purchases
                 // were already paid, so there's nothing owed to record.
                 // Uses invoiceTotal, not grnTotal -- see fix note above.
-                if (paymentType === 'Credit') {
+                if (!isDN && paymentType === 'Credit') {
                     await createSupplierPayable(supplierId, grnId, orderId, currency, exchangeRate, invoiceTotal, invoiceNumber);
                 }
 
@@ -4439,7 +4580,13 @@
                 // Credit Cash (Cash purchase) or Credit Accounts Payable
                 // (Credit purchase) -- also uses invoiceTotal, since that's
                 // the actual amount owed/paid, not our own computed total.
-                await createGRNAccountingEntries(grn.grn_number, invoiceTotal, currency, exchangeRate, paymentType);
+                // Delivery note: Debit Inventory / Credit Goods Received Not Invoiced
+                // for the GRN's own total; the invoice step clears it later.
+                if (isDN) {
+                    await createGRNAccountingEntries(grn.grn_number, grnTotal, currency, exchangeRate, paymentType, 'Delivery Note');
+                } else {
+                    await createGRNAccountingEntries(grn.grn_number, invoiceTotal, currency, exchangeRate, paymentType);
+                }
             }
 
             // Update PO lines
@@ -4449,7 +4596,7 @@
             await updatePOHeader(orderId);
 
             // Show summary
-            showPostGRNSummary(totalReceived, invoiceNumber, currency, invoiceTotal);
+            showPostGRNSummary(totalReceived, invoiceNumber, currency, isDN ? grnTotal : invoiceTotal, isDN);
 
             closeModal('grnModal');
             await loadPurchaseOrders();
@@ -4464,7 +4611,7 @@
     // CREATE SUPPLIER PAYABLE - ALWAYS CALLED
     // ============================================
 
-    async function createSupplierPayable(supplierId, grnId, orderId, currency, exchangeRate, grnTotal, invoiceNumber) {
+    async function createSupplierPayable(supplierId, grnId, orderId, currency, exchangeRate, grnTotal, invoiceNumber, invoiceDateOverride = null, throwOnError = false) {
         if (!supplierId || grnTotal <= 0) return;
 
         const payableData = {
@@ -4472,8 +4619,8 @@
             grn_id: grnId,
             po_id: orderId,
             invoice_number: invoiceNumber,
-            invoice_date: document.getElementById('grnInvoiceDate')?.value || new Date().toISOString().split('T')[0],
-            due_date: new Date(new Date().setDate(new Date().getDate() + 30)).toISOString().split('T')[0],
+            invoice_date: invoiceDateOverride || document.getElementById('grnInvoiceDate')?.value || new Date().toISOString().split('T')[0],
+            due_date: (() => { const d = new Date((invoiceDateOverride || new Date().toISOString().split('T')[0]) + 'T00:00:00'); d.setDate(d.getDate() + 30); return d.toISOString().split('T')[0]; })(),
             total_amount: grnTotal,
             amount_paid: 0,
             amount_remaining: grnTotal,
@@ -4491,6 +4638,7 @@
 
         if (payableError) {
             console.error('Error creating supplier payable:', payableError);
+            if (throwOnError) throw payableError;
             showToast('⚠️ GRN posted but payable creation failed. Please check manually.', 'warning');
         } else {
             showToast(`✅ Supplier payable created for invoice ${invoiceNumber}`, 'success');
@@ -4581,7 +4729,7 @@
     // unstyled browser-default popup with no CSS at all. Replaced with a
     // proper modal matching the same .modal-content-box convention
     // already used elsewhere in this file (e.g. ensureAddSupplierModal).
-    function showPostGRNSummary(totalReceived, invoiceNumber, currency, invoiceTotal) {
+    function showPostGRNSummary(totalReceived, invoiceNumber, currency, invoiceTotal, isDN = false) {
         const totalRemaining = state.grnLines.reduce((sum, l) =>
             sum + ((l.order_quantity || 0) - (l.received_quantity || 0) - (l.cancelled_quantity || 0)), 0);
         const totalCancelled = state.grnLines.reduce((sum, l) => sum + (l.cancelled_quantity || 0), 0);
@@ -4608,12 +4756,12 @@
         overlay.innerHTML = `
             <div class="modal-content-box" style="background:white;padding:30px;border-radius:12px;width:90%;max-width:440px;box-shadow:0 20px 50px rgba(0,0,0,0.5);text-align:center;">
                 <div style="margin-bottom:14px;"><i class="fa-solid fa-circle-check" style="font-size:3rem;color:#22c55e;"></i></div>
-                <h3 style="margin:0 0 16px 0;color:#0f172a;">GRN Processed Successfully</h3>
+                <h3 style="margin:0 0 16px 0;color:#0f172a;">${isDN ? 'Goods Received on Delivery Note' : 'GRN Processed Successfully'}</h3>
                 <div style="background:#f8fafc;border-radius:8px;padding:14px;text-align:left;font-size:0.9rem;color:#334155;margin-bottom:12px;">
                     <div style="display:flex;justify-content:space-between;padding:4px 0;"><span>Received</span><strong>${totalReceived} item(s)</strong></div>
-                    <div style="display:flex;justify-content:space-between;padding:4px 0;"><span>Invoice #</span><strong>${invoiceNumber || 'N/A'}</strong></div>
-                    <div style="display:flex;justify-content:space-between;padding:4px 0;"><span>Invoice Amount</span><strong>${currency} ${formatNumber(invoiceTotal || 0)}</strong></div>
-                    <div style="display:flex;justify-content:space-between;padding:4px 0;"><span>Payable</span><strong>Created for this invoice</strong></div>
+                    <div style="display:flex;justify-content:space-between;padding:4px 0;"><span>${isDN ? 'Document' : 'Invoice #'}</span><strong>${isDN ? 'Delivery Note' : (invoiceNumber || 'N/A')}</strong></div>
+                    <div style="display:flex;justify-content:space-between;padding:4px 0;"><span>${isDN ? 'Stock Value' : 'Invoice Amount'}</span><strong>${currency} ${formatNumber(invoiceTotal || 0)}</strong></div>
+                    <div style="display:flex;justify-content:space-between;padding:4px 0;"><span>Payable</span><strong>${isDN ? 'None yet - awaiting invoice' : 'Created for this invoice'}</strong></div>
                 </div>
                 <div style="text-align:left;font-size:0.85rem;">${statusLine}</div>
                 <button id="grnSummaryCloseBtn" style="margin-top:20px;background:#2563eb;color:white;border:none;padding:10px 28px;border-radius:6px;cursor:pointer;">
@@ -4652,6 +4800,10 @@
             return;
         }
 
+        if (grn.receipt_mode === 'Delivery Note') {
+            showToast('This GRN was received on a delivery note. Attach the supplier invoice first (Add Invoice), then raise the credit note.', 'warning');
+            return;
+        }
         const lines = grn.goods_receipt_lines || [];
         if (lines.length === 0) {
             showToast('This GRN has no received lines to return', 'error');
@@ -5258,6 +5410,352 @@
     }
 
     // ============================================
+    // DELIVERY NOTE RECEIVING + "AWAITING INVOICE"
+    // ============================================
+    // Goods can arrive with only a delivery note. Receiving "on Delivery Note":
+    //   - adds the stock and its cost to inventory straight away (so selling can
+    //     carry on as normal),
+    //   - creates NO supplier payable,
+    //   - books  Dr Inventory / Cr Goods Received Not Invoiced (2010).
+    // When the real invoice arrives, "Add Invoice" (submitMatchInvoice) converts
+    // the GRN to an Invoice GRN: creates the payable (Credit) or pays from cash
+    // (Cash), clears 2010, and applies any rate changes to the line cost and the
+    // batch cost. It NEVER changes stock quantities.
+
+    function getGRNReceiptMode() {
+        return document.getElementById('grnReceiptModeDeliveryNote')?.checked ? 'Delivery Note' : 'Invoice';
+    }
+
+    function toggleGRNReceiptMode() {
+        const isDN = getGRNReceiptMode() === 'Delivery Note';
+        const show = (id, on, disp = '') => { const el = document.getElementById(id); if (el) el.style.display = on ? disp : 'none'; };
+        show('grnInvoiceNumberField', !isDN);
+        show('grnInvoiceDateField', !isDN);
+        show('grnPaymentTypeField', !isDN);
+        show('grnInvoiceTotalField', !isDN);
+        show('grnDeliveryNoteNumberField', isDN);
+        show('grnDeliveryNoteHint', isDN, 'block');
+        if (isDN) show('grnVarianceDisplay', false);
+        else validateInvoice();
+        const btn = document.getElementById('postGrnBtn');
+        if (btn && !btn.disabled) {
+            btn.innerHTML = isDN
+                ? '<i class="fa-solid fa-truck-ramp-box"></i> Receive on Delivery Note'
+                : '<i class="fa-solid fa-check-circle"></i> Post GRN';
+        }
+    }
+
+    async function getUnmatchedDNTotal(poId) {
+        try {
+            const { data } = await supabaseClient
+                .from('goods_receipt_notes')
+                .select('total_amount')
+                .eq('purchase_order_id', poId)
+                .eq('receipt_mode', 'Delivery Note');
+            return (data || []).reduce((sum, g) => sum + (g.total_amount || 0), 0);
+        } catch (e) {
+            console.error('Could not check delivery-note GRNs:', e);
+            return 0;
+        }
+    }
+
+    function dnSymbol(currency) { return currency === 'ZMW' ? 'ZK' : '$'; }
+
+    async function loadPendingInvoiceGRNs() {
+        const countEl = document.getElementById('pendingInvoiceCount');
+        const alertEl = document.getElementById('pendingInvoiceAlert');
+        const listEl = document.getElementById('pendingInvoiceList');
+        try {
+            const { data, error } = await supabaseClient
+                .from('goods_receipt_notes')
+                .select('id, grn_number, entry_date, delivery_note_number, total_amount, currency, purchase_orders:purchase_order_id (po_number, suppliers:supplier_id (name))')
+                .eq('receipt_mode', 'Delivery Note')
+                .order('entry_date', { ascending: true });
+            if (error) throw error;
+            state.pendingDNGRNs = data || [];
+        } catch (e) {
+            console.error('Error loading delivery-note GRNs:', e);
+            state.pendingDNGRNs = [];
+        }
+        const rows = state.pendingDNGRNs;
+        if (countEl) countEl.textContent = rows.length;
+        if (!alertEl || !listEl) return;
+        if (rows.length === 0) { alertEl.style.display = 'none'; listEl.innerHTML = ''; return; }
+        alertEl.style.display = 'block';
+        const today = new Date(); today.setHours(0, 0, 0, 0);
+        listEl.innerHTML = rows.map(g => {
+            const d = new Date(g.entry_date + 'T00:00:00');
+            const days = Math.max(0, Math.round((today - d) / 86400000));
+            const sup = g.purchase_orders?.suppliers?.name || 'Unknown supplier';
+            const color = days >= 14 ? '#dc2626' : '#92400e';
+            return `<div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;padding:6px 0;border-top:1px solid #fde68a;">
+                <strong>${g.grn_number}</strong>
+                <span>${sup}</span>
+                <span style="color:#64748b;">PO ${g.purchase_orders?.po_number || '-'}${g.delivery_note_number ? ' | DN ' + g.delivery_note_number : ''}</span>
+                <span>${dnSymbol(g.currency)} ${formatNumber(g.total_amount || 0)}</span>
+                <span style="color:${color};">${days === 0 ? 'today' : days + ' day' + (days === 1 ? '' : 's') + ' waiting'}</span>
+                <button class="btn btn-sm btn-primary" style="margin-left:auto;" onclick="openMatchInvoiceModal('${g.id}')"><i class="fa-solid fa-file-invoice"></i> Add Invoice</button>
+            </div>`;
+        }).join('');
+    }
+
+    async function openMatchInvoiceModal(grnId) {
+        try {
+            const { data: grn, error } = await supabaseClient
+                .from('goods_receipt_notes')
+                .select('*, goods_receipt_lines (*), purchase_orders:purchase_order_id (po_number, suppliers:supplier_id (name))')
+                .eq('id', grnId)
+                .single();
+            if (error) throw error;
+            if (grn.receipt_mode !== 'Delivery Note') {
+                showToast('This GRN already has its invoice attached.', 'info');
+                await loadPendingInvoiceGRNs();
+                return;
+            }
+            closeModal('viewPOModal');
+            state.matchGRN = grn;
+            const sym = dnSymbol(grn.currency);
+            const set = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v; };
+            set('matchInvoiceGRNNumber', grn.grn_number);
+            set('matchInvoicePO', grn.purchase_orders?.po_number || '-');
+            set('matchInvoiceSupplier', grn.purchase_orders?.suppliers?.name || 'Unknown');
+            set('matchInvoiceDeliveryNote', grn.delivery_note_number || '-');
+            set('matchInvoiceGRNTotal', `${sym} ${formatNumber(grn.total_amount || 0)}`);
+            const num = document.getElementById('matchInvoiceNumber'); if (num) num.value = '';
+            const dt = document.getElementById('matchInvoiceDate'); if (dt) dt.value = new Date().toISOString().split('T')[0];
+            const pt = document.getElementById('matchInvoicePaymentType'); if (pt) pt.value = 'Credit';
+            const tot = document.getElementById('matchInvoiceTotal');
+            if (tot) { tot.value = ''; tot.dataset.touched = ''; tot.oninput = () => { tot.dataset.touched = '1'; refreshMatchTotals(); }; }
+            renderMatchInvoiceLines();
+            refreshMatchTotals();
+            showModal('matchInvoiceModal');
+        } catch (e) {
+            console.error('Error opening invoice match:', e);
+            showToast('Could not open this GRN: ' + e.message, 'error');
+        }
+    }
+
+    function renderMatchInvoiceLines() {
+        const grn = state.matchGRN;
+        const body = document.getElementById('matchInvoiceLinesBody');
+        if (!grn || !body) return;
+        const sym = dnSymbol(grn.currency);
+        body.innerHTML = (grn.goods_receipt_lines || []).map((l, i) => `
+            <tr>
+                <td>${l.product_name || ''}</td>
+                <td>${l.batch_number || ''}</td>
+                <td style="text-align:right;">${l.received_quantity} x ${l.pack_size || 1}</td>
+                <td style="text-align:right;">${sym} ${formatNumber(l.purchase_rate || 0)}</td>
+                <td><input type="number" step="0.01" min="0" class="form-control" style="max-width:110px;text-align:right;" id="matchRate_${i}" value="${l.purchase_rate || 0}" oninput="refreshMatchTotals()"></td>
+                <td style="text-align:right;" id="matchLineTotal_${i}">${sym} ${formatNumber((l.received_quantity || 0) * (l.purchase_rate || 0))}</td>
+            </tr>`).join('');
+    }
+
+    function getMatchRates() {
+        const grn = state.matchGRN;
+        return (grn?.goods_receipt_lines || []).map((l, i) => {
+            const v = parseFloat(document.getElementById('matchRate_' + i)?.value);
+            return isNaN(v) ? (l.purchase_rate || 0) : v;
+        });
+    }
+
+    function refreshMatchTotals() {
+        const grn = state.matchGRN;
+        if (!grn) return;
+        const sym = dnSymbol(grn.currency);
+        const rates = getMatchRates();
+        let linesTotal = 0;
+        (grn.goods_receipt_lines || []).forEach((l, i) => {
+            const t = (l.received_quantity || 0) * rates[i];
+            linesTotal += t;
+            const el = document.getElementById('matchLineTotal_' + i);
+            if (el) el.textContent = `${sym} ${formatNumber(t)}`;
+        });
+        const extras = (grn.freight || 0) + (grn.insurance || 0);
+        const computed = Math.round((linesTotal + extras) * 100) / 100;
+        const tot = document.getElementById('matchInvoiceTotal');
+        if (tot && !tot.dataset.touched) tot.value = computed.toFixed(2);
+        const entered = parseFloat(tot?.value) || 0;
+        const info = document.getElementById('matchInvoiceVariance');
+        if (info) {
+            const diffVsLines = entered - computed;
+            const diffVsDN = entered - (grn.total_amount || 0);
+            info.innerHTML = `Lines${extras ? ' + freight/insurance' : ''}: <strong>${sym} ${formatNumber(computed)}</strong>`
+                + (Math.abs(diffVsLines) >= 0.01 ? ` &nbsp;|&nbsp; <span style="color:#dc2626;">invoice total differs from lines by ${sym} ${formatNumber(diffVsLines)}</span>` : ` &nbsp;<span style="color:#16a34a;">&#10003; matches lines</span>`)
+                + ` &nbsp;|&nbsp; Change vs delivery-note value: <strong style="color:${Math.abs(diffVsDN) < 0.01 ? '#16a34a' : '#b45309'};">${sym} ${formatNumber(diffVsDN)}</strong>`;
+        }
+    }
+
+    function closeMatchInvoiceModal() {
+        closeModal('matchInvoiceModal');
+        state.matchGRN = null;
+    }
+
+    async function submitMatchInvoice() {
+        const btn = document.getElementById('matchInvoiceSubmitBtn');
+        if (btn?.disabled) return;
+        const grn = state.matchGRN;
+        if (!grn) { showToast('No GRN selected', 'error'); return; }
+
+        const invoiceNumber = (document.getElementById('matchInvoiceNumber')?.value || '').trim();
+        const invoiceDate = document.getElementById('matchInvoiceDate')?.value || new Date().toISOString().split('T')[0];
+        const invoiceTotal = parseFloat(document.getElementById('matchInvoiceTotal')?.value) || 0;
+        const paymentType = document.getElementById('matchInvoicePaymentType')?.value || 'Credit';
+        if (!invoiceNumber) { showToast('Please enter the invoice number', 'error'); return; }
+        if (invoiceTotal <= 0) { showToast('Please enter the invoice total', 'error'); return; }
+
+        const sym = dnSymbol(grn.currency);
+        const lines = grn.goods_receipt_lines || [];
+        const newRates = getMatchRates();
+        const changed = lines.map((l, i) => Math.abs(newRates[i] - (l.purchase_rate || 0)) >= 0.0001);
+        const anyChange = changed.some(Boolean);
+        if (!confirm(`Attach invoice ${invoiceNumber} (${sym} ${formatNumber(invoiceTotal)}) to ${grn.grn_number}?\n\n`
+            + (paymentType === 'Credit' ? 'A supplier payable will be created.' : 'It will be posted as a cash payment.')
+            + (anyChange ? '\nSome rates changed: the stock cost will be updated. Stock quantities are NOT touched.' : '\nStock quantities and costs stay as they are.'))) return;
+
+        if (btn) { btn.disabled = true; btn.dataset.html = btn.innerHTML; btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Saving...'; }
+
+        const rate = grn.currency === 'USD' ? (grn.exchange_rate || 1) : 1;
+        const toZmw = v => Math.round(v * rate * 100) / 100;
+        let claimed = false, payableCreated = false;
+        try {
+            // 1) CLAIM the GRN (only succeeds while it is still a delivery note), so a double
+            //    click / second tab can never book the invoice twice.
+            const newLinesTotal = lines.reduce((sum, l, i) => sum + (l.received_quantity || 0) * newRates[i], 0);
+            const newGrnTotal = Math.round((newLinesTotal + (grn.freight || 0) + (grn.insurance || 0)) * 100) / 100;
+            const { data: claim, error: claimErr } = await supabaseClient
+                .from('goods_receipt_notes')
+                .update({
+                    receipt_mode: 'Invoice',
+                    invoice_number: invoiceNumber,
+                    invoice_date: invoiceDate,
+                    invoice_total: invoiceTotal,
+                    total_amount: newGrnTotal,
+                    invoice_matched_at: new Date().toISOString()
+                })
+                .eq('id', grn.id)
+                .eq('receipt_mode', 'Delivery Note')
+                .select('id');
+            if (claimErr) throw claimErr;
+            if (!claim || claim.length === 0) {
+                showToast('This GRN was already invoiced by someone else. Refreshing the list.', 'warning');
+                closeMatchInvoiceModal();
+                await loadPendingInvoiceGRNs();
+                return;
+            }
+            claimed = true;
+
+            // 2) Work out the cost change in ZMW, and how much of it belongs to stock already sold.
+            const accountCodes = await getAccountCodesFromChartOfAccounts();
+            const { data: batchRows } = await supabaseClient
+                .from('batches')
+                .select('id, product_id, batch_number, expiry_date, total_qty, remaining_qty, cost_price, created_at')
+                .in('product_id', [...new Set(lines.map(l => l.product_id).filter(Boolean))].length ? [...new Set(lines.map(l => l.product_id).filter(Boolean))] : ['00000000-0000-0000-0000-000000000000']);
+            const grnTime = new Date(grn.created_at || Date.now()).getTime();
+            const batchUpdates = [];
+            let cogsPart = 0;
+            lines.forEach((l, i) => {
+                if (!changed[i]) return;
+                const pack = l.pack_size || 1;
+                const units = (l.received_quantity || 0) * pack;
+                const oldUnit = (l.purchase_rate || 0) / pack * rate;
+                const newUnit = newRates[i] / pack * rate;
+                const cands = (batchRows || []).filter(b => b.product_id === l.product_id
+                    && String(b.batch_number) === String(l.batch_number)
+                    && (b.expiry_date || null) === (l.expiry_date || null));
+                cands.sort((a, b) => {
+                    const qa = a.total_qty === units ? 0 : 1, qb = b.total_qty === units ? 0 : 1;
+                    if (qa !== qb) return qa - qb;
+                    return Math.abs(new Date(a.created_at).getTime() - grnTime) - Math.abs(new Date(b.created_at).getTime() - grnTime);
+                });
+                const batch = cands[0];
+                if (batch) {
+                    const sold = Math.min(units, Math.max(0, (batch.total_qty || 0) - (batch.remaining_qty || 0)));
+                    cogsPart += (newUnit - oldUnit) * sold;
+                    batchUpdates.push({ id: batch.id, cost_price: newUnit, line: l.product_name });
+                } else {
+                    console.warn('No batch found to re-cost for', l.product_name, l.batch_number);
+                    batchUpdates.push({ id: null, line: l.product_name });
+                }
+            });
+
+            // 3) Supplier payable (Credit only).
+            if (paymentType === 'Credit') {
+                await createSupplierPayable(grn.supplier_id, grn.id, grn.purchase_order_id, grn.currency, grn.exchange_rate, invoiceTotal, invoiceNumber, invoiceDate, true);
+                payableCreated = true;
+            }
+
+            // 4) Journal: clear GRNI (what was booked at receiving), book AP/Cash at the invoice
+            //    total, and put any difference into Inventory (and COGS for the already-sold part).
+            const oldZmw = toZmw(grn.total_amount || 0);
+            const newZmw = toZmw(invoiceTotal);
+            const cogsZmw = Math.round(cogsPart * 100) / 100;
+            const diff = Math.round((newZmw - oldZmw) * 100) / 100;
+            const inventoryAdj = Math.round((diff - cogsZmw) * 100) / 100;
+            const entries = [
+                { account: accountCodes.grni, amount: oldZmw, desc: `Clear goods received not invoiced - ${grn.grn_number}` },
+                { account: paymentType === 'Credit' ? accountCodes.accounts_payable : accountCodes.cash_zmw, amount: -newZmw, desc: `${paymentType === 'Credit' ? 'Credit' : 'Cash'} purchase - invoice ${invoiceNumber} (${grn.grn_number})` },
+                { account: accountCodes.inventory, amount: inventoryAdj, desc: `Invoice cost adjustment - ${grn.grn_number}` },
+                { account: accountCodes.cogs, amount: cogsZmw, desc: `Invoice cost adjustment on stock already sold - ${grn.grn_number}` }
+            ].filter(e => Math.abs(e.amount) >= 0.005);
+            const { data: je, error: jeErr } = await withAuthRetry(() => supabaseClient.from('journal_entries').insert([{
+                entry_date: new Date().toISOString().split('T')[0],
+                reference: `${grn.grn_number}-INV`,
+                description: `Invoice ${invoiceNumber} attached to ${grn.grn_number}` + (grn.currency === 'USD' ? ` (USD ${formatNumber(invoiceTotal)} @ ${grn.exchange_rate})` : ''),
+                journal_number: `INV-${new Date().getFullYear()}-${String(Math.floor(Math.random() * 1000000)).padStart(6, '0')}`,
+                status: 'Posted',
+                created_at: new Date().toISOString()
+            }]).select());
+            if (jeErr) throw jeErr;
+            const { error: jlErr } = await withAuthRetry(() => supabaseClient.from('journal_lines').insert(entries.map(e => ({
+                journal_entry_id: je[0].id,
+                account_code: e.account,
+                description: e.desc,
+                debit: e.amount > 0 ? e.amount : 0,
+                credit: e.amount < 0 ? -e.amount : 0
+            }))));
+            if (jlErr) {
+                await supabaseClient.from('journal_entries').delete().eq('id', je[0].id);
+                throw jlErr;
+            }
+
+            // 5) Everything that can fail has succeeded -- now apply the new rates to the GRN lines and batches.
+            let costWarn = false;
+            for (let i = 0; i < lines.length; i++) {
+                if (!changed[i]) continue;
+                const { error: lErr } = await supabaseClient.from('goods_receipt_lines')
+                    .update({ purchase_rate: newRates[i], total_amount: (lines[i].received_quantity || 0) * newRates[i] })
+                    .eq('id', lines[i].id);
+                if (lErr) { console.error('Line rate update failed', lErr); costWarn = true; }
+            }
+            for (const u of batchUpdates) {
+                if (!u.id) { costWarn = true; continue; }
+                const { error: bErr } = await supabaseClient.from('batches').update({ cost_price: u.cost_price }).eq('id', u.id);
+                if (bErr) { console.error('Batch cost update failed', bErr); costWarn = true; }
+            }
+
+            showToast(`Invoice ${invoiceNumber} attached to ${grn.grn_number}.` + (paymentType === 'Credit' ? ' Payable created.' : ''), 'success');
+            if (costWarn) showToast('Invoice saved, but some batch costs could not be updated - please check the stock cost of the changed lines.', 'warning');
+            closeMatchInvoiceModal();
+            await loadPendingInvoiceGRNs();
+            await loadPurchaseOrders();
+        } catch (e) {
+            console.error('Error attaching invoice:', e);
+            // Roll back what we can so the user can simply try again.
+            try {
+                if (payableCreated) await supabaseClient.from('supplier_payables').delete().eq('grn_id', grn.id);
+                if (claimed) await supabaseClient.from('goods_receipt_notes').update({
+                    receipt_mode: 'Delivery Note', invoice_number: null, invoice_date: null, invoice_total: null,
+                    total_amount: grn.total_amount, invoice_matched_at: null
+                }).eq('id', grn.id);
+            } catch (rb) { console.error('Rollback failed', rb); }
+            showToast('Could not attach the invoice: ' + (e.message || e) + ' (nothing was changed, please try again)', 'error');
+        } finally {
+            if (btn) { btn.disabled = false; btn.innerHTML = btn.dataset.html || '<i class="fa-solid fa-check-circle"></i> Save Invoice'; }
+        }
+    }
+
+    // ============================================
     // STATS AND OVERDUE FUNCTIONS
     // ============================================
 
@@ -5703,8 +6201,10 @@
                     <tr><td class="label">PO Reference:</td><td>${grn.purchase_orders?.po_number || 'N/A'}</td></tr>
                     <tr><td class="label">Supplier:</td><td>${grn.purchase_orders?.suppliers?.name || 'Unknown'}</td></tr>
                     <tr><td class="label">Entry Date:</td><td>${formatDate(grn.entry_date)}</td></tr>
-                    <tr><td class="label">Invoice Number:</td><td>${grn.invoice_number || 'N/A'}</td></tr>
-                    <tr><td class="label">Invoice Date:</td><td>${formatDate(grn.invoice_date)}</td></tr>
+                    ${grn.receipt_mode === 'Delivery Note'
+                        ? `<tr><td class="label">Received On:</td><td>Delivery Note${grn.delivery_note_number ? ' #' + grn.delivery_note_number : ''} (invoice awaited)</td></tr>`
+                        : `<tr><td class="label">Invoice Number:</td><td>${grn.invoice_number || 'N/A'}</td></tr>
+                    <tr><td class="label">Invoice Date:</td><td>${formatDate(grn.invoice_date)}</td></tr>`}
                     <tr><td class="label">Currency:</td><td>${grn.currency || 'USD'}</td></tr>
                     ${grn.notes ? `<tr><td class="label">Notes:</td><td>${grn.notes}</td></tr>` : ''}
                 </table>
@@ -5927,57 +6427,88 @@
         // Product search
         const searchInput = document.getElementById('poProductSearch');
         if (searchInput) {
-            // 🔥 CHANGED: 'input' (not 'keyup') re-runs the search as you
-            // type -- keydown below now owns Enter/Tab/Arrow keys instead
-            // of keyup re-searching on every key including those.
+            // Typing opens the list instantly (filtered in memory).
             searchInput.addEventListener('input', function() {
                 searchProducts();
             });
-            // 🔥 FIX (issue #1): opening the dropdown no longer requires
-            // typing anything -- clicking/focusing the field now shows
-            // the product list immediately, same as a normal dropdown.
+            // Clicking into the empty box also shows the list, like a dropdown --
+            // but not right after a pick, so the box stays empty and ready.
             searchInput.addEventListener('focus', function() {
+                if (poSuppressFocusOpen) return;
                 searchProducts();
             });
-            // 🔥 ADDED: arrow keys navigate the results, Enter or Tab adds
-            // whichever one is highlighted -- same request as "arrow keys
-            // should be working to select and tab to add". Tab deliberately
-            // does NOT preventDefault: it adds the product AND lets focus
-            // continue moving to the next field, same as a native <select>.
+            // Keys: Down/Up move, Enter picks, Tab picks (only when something is
+            // typed) and stays in the box for the next product, Esc closes.
             searchInput.addEventListener('keydown', function(e) {
                 const results = document.getElementById('poSearchResults');
-                if (!results || results.style.display === 'none') return;
+                if (!results) return;
+                const open = results.style.display !== 'none';
 
-                if (e.key === 'ArrowDown') {
+                if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
                     e.preventDefault();
+                    if (!open) { searchProducts(); return; }
                     if (!productSearchResults.length) return;
-                    productSearchHighlightIndex = Math.min(productSearchHighlightIndex + 1, productSearchResults.length - 1);
+                    productSearchHighlightIndex = e.key === 'ArrowDown'
+                        ? Math.min(productSearchHighlightIndex + 1, productSearchResults.length - 1)
+                        : Math.max(productSearchHighlightIndex - 1, 0);
                     renderSearchResultsList();
                     scrollProductHighlightIntoView();
-                } else if (e.key === 'ArrowUp') {
+                    return;
+                }
+                if (!open) return;
+                if (e.key === 'Enter') {
                     e.preventDefault();
-                    if (!productSearchResults.length) return;
-                    productSearchHighlightIndex = Math.max(productSearchHighlightIndex - 1, 0);
-                    renderSearchResultsList();
-                    scrollProductHighlightIntoView();
-                } else if (e.key === 'Enter') {
-                    e.preventDefault();
-                    if (productSearchHighlightIndex >= 0 && productSearchResults[productSearchHighlightIndex]) {
-                        addProductToPO(productSearchResults[productSearchHighlightIndex].id);
-                    }
+                    const hit = productSearchResults[productSearchHighlightIndex];
+                    if (hit) addProductToPO(hit.id);
                 } else if (e.key === 'Tab') {
-                    if (productSearchHighlightIndex >= 0 && productSearchResults[productSearchHighlightIndex]) {
-                        addProductToPO(productSearchResults[productSearchHighlightIndex].id);
+                    const hit = productSearchResults[productSearchHighlightIndex];
+                    if (hit && searchInput.value.trim()) {
+                        e.preventDefault();
+                        addProductToPO(hit.id);
+                    } else {
+                        results.style.display = 'none';
                     }
                 } else if (e.key === 'Escape') {
                     results.style.display = 'none';
                 }
             });
+            // Mouse pick: mousedown (not click) + preventDefault so the box never
+            // loses focus before the pick registers.
+            const poResultsEl = document.getElementById('poSearchResults');
+            if (poResultsEl) {
+                poResultsEl.addEventListener('mousedown', function(e) {
+                    const item = e.target.closest('.result-item[data-id]');
+                    if (!item) return;
+                    e.preventDefault();
+                    addProductToPO(item.dataset.id);
+                });
+            }
             document.addEventListener('click', function(e) {
                 const results = document.getElementById('poSearchResults');
                 if (results && !searchInput.contains(e.target) && !results.contains(e.target)) {
                     results.style.display = 'none';
                 }
+            });
+        }
+
+        // Receive Goods table: Tab/Enter move straight to the next field, and a
+        // field's content is selected when you arrive so typing replaces it.
+        const grnBodyEl = document.getElementById('grnLinesBody');
+        if (grnBodyEl) {
+            grnBodyEl.addEventListener('focusin', function(e) {
+                const el = e.target;
+                if (el && el.tagName === 'INPUT' && el.type !== 'checkbox' && !el.disabled) {
+                    try { el.select(); } catch (_) {}
+                }
+            });
+            grnBodyEl.addEventListener('keydown', function(e) {
+                if (e.key !== 'Enter') return;
+                const el = e.target;
+                if (!el || el.tagName !== 'INPUT' || el.type === 'checkbox') return;
+                e.preventDefault();
+                const fields = Array.from(grnBodyEl.querySelectorAll('input:not([disabled]):not([type="checkbox"])'));
+                const next = fields[fields.indexOf(el) + 1];
+                if (next) next.focus(); else el.blur();
             });
         }
 
@@ -6094,6 +6625,11 @@
     window.openCancelRemainingPO = openCancelRemainingPO;
     window.confirmCancelRemainingPO = confirmCancelRemainingPO;
     window.receiveAllItems = receiveAllItems;
+    window.toggleGRNReceiptMode = toggleGRNReceiptMode;
+    window.openMatchInvoiceModal = openMatchInvoiceModal;
+    window.closeMatchInvoiceModal = closeMatchInvoiceModal;
+    window.submitMatchInvoice = submitMatchInvoice;
+    window.refreshMatchTotals = refreshMatchTotals;
     window.clearReceivedItems = clearReceivedItems;
     window.checkOverduePOs = checkOverduePOs;
     window.updateStats = updateStats;

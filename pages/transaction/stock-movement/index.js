@@ -57,12 +57,29 @@
     // LOAD DATA
     // ============================================
 
+    // The database returns at most 1000 rows per request. Sales passed 1000
+    // in mid-September, so this page only ever saw the OLDEST 1000 sales and
+    // silently dropped everything after -- products sold since then showed
+    // Sales = 0 and "not reconciled". Every big table is now read page by page.
+    async function fetchAllRows(buildQuery) {
+        const PAGE = 1000;
+        let all = [];
+        for (let from = 0; ; from += PAGE) {
+            const { data, error } = await buildQuery().range(from, from + PAGE - 1);
+            if (error) return { data: null, error };
+            all = all.concat(data || []);
+            if (!data || data.length < PAGE) break;
+        }
+        return { data: all, error: null };
+    }
+
     async function loadProducts() {
         try {
-            const { data, error } = await supabaseClient
+            const { data, error } = await fetchAllRows(() => supabaseClient
                 .from('products')
                 .select('*')
-                .order('product_name', { ascending: true });
+                .order('product_name', { ascending: true })
+                .order('id', { ascending: true }));
 
             if (error) throw error;
             state.products = data || [];
@@ -112,10 +129,11 @@
 
     async function loadBatches() {
         try {
-            const { data, error } = await supabaseClient
+            const { data, error } = await fetchAllRows(() => supabaseClient
                 .from('batches')
                 .select('*')
-                .order('created_at', { ascending: true });
+                .order('created_at', { ascending: true })
+                .order('id', { ascending: true }));
 
             if (error) throw error;
             state.batches = data || [];
@@ -144,7 +162,7 @@
             // Current Stock (read directly from batches.total_qty) was
             // still correct. Simplified to the one thing this file
             // actually needs from the join: the GRN number for display.
-            const { data, error } = await supabaseClient
+            const { data, error } = await fetchAllRows(() => supabaseClient
                 .from('goods_receipt_lines')
                 .select(`
                     *,
@@ -152,7 +170,8 @@
                         grn_number
                     )
                 `)
-                .order('created_at', { ascending: true });
+                .order('created_at', { ascending: true })
+                .order('id', { ascending: true }));
 
             if (error) {
                 console.warn('Error loading GRN lines:', error);
@@ -226,13 +245,14 @@
             // donation and write-off was being counted correctly once in
             // its own dedicated column AND a second time here, inflating
             // Sales and double-subtracting from Current Stock.
-            const { data, error } = await supabaseClient
+            const { data, error } = await fetchAllRows(() => supabaseClient
                 .from('sales')
                 .select('*')
                 .neq('is_quotation', true)
                 .neq('client_type', 'DONATION')
                 .neq('client_type', 'WRITEOFF')
-                .order('created_at', { ascending: true });
+                .order('created_at', { ascending: true })
+                .order('id', { ascending: true }));
 
             if (error) {
                 console.warn('Error loading sales:', error);
@@ -252,12 +272,13 @@
     async function loadDonations() {
         try {
             // Same fix as loadSales() -- see notes there.
-            const { data, error } = await supabaseClient
+            const { data, error } = await fetchAllRows(() => supabaseClient
                 .from('sales')
                 .select('*')
                 .eq('client_type', 'DONATION')
                 .neq('is_quotation', true)
-                .order('created_at', { ascending: true });
+                .order('created_at', { ascending: true })
+                .order('id', { ascending: true }));
 
             if (error) {
                 console.warn('Error loading donations:', error);

@@ -41,18 +41,34 @@
     // ============================================
     // LOAD DATA
     // ============================================
+
+    // The database returns at most 1000 rows per request; with ~80 sales a day
+    // that cut off the newest sales on any busy range. Read page by page.
+    async function fetchAllPaged(buildQuery) {
+        const PAGE = 1000;
+        let all = [];
+        for (let from = 0; ; from += PAGE) {
+            const { data, error } = await buildQuery().range(from, from + PAGE - 1);
+            if (error) return { data: null, error };
+            all = all.concat(data || []);
+            if (!data || data.length < PAGE) break;
+        }
+        return { data: all, error: null };
+    }
+
     async function loadSales(days) {
         const since = new Date();
         since.setDate(since.getDate() - days);
         since.setHours(0, 0, 0, 0);
 
-        const { data, error } = await supabaseClient
+        const { data, error } = await fetchAllPaged(() => supabaseClient
             .from('sales')
             .select('*')
             .in('client_type', ['RETAIL', 'WHOLESALE'])
             .neq('is_quotation', true)
             .gte('created_at', since.toISOString())
-            .order('created_at', { ascending: true });
+            .order('created_at', { ascending: true })
+            .order('id', { ascending: true }));
 
         if (error) {
             console.error('Error loading sales:', error);
@@ -194,14 +210,15 @@
         const startDate = new Date(year, month - 1, 1);
         const endDate = new Date(year, month, 0, 23, 59, 59, 999); // last day of that month
 
-        const { data: monthSales, error } = await supabaseClient
+        const { data: monthSales, error } = await fetchAllPaged(() => supabaseClient
             .from('sales')
             .select('*')
             .in('client_type', ['RETAIL', 'WHOLESALE'])
             .neq('is_quotation', true)
             .gte('created_at', startDate.toISOString())
             .lte('created_at', endDate.toISOString())
-            .order('created_at', { ascending: true });
+            .order('created_at', { ascending: true })
+            .order('id', { ascending: true }));
 
         if (error) {
             alert('Error loading data for that month: ' + error.message);

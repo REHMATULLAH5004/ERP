@@ -480,7 +480,7 @@
      (Credit) or posting straight to Cash, and clearing the amount
      provisionally booked to the Goods Received Not Invoiced account. -->
 <div class="modal" id="matchInvoiceModal">
-    <div class="modal-dialog">
+    <div class="modal-dialog modal-xl">
         <div class="modal-content">
             <div class="modal-header">
                 <h4><i class="fa-solid fa-file-invoice"></i> Attach Invoice to Delivery Note Receipt</h4>
@@ -530,9 +530,22 @@
                         </select>
                     </div>
                 </div>
+                <div style="margin-top:16px;">
+                    <div style="font-weight:600;margin-bottom:6px;">Check the rates against the supplier's invoice</div>
+                    <div class="table-responsive">
+                        <table class="table-minimal">
+                            <thead><tr>
+                                <th>Product</th><th>Batch</th><th style="text-align:right;">Qty (packs x size)</th>
+                                <th style="text-align:right;">Delivery-note rate / pack</th><th>Invoice rate / pack</th><th style="text-align:right;">Line total</th>
+                            </tr></thead>
+                            <tbody id="matchInvoiceLinesBody"></tbody>
+                        </table>
+                    </div>
+                    <div id="matchInvoiceVariance" style="font-size:0.85rem;margin-top:8px;color:#334155;"></div>
+                </div>
                 <p style="font-size: 0.8rem; color: #64748b; margin-top: 12px;">
                     <i class="fa-solid fa-circle-info"></i> Stock was already added to inventory when this GRN was received.
-                    Saving here only books the invoice: a supplier payable is created for <strong>Credit</strong>, or posted straight to Cash for <strong>Cash</strong>.
+                    Saving here only books the invoice: a supplier payable is created for <strong>Credit</strong>, or posted straight to Cash for <strong>Cash</strong>. Stock quantities are never changed; if you correct a rate above, the batch cost follows it.
                 </p>
             </div>
             <div class="modal-footer">

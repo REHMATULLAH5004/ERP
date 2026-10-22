@@ -128,6 +128,8 @@
                 .select('id, grn_number, entry_date, currency, invoice_total, supplier_id, suppliers ( name )')
                 .gte('entry_date', fromDate)
                 .lte('entry_date', toDate)
+                // Delivery-note receipts have no invoice amount yet; they join the report once invoiced.
+                .neq('receipt_mode', 'Delivery Note')
                 .order('id')
                 .range(from, to)
         );

@@ -201,6 +201,35 @@
     // .retail-pos-item <select> is still populated from the same data --
     // this is purely an extra index for filtering/display.
     let productCatalog = [];
+    // Edit-reliability fix: ONE shared in-flight load of the product list, and a
+    // helper that refills a product <select> WITHOUT wiping the item already
+    // chosen on that row. (Before, any late-finishing product-list load replaced
+    // every dropdown's options and silently cleared items that Edit had just
+    // filled in -- which is why Edit sometimes showed the whole invoice, one or
+    // two items, or nothing at all.)
+    let productCatalogPromise = null;
+    function setProductOptionsKeepingValue(select, optionsHtml) {
+        if (!select) return;
+        const keepValue = select.value;
+        const keepText = select.selectedIndex >= 0 ? (select.options[select.selectedIndex]?.text || '') : '';
+        select.innerHTML = `<option value="">Select Item</option>` + optionsHtml;
+        if (keepValue) {
+            if (!Array.from(select.options).some(o => o.value === keepValue)) {
+                const o = document.createElement('option');
+                o.value = keepValue;
+                o.textContent = keepText || 'Unknown item';
+                select.appendChild(o);
+            }
+            select.value = keepValue;
+        }
+    }
+    function ensureProductCatalog() {
+        if (productCatalog.length) return Promise.resolve();
+        if (!productCatalogPromise) {
+            productCatalogPromise = loadProductDropdowns().finally(() => { productCatalogPromise = null; });
+        }
+        return productCatalogPromise;
+    }
 
     // ============================================
     // DOM REFERENCES
@@ -3354,10 +3383,8 @@
                 return `<option value="${p.id}" data-generic="${generic}">${p.product_name}${p.is_bundle ? ' 📦 (Bundle)' : ''}</option>`;
             }).join('');
 
-            selects.forEach(select => {
-                if (select) {
-                    select.innerHTML = `<option value="">Select Item</option>` + optionsHtml;
-                }
+            document.querySelectorAll('.retail-pos-item').forEach(select => {
+                setProductOptionsKeepingValue(select, optionsHtml);
             });
         } catch (e) {
             console.warn("Could not load products:", e);
@@ -3375,7 +3402,7 @@
             // hasn't been populated yet (e.g. this runs before the initial
             // background load finishes).
             if (!productCatalog.length) {
-                await loadProductDropdowns();
+                await ensureProductCatalog();
             }
 
             // 🔥 FIX (perf): build the full options string once instead of
@@ -3389,7 +3416,7 @@
                 const generic = (p.generic_name || '').replace(/"/g, '&quot;');
                 return `<option value="${p.id}" data-generic="${generic}">${p.product_name}</option>`;
             }).join('');
-            select.innerHTML = `<option value="">Select Item</option>` + optionsHtml;
+            setProductOptionsKeepingValue(select, optionsHtml);
         } catch (e) {
             console.warn("Could not load products for row:", e);
         }
@@ -4413,8 +4440,8 @@
                 const originalHtml = btn.innerHTML;
                 btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Loading...';
                 try {
-                    await loadSaleByIdForEdit(btn.dataset.id);
-                    document.getElementById('retailSearchModal').style.display = 'none';
+                    const loadedOk = await loadSaleByIdForEdit(btn.dataset.id);
+                    if (loadedOk) document.getElementById('retailSearchModal').style.display = 'none';
                 } finally {
                     btn.disabled = false;
                     btn.innerHTML = originalHtml;
@@ -4461,12 +4488,13 @@
             const saleData = await fetchSaleDataById(id);
             if (!saleData) {
                 alert('Could not find that sale.');
-                return;
+                return false;
             }
-            await loadSaleForEdit(saleData);
+            return await loadSaleForEdit(saleData);
         } catch (error) {
             console.error('Error loading sale for edit:', error);
             alert('Error loading sale: ' + error.message);
+            return false;
         }
     }
 
@@ -5995,6 +6023,10 @@
         try {
             console.log('Loading sale for edit:', saleData);
 
+            // Wait for the product list BEFORE touching the form, so no
+            // background load can finish later and undo what is filled in below.
+            await ensureProductCatalog();
+
             if (saleData.client_sub_type) {
                 // 🔥 FIX: "the whole invoice sometimes doesn't load" --
                 // this used to rely entirely on finding a client-type
@@ -6207,15 +6239,37 @@
                     .from('products')
                     .select('id, product_name')
                     .in('id', allProductIds);
-                const { data: editBatches } = await supabaseClient
+                const { data: editBatches, error: editBatchErr } = await supabaseClient
                     .from('batches')
                     .select('id, batch_number, expiry_date, total_qty')
                     .in('id', allBatchIds);
+                if (editBatchErr) throw new Error('Could not load batch details: ' + editBatchErr.message);
+
+                // A line saved with a batch that no longer exists (old merged /
+                // renumbered batch) would make the later save fail with a foreign
+                // key error. Re-point such a line at the live batch with the same
+                // product + batch number; if there is none, say so now.
+                const editBatchList = [...(editBatches || [])];
+                const foundBatchIds = new Set(editBatchList.map(b => b.id));
+                const staleItems = saleData.items.filter(it => it.batch_id && !foundBatchIds.has(it.batch_id));
+                if (staleItems.length) {
+                    const { data: sameProductBatches } = await supabaseClient
+                        .from('batches')
+                        .select('id, product_id, batch_number, expiry_date, total_qty')
+                        .in('product_id', [...new Set(staleItems.map(it => it.product_id).filter(Boolean))]);
+                    staleItems.forEach(it => {
+                        const live = (sameProductBatches || []).find(b => b.product_id === it.product_id && b.batch_number === it.batch_number);
+                        if (live) {
+                            it.batch_id = live.id;
+                            editBatchList.push(live);
+                        }
+                    });
+                }
 
                 const editProductMap = {};
                 (editProducts || []).forEach(p => editProductMap[p.id] = p);
                 const editBatchMap = {};
-                (editBatches || []).forEach(b => editBatchMap[b.id] = b);
+                editBatchList.forEach(b => editBatchMap[b.id] = b);
 
                 const editRows = posTableBody.querySelectorAll('tr');
 
@@ -6307,6 +6361,25 @@
                 });
 
                 updateTotals();
+
+                // Verify what is actually on screen against the invoice, so a
+                // partial load is never silent.
+                const verifyRows = Array.from(posTableBody.querySelectorAll('tr'));
+                const notLoaded = [];
+                saleData.items.forEach((item, index) => {
+                    const row = verifyRows[index];
+                    const sel = row && row.querySelector('.retail-pos-item');
+                    if (!row || !sel || sel.value !== item.product_id) notLoaded.push(item.product_name || ('line ' + (index + 1)));
+                });
+                if (verifyRows.length !== saleData.items.length || notLoaded.length) {
+                    console.error('Edit load mismatch', { expected: saleData.items.length, rows: verifyRows.length, notLoaded });
+                    // Leave nothing half-loaded that could be saved by mistake.
+                    editingSaleDbId = null;
+                    resetPOSTable();
+                    updateTotals();
+                    alert('This invoice did not load completely (' + (notLoaded.length ? notLoaded.join(', ') : 'wrong number of lines') + '). Nothing was changed. Please search it and press Edit again.');
+                    return false;
+                }
             }
 
             // 🔥 FIX: set this AFTER the client-type button click above --
@@ -6328,10 +6401,14 @@
             // of one smooth action. A toast says the same thing without
             // blocking anything or needing a click to dismiss.
             showToast('Sale loaded for editing -- make changes and save.', 'success');
+            return true;
 
         } catch (error) {
             console.error('Error loading sale for edit:', error);
+            // A failed load must never leave a half-filled form that Save could write.
+            try { editingSaleDbId = null; resetPOSTable(); updateTotals(); } catch (_) {}
             alert('Error loading sale: ' + error.message);
+            return false;
         }
     }
 

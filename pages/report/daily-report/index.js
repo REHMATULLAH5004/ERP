@@ -293,7 +293,9 @@
         const { data: grns } = await supabaseClient
             .from('goods_receipt_notes')
             .select('id, invoice_total')
-            .eq('entry_date', reportDate);
+            .eq('entry_date', reportDate)
+            // Goods received on a delivery note have no invoice/payment yet -- not a cash outflow.
+            .neq('receipt_mode', 'Delivery Note');
         if (grns && grns.length > 0) {
             const grnIds = grns.map(g => g.id);
             const { data: payables } = await supabaseClient
@@ -493,7 +495,9 @@
         const { data: grns } = await supabaseClient
             .from('goods_receipt_notes')
             .select('id, currency, invoice_total')
-            .eq('entry_date', reportDate);
+            .eq('entry_date', reportDate)
+            // Delivery-note receipts are neither cash nor credit until the invoice is attached.
+            .neq('receipt_mode', 'Delivery Note');
         if (!grns || grns.length === 0) return breakdown;
 
         const grnIds = grns.map(g => g.id);

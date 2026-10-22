@@ -31,17 +31,33 @@
     // ============================================
     // LOAD DATA
     // ============================================
+
+    // The database returns at most 1000 rows per request; with ~80 sales a day
+    // that cut off the newest sales on any busy range. Read page by page.
+    async function fetchAllPaged(buildQuery) {
+        const PAGE = 1000;
+        let all = [];
+        for (let from = 0; ; from += PAGE) {
+            const { data, error } = await buildQuery().range(from, from + PAGE - 1);
+            if (error) return { data: null, error };
+            all = all.concat(data || []);
+            if (!data || data.length < PAGE) break;
+        }
+        return { data: all, error: null };
+    }
+
     async function loadData() {
         const [productsRes, batchesRes, salesRes] = await Promise.all([
             supabaseClient.from('products').select('id, product_name, min_order_qty, conversion_rate'),
-            supabaseClient.from('batches').select('product_id, total_qty, cost_price, expiry_date, batch_number'),
+            supabaseClient.from('batches').select('product_id, total_qty, cost_price, expiry_date, batch_number').limit(5000),
             // Same exclusions as Stock Movement's loadSales(): real
             // completed sales only, not quotations, donations, or
             // write-off audit rows.
-            supabaseClient.from('sales').select('client_type, client_sub_type, items')
+            fetchAllPaged(() => supabaseClient.from('sales').select('client_type, client_sub_type, items')
                 .neq('is_quotation', true)
                 .neq('client_type', 'DONATION')
                 .neq('client_type', 'WRITEOFF')
+                .order('id'))
         ]);
 
         state.products = productsRes.data || [];
