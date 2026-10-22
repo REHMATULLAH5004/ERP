@@ -4637,20 +4637,18 @@
                     }
                 }
 
-                for (const [batchId, units] of qtyToRestoreByBatch) {
-                    const { data: batchRow, error: batchError } = await supabaseClient
-                        .from('batches')
-                        .select('id, total_qty')
-                        .eq('id', batchId)
-                        .maybeSingle();
-                    if (batchError) throw batchError;
-                    if (!batchRow) continue; // batch no longer exists -- nothing to put back into
-                    const { error: restoreError } = await supabaseClient
-                        .from('batches')
-                        .update({ total_qty: batchRow.total_qty + units })
-                        .eq('id', batchId);
-                    if (restoreError) throw restoreError;
-                    stockRestored.set(batchId, units);
+                // Atomic + checked (Oct 2026): all batches are put back in ONE database
+                // step, and if any part fails whatever did go through is taken off again
+                // and the delete stops -- so stock can never be half restored.
+                const restoreDeltas = [...qtyToRestoreByBatch.entries()].map(([batch_id, delta]) => ({ batch_id, delta }));
+                if (restoreDeltas.length > 0) {
+                    const adj = await adjustBatchStock(restoreDeltas);
+                    if (!adj.ok) {
+                        const done = restoreDeltas.filter(d => !adj.failedIds.includes(d.batch_id));
+                        await adjustBatchStock(done.map(d => ({ batch_id: d.batch_id, delta: -d.delta })));
+                        throw new Error('Could not put the stock back, so nothing was deleted. Please try again.');
+                    }
+                    for (const d of restoreDeltas) stockRestored.set(d.batch_id, d.delta);
                 }
             }
 
@@ -4662,10 +4660,7 @@
             if (itemsDeleteError) {
                 // the lines are still there, so a retry would put the stock back a second
                 // time -- take back what was just added before reporting the error
-                for (const [batchId, units] of stockRestored) {
-                    const { data: b } = await supabaseClient.from('batches').select('total_qty').eq('id', batchId).maybeSingle();
-                    if (b) await supabaseClient.from('batches').update({ total_qty: b.total_qty - units }).eq('id', batchId);
-                }
+                await adjustBatchStock([...stockRestored.entries()].map(([batch_id, units]) => ({ batch_id, delta: -units })));
                 throw itemsDeleteError;
             }
 

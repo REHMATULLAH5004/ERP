@@ -813,6 +813,34 @@
     // ============================================
     // SAVE WRITE-OFF (UPDATED WITH ACCOUNTING)
     // ============================================
+    // ---------------------------------------------------------------
+    // STOCK-SAFETY HELPER (Oct 2026) -- same as the retail page.
+    // Atomic stock change: uses the database function adjust_batch_qty()
+    // (total_qty = total_qty + delta, done inside the database), so a stale
+    // on-screen quantity or two screens touching the same batch can never
+    // overwrite each other. Every change is checked. Falls back to the old
+    // read-then-write (with a FRESH read) only if the function is missing.
+    // Returns { ok, failedIds }.
+    async function adjustBatchStock(deltas) {
+        const clean = (deltas || []).filter(d => d && d.batch_id && d.delta);
+        if (clean.length === 0) return { ok: true, failedIds: [] };
+        const { error } = await supabaseClient.rpc('adjust_batch_qty', { p_adjustments: clean });
+        if (!error) return { ok: true, failedIds: [] };
+        console.warn('adjust_batch_qty failed, using read/write fallback:', error);
+        const failed = [];
+        const { data: rows, error: fetchErr } = await supabaseClient
+            .from('batches').select('id, total_qty').in('id', clean.map(d => d.batch_id));
+        if (fetchErr) return { ok: false, failedIds: clean.map(d => d.batch_id) };
+        await Promise.all(clean.map(async d => {
+            const row = (rows || []).find(r => r.id === d.batch_id);
+            if (!row) { failed.push(d.batch_id); return; }
+            const { error: upErr } = await supabaseClient.from('batches')
+                .update({ total_qty: row.total_qty + d.delta }).eq('id', d.batch_id);
+            if (upErr) failed.push(d.batch_id);
+        }));
+        return { ok: failed.length === 0, failedIds: failed };
+    }
+
     async function saveWriteOff() {
         if (!reasonSelect) return;
         
@@ -867,6 +895,7 @@
             // across an edit). The rest of this function then re-runs its
             // normal deduction/audit/accounting steps for the edited items
             // exactly as it already does for a brand-new write-off.
+            let editRestoredDeltas = [];
             if (editingWriteOffId) {
                 const { data: oldItems, error: oldItemsError } = await supabaseClient
                     .from('write_off_items')
@@ -884,23 +913,27 @@
                     for (const item of oldItems) {
                         qtyToRestoreByBatch.set(item.batch_id, (qtyToRestoreByBatch.get(item.batch_id) || 0) + (item.qty_written_off || 0));
                     }
-                    const { data: batchesToRestore, error: batchFetchError } = await supabaseClient
-                        .from('batches')
-                        .select('id, total_qty')
-                        .in('id', [...qtyToRestoreByBatch.keys()]);
-
-                    if (batchFetchError) {
-                        console.error('Error restoring stock before edit-save:', batchFetchError);
-                    } else {
-                        await Promise.all((batchesToRestore || []).map(b =>
-                            supabaseClient.from('batches')
-                                .update({ total_qty: b.total_qty + (qtyToRestoreByBatch.get(b.id) || 0) })
-                                .eq('id', b.id)
-                        ));
+                    // One atomic, CHECKED step. Before Oct 2026 a failure here was ignored
+                    // and the edit carried on, deducting the new quantities on top of the old.
+                    const restoreDeltas = [...qtyToRestoreByBatch.entries()].map(([batch_id, delta]) => ({ batch_id, delta }));
+                    const restoreResult = await adjustBatchStock(restoreDeltas);
+                    if (!restoreResult.ok) {
+                        const partial = restoreDeltas.filter(d => !restoreResult.failedIds.includes(d.batch_id));
+                        await adjustBatchStock(partial.map(d => ({ batch_id: d.batch_id, delta: -d.delta })));
+                        alert('❌ Could not put the old stock back, so the edit was stopped. NOTHING was changed. Please try again.');
+                        return;
                     }
+                    editRestoredDeltas = restoreDeltas;
                 }
 
-                await supabaseClient.from('write_off_items').delete().eq('write_off_id', editingWriteOffId);
+                const { error: delWoItemsError } = await supabaseClient.from('write_off_items').delete().eq('write_off_id', editingWriteOffId);
+                if (delWoItemsError) {
+                    // the old lines are still there, so a retry would put the stock back a second
+                    // time -- take back what was just added before stopping
+                    await adjustBatchStock(editRestoredDeltas.map(d => ({ batch_id: d.batch_id, delta: -d.delta })));
+                    alert('❌ Could not replace the write-off lines, so the edit was stopped and undone. NOTHING was changed.\n' + delWoItemsError.message);
+                    return;
+                }
 
                 await supabaseClient.from('sales').delete().eq('sale_id', refNumber).eq('client_type', 'WRITEOFF');
 
@@ -1032,11 +1065,12 @@
                         return { item, ok: false, message: `${item.product_name} (${item.batch_number}): ${itemError.message}` };
                     }
 
-                    const newQty = item.available_qty - item.qty_to_write;
-                    const { error: updateError } = await supabaseClient
-                        .from('batches')
-                        .update({ total_qty: newQty })
-                        .eq('id', item.batch_id);
+                    // Atomic: takes the written-off units OFF whatever the batch holds right
+                    // now. It used to write (quantity shown when the row was added to the form
+                    // - written off) which silently put back anything sold in between.
+                    const wdAdj = await adjustBatchStock([{ batch_id: item.batch_id, delta: -item.qty_to_write }]);
+                    const updateError = wdAdj.ok ? null : { message: 'stock could not be updated' };
+                    const newQty = '(atomic)';
 
                     if (updateError) {
                         // The write_off_items row was inserted but the stock
@@ -1285,15 +1319,53 @@
         }
 
         const confirmed = confirm(
-            `Delete ${refNumber}?\n\nThis permanently removes the write-off record. ` +
-            `It does NOT restore stock or reverse any accounting entries already posted for it -- ` +
-            `those will need to be corrected separately if this write-off affected them.\n\nThis cannot be undone.`
+            `Delete ${refNumber}?\n\nThis will:\n` +
+            `  - put the written-off stock back into its batches\n` +
+            `  - remove the accounting entry this write-off posted\n` +
+            `  - permanently remove the write-off record\n\nThis cannot be undone.`
         );
         if (!confirmed) return;
 
+        let woRestored = [];
         try {
+            // Oct 2026: deleting a write-off used to leave the stock written off and the
+            // accounting entry in place, so the stock stayed short with no record to explain it.
+            const { data: woItems, error: woItemsLoadError } = await supabaseClient
+                .from('write_off_items').select('batch_id, qty_written_off').eq('write_off_id', id);
+            if (woItemsLoadError) throw woItemsLoadError;
+            if (woItems && woItems.length > 0) {
+                const byBatch = new Map();
+                for (const it of woItems) {
+                    if (!it.batch_id) continue;
+                    byBatch.set(it.batch_id, (byBatch.get(it.batch_id) || 0) + (it.qty_written_off || 0));
+                }
+                const restoreDeltas = [...byBatch.entries()].map(([batch_id, delta]) => ({ batch_id, delta }));
+                const adj = await adjustBatchStock(restoreDeltas);
+                if (!adj.ok) {
+                    const done = restoreDeltas.filter(d => !adj.failedIds.includes(d.batch_id));
+                    await adjustBatchStock(done.map(d => ({ batch_id: d.batch_id, delta: -d.delta })));
+                    throw new Error('Could not put the stock back, so nothing was deleted. Please try again.');
+                }
+                woRestored = restoreDeltas;
+            }
+
             const { error: itemsError } = await supabaseClient.from('write_off_items').delete().eq('write_off_id', id);
-            if (itemsError) throw itemsError;
+            if (itemsError) {
+                // lines still there: a retry would restore a second time -- take back what was added
+                await adjustBatchStock(woRestored.map(d => ({ batch_id: d.batch_id, delta: -d.delta })));
+                throw itemsError;
+            }
+
+            const { data: woJournals, error: woJournalLookupError } = await supabaseClient
+                .from('journal_entries').select('id').eq('reference', refNumber);
+            if (woJournalLookupError) throw woJournalLookupError;
+            if (woJournals && woJournals.length > 0) {
+                const woJournalIds = woJournals.map(j => j.id);
+                const { error: woLinesError } = await supabaseClient.from('journal_lines').delete().in('journal_entry_id', woJournalIds);
+                if (woLinesError) throw woLinesError;
+                const { error: woEntriesError } = await supabaseClient.from('journal_entries').delete().in('id', woJournalIds);
+                if (woEntriesError) throw woEntriesError;
+            }
 
             await supabaseClient.from('sales').delete().eq('sale_id', refNumber).eq('client_type', 'WRITEOFF');
 
@@ -1304,7 +1376,8 @@
             searchWriteOffRecords(document.getElementById('writeOffSearchInput')?.value || '');
         } catch (error) {
             console.error('Error deleting write-off:', error);
-            alert('Error deleting write-off: ' + error.message);
+            alert('Error deleting write-off: ' + error.message +
+                '\n\nIf this says something partly went through, open the write-off again and press Delete once more -- the steps are safe to repeat.');
         }
     }
 

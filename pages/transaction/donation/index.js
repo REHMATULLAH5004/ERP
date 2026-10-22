@@ -743,6 +743,34 @@
     // ============================================
     // SAVE DONATION - SAVES TO SALES TABLE WITH STOCK DEDUCTION
     // ============================================
+    // ---------------------------------------------------------------
+    // STOCK-SAFETY HELPER (Oct 2026) -- same as the retail page.
+    // Atomic stock change: uses the database function adjust_batch_qty()
+    // (total_qty = total_qty + delta, done inside the database), so a stale
+    // on-screen quantity or two screens touching the same batch can never
+    // overwrite each other. Every change is checked. Falls back to the old
+    // read-then-write (with a FRESH read) only if the function is missing.
+    // Returns { ok, failedIds }.
+    async function adjustBatchStock(deltas) {
+        const clean = (deltas || []).filter(d => d && d.batch_id && d.delta);
+        if (clean.length === 0) return { ok: true, failedIds: [] };
+        const { error } = await supabaseClient.rpc('adjust_batch_qty', { p_adjustments: clean });
+        if (!error) return { ok: true, failedIds: [] };
+        console.warn('adjust_batch_qty failed, using read/write fallback:', error);
+        const failed = [];
+        const { data: rows, error: fetchErr } = await supabaseClient
+            .from('batches').select('id, total_qty').in('id', clean.map(d => d.batch_id));
+        if (fetchErr) return { ok: false, failedIds: clean.map(d => d.batch_id) };
+        await Promise.all(clean.map(async d => {
+            const row = (rows || []).find(r => r.id === d.batch_id);
+            if (!row) { failed.push(d.batch_id); return; }
+            const { error: upErr } = await supabaseClient.from('batches')
+                .update({ total_qty: row.total_qty + d.delta }).eq('id', d.batch_id);
+            if (upErr) failed.push(d.batch_id);
+        }));
+        return { ok: failed.length === 0, failedIds: failed };
+    }
+
     async function saveDonation() {
         const donationData = getDonationData();
         if (!donationData) return;
@@ -793,6 +821,7 @@
             // re-runs its normal FEFO stock deduction and accounting for
             // the edited items exactly as it already does for a brand-new
             // donation.
+            let editRestoredDeltas = [];
             if (editingDonationDbId) {
                 const { data: oldItems, error: oldItemsError } = await supabaseClient
                     .from('sale_items')
@@ -811,23 +840,27 @@
                         const packQty = parseInt(item.pack_size) || 1;
                         qtyToRestoreByBatch.set(item.batch_id, (qtyToRestoreByBatch.get(item.batch_id) || 0) + item.quantity * packQty);
                     }
-                    const { data: batchesToRestore, error: batchFetchError } = await supabaseClient
-                        .from('batches')
-                        .select('id, total_qty')
-                        .in('id', [...qtyToRestoreByBatch.keys()]);
-
-                    if (batchFetchError) {
-                        console.error('Error restoring stock before edit-save:', batchFetchError);
-                    } else {
-                        await Promise.all((batchesToRestore || []).map(b =>
-                            supabaseClient.from('batches')
-                                .update({ total_qty: b.total_qty + (qtyToRestoreByBatch.get(b.id) || 0) })
-                                .eq('id', b.id)
-                        ));
+                    // One atomic, CHECKED step. Before Oct 2026 a failure here was ignored
+                    // and the edit carried on, deducting the new quantities on top of the old.
+                    const restoreDeltas = [...qtyToRestoreByBatch.entries()].map(([batch_id, delta]) => ({ batch_id, delta }));
+                    const restoreResult = await adjustBatchStock(restoreDeltas);
+                    if (!restoreResult.ok) {
+                        const partial = restoreDeltas.filter(d => !restoreResult.failedIds.includes(d.batch_id));
+                        await adjustBatchStock(partial.map(d => ({ batch_id: d.batch_id, delta: -d.delta })));
+                        alert('❌ Could not put the old stock back, so the edit was stopped. NOTHING was changed. Please try again.');
+                        return;
                     }
+                    editRestoredDeltas = restoreDeltas;
                 }
 
-                await supabaseClient.from('sale_items').delete().eq('sale_id', editingDonationDbId);
+                const { error: delDonItemsError } = await supabaseClient.from('sale_items').delete().eq('sale_id', editingDonationDbId);
+                if (delDonItemsError) {
+                    // the old lines are still there, so a retry would put the stock back a second
+                    // time -- take back what was just added before stopping
+                    await adjustBatchStock(editRestoredDeltas.map(d => ({ batch_id: d.batch_id, delta: -d.delta })));
+                    alert('❌ Could not replace the donation lines, so the edit was stopped and undone. NOTHING was changed.\n' + delDonItemsError.message);
+                    return;
+                }
 
                 const oldDonationIdString = donationData.donation_id; // unchanged across an edit
                 const { data: oldJournals } = await supabaseClient
@@ -980,10 +1013,9 @@
 
                     const newQty = batch.total_qty - qtyToDeduct;
 
-                    const { error: updateError } = await supabaseClient
-                        .from('batches')
-                        .update({ total_qty: newQty })
-                        .eq('id', batch.id);
+                    // Atomic: takes the units off whatever the batch holds right now.
+                    const donAdj = await adjustBatchStock([{ batch_id: batch.id, delta: -qtyToDeduct }]);
+                    const updateError = donAdj.ok ? null : { message: 'stock could not be updated' };
 
                     if (updateError) {
                         console.error('Error updating stock for batch:', batch.id, updateError);
@@ -1457,20 +1489,18 @@
                     const packQty = parseInt(item.pack_size) || 1;
                     qtyByBatch.set(item.batch_id, (qtyByBatch.get(item.batch_id) || 0) + (item.quantity || 0) * packQty);
                 }
-                for (const [batchId, units] of qtyByBatch) {
-                    const { data: batchRow, error: batchError } = await supabaseClient
-                        .from('batches')
-                        .select('id, total_qty')
-                        .eq('id', batchId)
-                        .maybeSingle();
-                    if (batchError) throw batchError;
-                    if (!batchRow) continue; // batch no longer exists -- nothing to put back into
-                    const { error: restoreError } = await supabaseClient
-                        .from('batches')
-                        .update({ total_qty: batchRow.total_qty + units })
-                        .eq('id', batchId);
-                    if (restoreError) throw restoreError;
-                    stockRestored.set(batchId, units);
+                // Atomic + checked (Oct 2026): all batches are put back in ONE database
+                // step; if any part fails whatever did go through is taken off again and
+                // the delete stops, so stock can never be half restored.
+                const restoreDeltas = [...qtyByBatch.entries()].map(([batch_id, delta]) => ({ batch_id, delta }));
+                if (restoreDeltas.length > 0) {
+                    const adj = await adjustBatchStock(restoreDeltas);
+                    if (!adj.ok) {
+                        const done = restoreDeltas.filter(d => !adj.failedIds.includes(d.batch_id));
+                        await adjustBatchStock(done.map(d => ({ batch_id: d.batch_id, delta: -d.delta })));
+                        throw new Error('Could not put the stock back, so nothing was deleted. Please try again.');
+                    }
+                    for (const d of restoreDeltas) stockRestored.set(d.batch_id, d.delta);
                 }
             }
 
@@ -1482,10 +1512,7 @@
             if (itemsDeleteError) {
                 // the lines are still there, so a retry would put the stock back a second
                 // time -- take back what was just added before reporting the error
-                for (const [batchId, units] of stockRestored) {
-                    const { data: b } = await supabaseClient.from('batches').select('total_qty').eq('id', batchId).maybeSingle();
-                    if (b) await supabaseClient.from('batches').update({ total_qty: b.total_qty - units }).eq('id', batchId);
-                }
+                await adjustBatchStock([...stockRestored.entries()].map(([batch_id, units]) => ({ batch_id, delta: -units })));
                 throw itemsDeleteError;
             }
 

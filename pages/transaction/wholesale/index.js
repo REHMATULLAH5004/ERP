@@ -1813,20 +1813,18 @@
                     const packQty = parseInt(item.pack_size) || 1;
                     qtyByBatch.set(item.batch_id, (qtyByBatch.get(item.batch_id) || 0) + (item.quantity || 0) * packQty);
                 }
-                for (const [batchId, units] of qtyByBatch) {
-                    const { data: batchRow, error: batchError } = await supabaseClient
-                        .from('batches')
-                        .select('id, total_qty')
-                        .eq('id', batchId)
-                        .maybeSingle();
-                    if (batchError) throw batchError;
-                    if (!batchRow) continue; // batch no longer exists -- nothing to put back into
-                    const { error: restoreError } = await supabaseClient
-                        .from('batches')
-                        .update({ total_qty: batchRow.total_qty + units })
-                        .eq('id', batchId);
-                    if (restoreError) throw restoreError;
-                    stockRestored.set(batchId, units);
+                // Atomic + checked (Oct 2026): all batches are put back in ONE database
+                // step, and if any part fails whatever did go through is taken off again
+                // and the delete stops -- so stock can never be half restored.
+                const restoreDeltas = [...qtyByBatch.entries()].map(([batch_id, delta]) => ({ batch_id, delta }));
+                if (restoreDeltas.length > 0) {
+                    const adj = await adjustBatchStock(restoreDeltas);
+                    if (!adj.ok) {
+                        const done = restoreDeltas.filter(d => !adj.failedIds.includes(d.batch_id));
+                        await adjustBatchStock(done.map(d => ({ batch_id: d.batch_id, delta: -d.delta })));
+                        throw new Error('Could not put the stock back, so nothing was deleted. Please try again.');
+                    }
+                    for (const d of restoreDeltas) stockRestored.set(d.batch_id, d.delta);
                 }
             }
 
@@ -1838,10 +1836,7 @@
             if (itemsDeleteError) {
                 // the lines are still there, so a retry would put the stock back a second
                 // time -- take back what was just added before reporting the error
-                for (const [batchId, units] of stockRestored) {
-                    const { data: b } = await supabaseClient.from('batches').select('total_qty').eq('id', batchId).maybeSingle();
-                    if (b) await supabaseClient.from('batches').update({ total_qty: b.total_qty - units }).eq('id', batchId);
-                }
+                await adjustBatchStock([...stockRestored.entries()].map(([batch_id, units]) => ({ batch_id, delta: -units })));
                 throw itemsDeleteError;
             }
 
@@ -2212,16 +2207,78 @@
         }
     }
 
+    // ---------------------------------------------------------------
+    // EDIT-SAFETY HELPERS (Oct 2026) -- same as the retail page.
+    // ---------------------------------------------------------------
+    // Atomic stock change. Uses the database function adjust_batch_qty()
+    // (total_qty = total_qty + delta, done inside the database) so two
+    // screens touching the same batch at once cannot overwrite each other,
+    // and every change is checked. Falls back to the old read-then-write only
+    // if the function is not available. Returns { ok, failedIds }.
+    async function adjustBatchStock(deltas) {
+        const clean = (deltas || []).filter(d => d && d.batch_id && d.delta);
+        if (clean.length === 0) return { ok: true, failedIds: [] };
+        const { error } = await supabaseClient.rpc('adjust_batch_qty', { p_adjustments: clean });
+        if (!error) return { ok: true, failedIds: [] };
+        console.warn('adjust_batch_qty failed, using read/write fallback:', error);
+        const failed = [];
+        const { data: rows, error: fetchErr } = await supabaseClient
+            .from('batches').select('id, total_qty').in('id', clean.map(d => d.batch_id));
+        if (fetchErr) return { ok: false, failedIds: clean.map(d => d.batch_id) };
+        await Promise.all(clean.map(async d => {
+            const row = (rows || []).find(r => r.id === d.batch_id);
+            if (!row) { failed.push(d.batch_id); return; }
+            const { error: upErr } = await supabaseClient.from('batches')
+                .update({ total_qty: row.total_qty + d.delta }).eq('id', d.batch_id);
+            if (upErr) failed.push(d.batch_id);
+        }));
+        return { ok: failed.length === 0, failedIds: failed };
+    }
+
+    // Puts an invoice back exactly as it was before an edit-save started, after
+    // a step of that save failed. ctx = { saleDbId, origRow, oldItems,
+    // restoredDeltas, deductedDeltas, flags:{stockRestored,itemsDeleted,
+    // headerUpdated,stockDeducted} }. The accounting entries are never touched
+    // until every other step has succeeded, so they need no undo here.
+    // Returns a list of anything that could NOT be undone.
+    async function rollbackEditedWholesale(ctx) {
+        const problems = [];
+        const f = ctx.flags;
+        try {
+            if (f.stockDeducted && ctx.deductedDeltas && ctx.deductedDeltas.length > 0) {
+                const adj = await adjustBatchStock(ctx.deductedDeltas.map(d => ({ batch_id: d.batch_id, delta: -d.delta })));
+                if (!adj.ok) problems.push('stock (new quantities)');
+            }
+            if (f.headerUpdated) {
+                const { id, ...rest } = ctx.origRow;
+                const { error } = await supabaseClient.from('sales').update(rest).eq('id', ctx.saleDbId);
+                if (error) problems.push('invoice header: ' + error.message);
+            }
+            if (f.itemsDeleted) {
+                await supabaseClient.from('sale_items').delete().eq('sale_id', ctx.saleDbId); // partial new lines, if any
+                if (ctx.oldItems && ctx.oldItems.length > 0) {
+                    const { error } = await supabaseClient.from('sale_items').insert(ctx.oldItems);
+                    if (error) problems.push('invoice lines: ' + error.message);
+                }
+            }
+            if (f.stockRestored && ctx.restoredDeltas && ctx.restoredDeltas.length > 0) {
+                const adj = await adjustBatchStock(ctx.restoredDeltas.map(d => ({ batch_id: d.batch_id, delta: -d.delta })));
+                if (!adj.ok) problems.push('stock (old quantities)');
+            }
+        } catch (e) {
+            problems.push('unexpected: ' + (e?.message || e));
+        }
+        return problems;
+    }
+
     // 🔥 ADDED: undoes a NEW invoice whose stock/accounting step failed, so
     // nothing half-saved is left behind (stock put back, accounting entries
     // removed, lines and invoice deleted). Every step is best-effort and
     // independent, so one failing doesn't stop the rest.
     async function rollbackFailedNewSale(dbId, invoiceNumber, deductedByBatch) {
         try {
-            for (const [batchId, units] of (deductedByBatch || new Map())) {
-                const { data: b } = await supabaseClient.from('batches').select('total_qty').eq('id', batchId).maybeSingle();
-                if (b) await supabaseClient.from('batches').update({ total_qty: b.total_qty + units }).eq('id', batchId);
-            }
+            const back = await adjustBatchStock([...(deductedByBatch || new Map()).entries()].map(([batch_id, units]) => ({ batch_id, delta: units })));
+            if (!back.ok) console.warn('Rollback: stock not fully restored for', back.failedIds);
         } catch (e) { console.warn('Rollback: could not restore stock', e); }
         try {
             const { data: js } = await supabaseClient
@@ -2939,10 +2996,23 @@
             // of this function re-applies stock deduction and accounting
             // entries fresh for the edited items, exactly as it already
             // does for a normal new sale. Mirrors retail.js's edit-save.
+            let editCtx = null;
             if (editingWholesaleDbId) {
+                // Snapshot the invoice exactly as it is now, so that if any step
+                // below fails everything can be put back (see rollbackEditedWholesale).
+                const { data: origRow, error: origRowError } = await supabaseClient
+                    .from('sales').select('*').eq('id', editingWholesaleDbId).single();
+                if (origRowError || !origRow) {
+                    alert('❌ Could not load the original invoice to edit it safely. Nothing was changed.\n' + (origRowError?.message || ''));
+                    return;
+                }
+                // Stock was only ever taken for a real (non-quotation) completed sale, so
+                // only then is there anything to put back.
+                const originalWasDeducted = origRow.type === 'COMPLETED' && !origRow.is_quotation;
+
                 const { data: oldItems, error: oldItemsError } = await supabaseClient
                     .from('sale_items')
-                    .select('batch_id, quantity, pack_size')
+                    .select('*')
                     .eq('sale_id', editingWholesaleDbId);
 
                 if (oldItemsError) {
@@ -2951,41 +3021,38 @@
                     return;
                 }
 
-                if (oldItems && oldItems.length > 0) {
+                editCtx = { saleDbId: editingWholesaleDbId, origRow, oldItems: oldItems || [], restoredDeltas: [], deductedDeltas: [],
+                    flags: { stockRestored: false, itemsDeleted: false, headerUpdated: false, stockDeducted: false } };
+
+                if (oldItems && oldItems.length > 0 && originalWasDeducted) {
                     const qtyToRestoreByBatch = new Map();
                     for (const item of oldItems) {
                         const packQty = parseInt(item.pack_size) || 1;
                         qtyToRestoreByBatch.set(item.batch_id, (qtyToRestoreByBatch.get(item.batch_id) || 0) + item.quantity * packQty);
                     }
-                    const { data: batchesToRestore, error: batchFetchError } = await supabaseClient
-                        .from('batches')
-                        .select('id, total_qty')
-                        .in('id', [...qtyToRestoreByBatch.keys()]);
-
-                    if (batchFetchError) {
-                        console.error('Error restoring stock before edit-save:', batchFetchError);
-                    } else {
-                        await Promise.all((batchesToRestore || []).map(b =>
-                            supabaseClient.from('batches')
-                                .update({ total_qty: b.total_qty + (qtyToRestoreByBatch.get(b.id) || 0) })
-                                .eq('id', b.id)
-                        ));
+                    editCtx.restoredDeltas = [...qtyToRestoreByBatch.entries()].map(([batch_id, delta]) => ({ batch_id, delta }));
+                    // One atomic, CHECKED step. Before Oct 2026 a failure here was ignored,
+                    // the edit carried on and deducted the new quantities on top of the old
+                    // ones -- which is how stock went short after edits.
+                    const restoreResult = await adjustBatchStock(editCtx.restoredDeltas);
+                    if (!restoreResult.ok) {
+                        const partial = editCtx.restoredDeltas.filter(d => !restoreResult.failedIds.includes(d.batch_id));
+                        await adjustBatchStock(partial.map(d => ({ batch_id: d.batch_id, delta: -d.delta })));
+                        alert('❌ Could not put the old stock back, so the edit was stopped. NOTHING was changed. Please try again.');
+                        return;
                     }
+                    editCtx.flags.stockRestored = true;
                 }
 
-                await supabaseClient.from('sale_items').delete().eq('sale_id', editingWholesaleDbId);
-
-                const oldSaleIdString = saleData.sale_id; // unchanged across an edit -- same invoice number throughout
-                const { data: oldJournals } = await supabaseClient
-                    .from('journal_entries')
-                    .select('id')
-                    .in('reference', [oldSaleIdString, `${oldSaleIdString}-COGS`]);
-
-                if (oldJournals && oldJournals.length > 0) {
-                    const oldJournalIds = oldJournals.map(j => j.id);
-                    await supabaseClient.from('journal_lines').delete().in('journal_entry_id', oldJournalIds);
-                    await supabaseClient.from('journal_entries').delete().in('id', oldJournalIds);
+                const { error: delItemsError } = await supabaseClient.from('sale_items').delete().eq('sale_id', editingWholesaleDbId);
+                if (delItemsError) {
+                    const undo = await rollbackEditedWholesale(editCtx);
+                    alert('❌ Could not replace the invoice lines, so the edit was stopped and undone.' + (undo.length ? '\nCould NOT undo: ' + undo.join('; ') + ' -- tell an admin.' : '\nNothing was changed.'));
+                    return;
                 }
+                editCtx.flags.itemsDeleted = true;
+                // The old accounting entries are left in place for now; they are swapped
+                // for the new ones only after the stock and lines have all been saved.
             }
 
             let savedData;
@@ -3013,9 +3080,11 @@
 
                     if (error) throw new Error(error.message);
                     if (!data || data.length === 0) {
-                        alert('❌ Could not find the original invoice to update. Nothing was saved.');
+                        const undo = await rollbackEditedWholesale(editCtx);
+                        alert('❌ Could not find the original invoice to update. The edit was undone.' + (undo.length ? '\nCould NOT undo: ' + undo.join('; ') + ' -- tell an admin.' : ''));
                         return;
                     }
+                    editCtx.flags.headerUpdated = true;
                     savedData = data;
                 } else {
                     const { data, error } = await supabaseClient
@@ -3073,6 +3142,11 @@
                 }
             } catch (dbError) {
                 console.error('Database error:', dbError);
+                if (editCtx) {
+                    const undo = await rollbackEditedWholesale(editCtx);
+                    alert('❌ Error saving the edit -- it was undone and the invoice is as it was before:\n' + dbError.message + (undo.length ? '\nCould NOT undo: ' + undo.join('; ') + ' -- tell an admin.' : ''));
+                    return;
+                }
                 alert('❌ Error saving transaction:\n' + dbError.message);
                 return;
             }
@@ -3105,6 +3179,12 @@
                 // sale record rather than leaving an orphaned/incomplete sale.
                 if (itemError) {
                     console.error('❌ Failed to save sale items:', itemError);
+                    if (editCtx) {
+                        // EDITING: never delete the original invoice -- undo the edit instead.
+                        const undo = await rollbackEditedWholesale(editCtx);
+                        alert('❌ Failed to save the edited invoice lines, so the edit was undone and the invoice is as it was.\nError: ' + itemError.message + (undo.length ? '\nCould NOT undo: ' + undo.join('; ') + ' -- tell an admin.' : ''));
+                        return;
+                    }
                     await supabaseClient.from('sales').delete().eq('id', savedData[0].id);
                     alert('❌ Failed to save sale items. Transaction cancelled.\nError: ' + itemError.message);
                     return;
@@ -3147,23 +3227,47 @@
 
                     if (fetchError) throw new Error('Could not read stock: ' + fetchError.message);
 
-                    await Promise.all((batches || []).map(async (batchData) => {
-                        const totalQtyToDeduct = qtyByBatch.get(batchData.id) || 0;
-                        const newQty = batchData.total_qty - totalQtyToDeduct;
-                        const { error: updateError } = await supabaseClient
-                            .from('batches')
-                            .update({ total_qty: newQty })
-                            .eq('id', batchData.id);
-
-                        if (updateError) throw new Error('Stock update failed: ' + updateError.message);
-                        deductedByBatch.set(batchData.id, totalQtyToDeduct);
-                        console.log(`Stock updated for batch ${batchData.id}: ${batchData.total_qty} -> ${newQty}`);
-                    }));
+                    // One atomic, checked step (all batches together, done inside the database).
+                    const deductions = (batches || []).map(b => ({ batch_id: b.id, delta: -(qtyByBatch.get(b.id) || 0) }));
+                    const dedAdj = await adjustBatchStock(deductions);
+                    if (!dedAdj.ok) {
+                        // put back whatever part did go through, then report the failure
+                        const done = deductions.filter(d => !dedAdj.failedIds.includes(d.batch_id));
+                        await adjustBatchStock(done.map(d => ({ batch_id: d.batch_id, delta: -d.delta })));
+                        throw new Error('Stock update failed for ' + dedAdj.failedIds.length + ' batch(es)');
+                    }
+                    for (const d of deductions) deductedByBatch.set(d.batch_id, -d.delta);
                 })();
 
-                const accountingPromise = createWholesaleAccountingEntries(saleData, savedData);
-
-                const stepResults = await Promise.allSettled([stockUpdatePromise, accountingPromise]);
+                let stepResults;
+                if (editCtx) {
+                    // EDIT: stock first. Only when the stock and lines are all saved are the
+                    // old accounting entries swapped for the new ones, so a failure before
+                    // that point can be undone completely without touching the ledger.
+                    const stockOnly = await Promise.allSettled([stockUpdatePromise]);
+                    if (stockOnly[0].status === 'rejected') {
+                        const reason = (stockOnly[0].reason && stockOnly[0].reason.message) || String(stockOnly[0].reason);
+                        const undo = await rollbackEditedWholesale(editCtx);
+                        alert('❌ The edit could not be saved completely, so it was undone and the invoice is as it was before.\n\nDetails: ' + reason + (undo.length ? '\nCould NOT undo: ' + undo.join('; ') + ' -- tell an admin.' : ''));
+                        return;
+                    }
+                    editCtx.flags.stockDeducted = true;
+                    editCtx.deductedDeltas = [...deductedByBatch.entries()].map(([batch_id, units]) => ({ batch_id, delta: -units }));
+                    // Removing the old entries goes through a database function: only an
+                    // Admin may delete ledger rows directly, so doing it from the browser
+                    // silently did nothing for everybody else and left the OLD amounts in
+                    // the books next to the new ones.
+                    const { error: reverseError } = await supabaseClient.rpc('reverse_sale_accounting', { p_sale_id: editCtx.origRow.sale_id });
+                    if (reverseError) {
+                        const undo = await rollbackEditedWholesale(editCtx);
+                        alert('❌ Could not update the accounting entries, so the edit was stopped and undone.\n' + reverseError.message + (undo.length ? '\nCould NOT undo: ' + undo.join('; ') + ' -- tell an admin.' : '\nNothing was changed.'));
+                        return;
+                    }
+                    stepResults = [stockOnly[0], ...(await Promise.allSettled([createWholesaleAccountingEntries(saleData, savedData)]))];
+                } else {
+                    const accountingPromise = createWholesaleAccountingEntries(saleData, savedData);
+                    stepResults = await Promise.allSettled([stockUpdatePromise, accountingPromise]);
+                }
                 const failedSteps = stepResults.filter(r => r.status === 'rejected');
                 if (failedSteps.length > 0) {
                     const reason = failedSteps.map(f => (f.reason && f.reason.message) || String(f.reason)).join(' | ');
@@ -3172,9 +3276,10 @@
                         await rollbackFailedNewSale(savedData[0].id, saleData.sale_id, deductedByBatch);
                         alert('❌ The invoice could NOT be saved completely, so nothing was kept -- stock and accounting are unchanged.\n\nPlease press Save again.\n\nDetails: ' + reason);
                     } else {
-                        // editing: pressing Save again safely redoes the whole step
-                        // (it restores the old stock and removes the old entries first)
-                        alert('❌ The changes could not be saved completely.\n\nPlease press Save again to retry.\n\nDetails: ' + reason);
+                        // editing: the stock and lines ARE saved correctly at this point; only the
+                        // accounting entries failed to post. Pressing Save again is safe -- it
+                        // restores exactly what is saved now and re-posts the entries.
+                        alert('❌ The stock and invoice lines were saved, but the accounting entries could not be posted.\n\nPlease press Save again to post them.\n\nDetails: ' + reason);
                     }
                     return;
                 }
