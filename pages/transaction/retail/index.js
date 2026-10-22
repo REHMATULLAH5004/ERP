@@ -3407,6 +3407,40 @@
     // resize/outside-click rather than re-tracked, since it's only ever open
     // for the few seconds it takes to search and pick.
     let searchPanelRow = null;
+    let searchPanelInput = null; // the search box the panel is currently attached to
+
+    // Scrolls ONLY the dropdown panel so `el` is visible. (el.scrollIntoView()
+    // also scrolls the whole page when the panel reaches the bottom of the
+    // screen -- and that page scroll used to close the dropdown.)
+    function scrollPanelChildIntoView(panel, el) {
+        if (!panel || !el) return;
+        const top = el.offsetTop;
+        const bottom = top + el.offsetHeight;
+        if (top < panel.scrollTop) panel.scrollTop = top;
+        else if (bottom > panel.scrollTop + panel.clientHeight) panel.scrollTop = bottom - panel.clientHeight;
+    }
+
+    // Places a fixed dropdown under its input, or ABOVE it when there is not
+    // enough room below, and caps its height to the space that is really
+    // available so it never runs off the bottom of the screen.
+    function placeDropdownPanel(panel, input, minWidth) {
+        const rect = input.getBoundingClientRect();
+        const vh = window.innerHeight;
+        const gap = 4, margin = 8, preferred = 260;
+        const below = vh - rect.bottom - gap - margin;
+        const above = rect.top - gap - margin;
+        panel.style.left = `${Math.round(rect.left)}px`;
+        panel.style.width = `${Math.max(minWidth, Math.round(rect.width))}px`;
+        if (below < 170 && above > below) {
+            panel.style.maxHeight = `${Math.max(100, Math.min(preferred, above))}px`;
+            panel.style.top = 'auto';
+            panel.style.bottom = `${Math.round(vh - rect.top + gap)}px`;
+        } else {
+            panel.style.maxHeight = `${Math.max(100, Math.min(preferred, below))}px`;
+            panel.style.bottom = 'auto';
+            panel.style.top = `${Math.round(rect.bottom + gap)}px`;
+        }
+    }
     // 🔥 ADDED: keyboard-nav state for the panel -- which rows currently
     // matched the query, and which one is highlighted (Down/Up moves this,
     // Enter/Tab picks it). Kept at module scope alongside searchPanelRow
@@ -3419,7 +3453,7 @@
         if (!panel) {
             panel = document.createElement('div');
             panel.id = 'retailItemSearchPanel';
-            panel.style.cssText = 'display:none; position:fixed; z-index:2000; background:white; border:1px solid #e2e8f0; border-radius:8px; box-shadow:0 12px 28px rgba(15,23,42,0.18); max-height:260px; overflow-y:auto; font-size:0.82rem;';
+            panel.style.cssText = 'display:none; position:fixed; z-index:2000; background:white; border:1px solid #e2e8f0; border-radius:8px; box-shadow:0 12px 28px rgba(15,23,42,0.18); max-height:260px; overflow-y:auto; overscroll-behavior:contain; font-size:0.82rem;';
             document.body.appendChild(panel);
         }
         return panel;
@@ -3429,21 +3463,20 @@
         const panel = document.getElementById('retailItemSearchPanel');
         if (panel) panel.style.display = 'none';
         searchPanelRow = null;
+        searchPanelInput = null;
         searchPanelMatches = [];
         searchPanelHighlightIndex = -1;
     }
 
     function positionItemSearchPanel(panel, input) {
-        const rect = input.getBoundingClientRect();
-        panel.style.left = `${Math.round(rect.left)}px`;
-        panel.style.top = `${Math.round(rect.bottom + 4)}px`;
-        panel.style.width = `${Math.max(240, Math.round(rect.width))}px`;
+        placeDropdownPanel(panel, input, 240);
     }
 
     // 🔥 ADDED: split out from renderItemSearchResults() so ArrowUp/ArrowDown
     // can just re-paint the highlight without re-filtering productCatalog
     // on every keypress.
     function renderItemSearchResultsHtml(panel) {
+        const keepScroll = panel.scrollTop; // re-painting must not jump the list back to the top
         if (searchPanelMatches.length === 0) {
             panel.innerHTML = `<div style="padding:10px 12px; color:#94a3b8;">No matching products.</div>`;
         } else {
@@ -3454,17 +3487,19 @@
                 </div>
             `).join('');
         }
+        panel.scrollTop = keepScroll;
     }
 
     function scrollItemSearchHighlightIntoView(panel) {
         const el = panel.querySelector(`.retail-item-search-result[data-index="${searchPanelHighlightIndex}"]`);
-        if (el) el.scrollIntoView({ block: 'nearest' });
+        scrollPanelChildIntoView(panel, el);
     }
 
     function renderItemSearchResults(row, input, query) {
         if (!row) return;
         const panel = getOrCreateSearchPanel();
         searchPanelRow = row;
+        searchPanelInput = input;
 
         const term = query.trim().toLowerCase();
         const matches = term
@@ -3559,8 +3594,23 @@
     });
 
     if (!window.__retailPosDocListenersAttached) {
-        window.addEventListener('scroll', () => hideItemSearchPanel(), true);
-        window.addEventListener('resize', () => hideItemSearchPanel());
+        // The dropdown used to CLOSE on every scroll event -- including its own
+        // internal scrolling and the page scroll caused by arrow-key navigation
+        // near the bottom of the screen, which is why it vanished at the last
+        // visible row and when scrolling down. Now: scrolling inside the panel
+        // is ignored, and page scrolling just keeps the panel attached to its
+        // search box (it closes only if that box scrolls out of view).
+        const followItemSearchInput = (e) => {
+            const panel = document.getElementById('retailItemSearchPanel');
+            if (!panel || panel.style.display === 'none') return;
+            if (e && e.target && e.target.nodeType === 1 && panel.contains(e.target)) return;
+            if (!searchPanelInput || !document.body.contains(searchPanelInput)) { hideItemSearchPanel(); return; }
+            const r = searchPanelInput.getBoundingClientRect();
+            if (r.bottom < 0 || r.top > window.innerHeight) { hideItemSearchPanel(); return; }
+            positionItemSearchPanel(panel, searchPanelInput);
+        };
+        window.addEventListener('scroll', followItemSearchInput, true);
+        window.addEventListener('resize', () => followItemSearchInput());
     }
 
     // 🔥 FIX: THE actual cause of "typing a real, saved NHIMA number shows
@@ -3688,7 +3738,7 @@
         if (!panel) {
             panel = document.createElement('div');
             panel.id = panelId;
-            panel.style.cssText = 'display:none; position:fixed; z-index:2000; background:white; border:1px solid #e2e8f0; border-radius:8px; box-shadow:0 12px 28px rgba(15,23,42,0.18); max-height:260px; overflow-y:auto; font-size:0.82rem;';
+            panel.style.cssText = 'display:none; position:fixed; z-index:2000; background:white; border:1px solid #e2e8f0; border-radius:8px; box-shadow:0 12px 28px rgba(15,23,42,0.18); max-height:260px; overflow-y:auto; overscroll-behavior:contain; font-size:0.82rem;';
             document.body.appendChild(panel);
         }
 
@@ -3700,13 +3750,11 @@
         }
 
         function position() {
-            const rect = searchInput.getBoundingClientRect();
-            panel.style.left = `${Math.round(rect.left)}px`;
-            panel.style.top = `${Math.round(rect.bottom + 4)}px`;
-            panel.style.width = `${Math.max(180, Math.round(rect.width))}px`;
+            placeDropdownPanel(panel, searchInput, 180);
         }
 
         function render() {
+            const keepScroll = panel.scrollTop;
             if (matches.length === 0) {
                 panel.innerHTML = `<div style="padding:10px 12px; color:#94a3b8;">No matches.</div>`;
                 return;
@@ -3714,11 +3762,12 @@
             panel.innerHTML = matches.map((v, i) => `
                 <div class="searchable-select-result" data-index="${i}" data-value="${v}" style="padding:8px 12px; cursor:pointer; border-bottom:1px solid #f1f5f9; ${i === highlightIndex ? 'background:#eff6ff;' : ''}">${v}</div>
             `).join('');
+            panel.scrollTop = keepScroll;
         }
 
         function scrollHighlightIntoView() {
             const el = panel.querySelector(`.searchable-select-result[data-index="${highlightIndex}"]`);
-            if (el) el.scrollIntoView({ block: 'nearest' });
+            scrollPanelChildIntoView(panel, el);
         }
 
         function hide() {
@@ -3803,8 +3852,15 @@
             }
         });
 
-        window.addEventListener('scroll', () => hide(), true);
-        window.addEventListener('resize', () => hide());
+        const followSearchInput = (e) => {
+            if (panel.style.display === 'none') return;
+            if (e && e.target && e.target.nodeType === 1 && panel.contains(e.target)) return; // its own scrolling
+            const r = searchInput.getBoundingClientRect();
+            if (r.bottom < 0 || r.top > window.innerHeight) { hide(); return; }
+            position();
+        };
+        window.addEventListener('scroll', followSearchInput, true);
+        window.addEventListener('resize', () => followSearchInput());
 
         // 🔥 THE ACTUAL BUG behind "typing resets after a pause": this
         // listener used to unconditionally overwrite the visible search
@@ -4881,6 +4937,72 @@
     // track that background work so (a) the next sale's stock step waits
     // for the previous one to finish (no two stock updates on the same
     // batch at once), and (b) closing the page mid-way gives a warning.
+    // ---------------------------------------------------------------
+    // EDIT-SAFETY HELPERS (Oct 2026)
+    // ---------------------------------------------------------------
+    // Atomic stock change. Uses the database function adjust_batch_qty()
+    // (total_qty = total_qty + delta, done inside the database) so two tills
+    // touching the same batch at the same moment cannot overwrite each
+    // other. Falls back to the old read-then-write only if the function is
+    // not available. Returns { ok, failedIds }.
+    async function adjustBatchStock(deltas) {
+        const clean = (deltas || []).filter(d => d && d.batch_id && d.delta);
+        if (clean.length === 0) return { ok: true, failedIds: [] };
+        const { error } = await supabaseClient.rpc('adjust_batch_qty', { p_adjustments: clean });
+        if (!error) return { ok: true, failedIds: [] };
+        console.warn('adjust_batch_qty failed, using read/write fallback:', error);
+        const failed = [];
+        const { data: rows, error: fetchErr } = await supabaseClient
+            .from('batches').select('id, total_qty').in('id', clean.map(d => d.batch_id));
+        if (fetchErr) return { ok: false, failedIds: clean.map(d => d.batch_id) };
+        await Promise.all(clean.map(async d => {
+            const row = (rows || []).find(r => r.id === d.batch_id);
+            if (!row) { failed.push(d.batch_id); return; }
+            const { error: upErr } = await supabaseClient.from('batches')
+                .update({ total_qty: row.total_qty + d.delta }).eq('id', d.batch_id);
+            if (upErr) failed.push(d.batch_id);
+        }));
+        return { ok: failed.length === 0, failedIds: failed };
+    }
+
+    // Puts an invoice back exactly as it was before an edit-save started, after
+    // a step of that save failed. ctx = { saleDbId, origRow, oldItems,
+    // restoredDeltas, flags:{stockRestored,itemsDeleted,accountingReversed,
+    // headerUpdated} }. Returns a list of anything that could NOT be undone.
+    async function rollbackEditedSale(ctx) {
+        const problems = [];
+        const f = ctx.flags;
+        try {
+            if (f.headerUpdated || f.accountingReversed) {
+                const { error } = await supabaseClient.rpc('reverse_sale_accounting', { p_sale_id: ctx.origRow.sale_id });
+                if (error) problems.push('ledger: ' + error.message);
+            }
+            if (f.itemsDeleted) {
+                await supabaseClient.from('sale_items').delete().eq('sale_id', ctx.saleDbId); // partial new lines, if any
+                if (ctx.oldItems && ctx.oldItems.length > 0) {
+                    const { error } = await supabaseClient.from('sale_items').insert(ctx.oldItems);
+                    if (error) problems.push('invoice lines: ' + error.message);
+                }
+            }
+            if (f.headerUpdated) {
+                const { id, ...rest } = ctx.origRow;
+                const { error } = await supabaseClient.from('sales').update(rest).eq('id', ctx.saleDbId);
+                if (error) problems.push('invoice header: ' + error.message);
+            } else if (f.accountingReversed) {
+                // re-saving the unchanged type makes the database re-post the original entries
+                const { error } = await supabaseClient.from('sales').update({ type: ctx.origRow.type }).eq('id', ctx.saleDbId);
+                if (error) problems.push('ledger repost: ' + error.message);
+            }
+            if (f.stockRestored && ctx.restoredDeltas && ctx.restoredDeltas.length > 0) {
+                const adj = await adjustBatchStock(ctx.restoredDeltas.map(d => ({ batch_id: d.batch_id, delta: -d.delta })));
+                if (!adj.ok) problems.push('stock');
+            }
+        } catch (e) {
+            problems.push('unexpected: ' + (e?.message || e));
+        }
+        return problems;
+    }
+
     let retailBackgroundWork = Promise.resolve();
     let retailBackgroundPending = 0;
     window.addEventListener('beforeunload', (e) => {
@@ -5028,10 +5150,23 @@
             // edited items, exactly as it already does for a normal new
             // sale. Net effect: one clean, correct final state, same as if
             // this were the only save that ever happened.
+            let editCtx = null;
             if (editingSaleDbId) {
+                // Snapshot the invoice exactly as it is now, so that if any step
+                // below fails everything can be put back (see rollbackEditedSale).
+                const { data: origRow, error: origRowError } = await supabaseClient
+                    .from('sales').select('*').eq('id', editingSaleDbId).single();
+                if (origRowError || !origRow) {
+                    alert('❌ Could not load the original invoice to edit it safely. Nothing was changed.\n' + (origRowError?.message || ''));
+                    return;
+                }
+                // Stock was only ever taken for a real (non-quotation) completed sale, so
+                // only then is there anything to put back.
+                const originalWasDeducted = origRow.type === 'COMPLETED' && !origRow.is_quotation;
+
                 const { data: oldItems, error: oldItemsError } = await supabaseClient
                     .from('sale_items')
-                    .select('product_id, batch_id, quantity, pack_size')
+                    .select('*')
                     .eq('sale_id', editingSaleDbId);
 
                 if (oldItemsError) {
@@ -5040,7 +5175,10 @@
                     return;
                 }
 
-                if (oldItems && oldItems.length > 0) {
+                editCtx = { saleDbId: editingSaleDbId, origRow, oldItems: oldItems || [], restoredDeltas: [],
+                    flags: { stockRestored: false, itemsDeleted: false, accountingReversed: false, headerUpdated: false } };
+
+                if (oldItems && oldItems.length > 0 && originalWasDeducted) {
                     // 🔥 ADDED: a bundle/kit line's batch_id points at its anchor
                     // batch (not real stock -- see that row's insert comment), so
                     // restoring it there would do nothing useful. Detect which of
@@ -5099,35 +5237,38 @@
                         }
                     }
 
-                    const { data: batchesToRestore, error: batchFetchError } = await supabaseClient
-                        .from('batches')
-                        .select('id, total_qty')
-                        .in('id', [...qtyToRestoreByBatch.keys()]);
-
-                    if (batchFetchError) {
-                        console.error('Error restoring stock before edit-save:', batchFetchError);
-                    } else {
-                        await Promise.all((batchesToRestore || []).map(b =>
-                            supabaseClient.from('batches')
-                                .update({ total_qty: b.total_qty + (qtyToRestoreByBatch.get(b.id) || 0) })
-                                .eq('id', b.id)
-                        ));
+                    editCtx.restoredDeltas = [...qtyToRestoreByBatch.entries()].map(([batch_id, delta]) => ({ batch_id, delta }));
+                    const restoreResult = await adjustBatchStock(editCtx.restoredDeltas);
+                    if (!restoreResult.ok) {
+                        // put back whatever part did go through, then stop
+                        const partial = editCtx.restoredDeltas.filter(d => !restoreResult.failedIds.includes(d.batch_id));
+                        await adjustBatchStock(partial.map(d => ({ batch_id: d.batch_id, delta: -d.delta })));
+                        alert('❌ Could not put the old stock back, so the edit was stopped. NOTHING was changed. Please try again.');
+                        return;
                     }
+                    editCtx.flags.stockRestored = true;
                 }
 
-                await supabaseClient.from('sale_items').delete().eq('sale_id', editingSaleDbId);
-
-                const oldSaleIdString = saleData.sale_id; // unchanged across an edit -- same invoice number throughout
-                const { data: oldJournals } = await supabaseClient
-                    .from('journal_entries')
-                    .select('id')
-                    .in('reference', [oldSaleIdString, `${oldSaleIdString}-COGS`]);
-
-                if (oldJournals && oldJournals.length > 0) {
-                    const oldJournalIds = oldJournals.map(j => j.id);
-                    await supabaseClient.from('journal_lines').delete().in('journal_entry_id', oldJournalIds);
-                    await supabaseClient.from('journal_entries').delete().in('id', oldJournalIds);
+                const { error: delItemsError } = await supabaseClient.from('sale_items').delete().eq('sale_id', editingSaleDbId);
+                if (delItemsError) {
+                    const undo = await rollbackEditedSale(editCtx);
+                    alert('❌ Could not replace the invoice lines, so the edit was stopped and undone.' + (undo.length ? '\nCould NOT undo: ' + undo.join('; ') + ' -- tell an admin.' : '\nNothing was changed.'));
+                    return;
                 }
+                editCtx.flags.itemsDeleted = true;
+
+                // Remove the old accounting entries through a database function: only an
+                // Admin may delete ledger rows directly, so doing it from the browser
+                // silently did nothing for everybody else and left the OLD amounts in
+                // the books. The function lets any till role do this for a sale it is
+                // editing and records who did it.
+                const { error: reverseError } = await supabaseClient.rpc('reverse_sale_accounting', { p_sale_id: saleData.sale_id });
+                if (reverseError) {
+                    const undo = await rollbackEditedSale(editCtx);
+                    alert('❌ Could not update the accounting entries, so the edit was stopped and undone.\n' + reverseError.message + (undo.length ? '\nCould NOT undo: ' + undo.join('; ') + ' -- tell an admin.' : '\nNothing was changed.'));
+                    return;
+                }
+                editCtx.flags.accountingReversed = true;
             }
 
             let savedData;
@@ -5160,9 +5301,11 @@
 
                     if (error) throw new Error(error.message);
                     if (!data || data.length === 0) {
-                        alert('❌ Could not find the original invoice to update. Nothing was saved.');
+                        const undo = await rollbackEditedSale(editCtx);
+                        alert('❌ Could not find the original invoice to update. The edit was undone.' + (undo.length ? '\nCould NOT undo: ' + undo.join('; ') + ' -- tell an admin.' : ''));
                         return;
                     }
+                    editCtx.flags.headerUpdated = true;
                     savedData = data;
                 } else {
                     const { data, error } = await supabaseClient
@@ -5202,6 +5345,11 @@
             } catch (dbError) {
                 console.error('Database error:', dbError);
                 retailCustomerIdCache.clear(); // in case a stale customer id was the cause
+                if (editCtx) {
+                    const undo = await rollbackEditedSale(editCtx);
+                    alert('❌ Error saving the edit -- it was undone and the invoice is as it was before:\n' + dbError.message + (undo.length ? '\nCould NOT undo: ' + undo.join('; ') + ' -- tell an admin.' : ''));
+                    return;
+                }
                 alert('❌ Error saving transaction:\n' + dbError.message);
                 return;
             }
@@ -5230,6 +5378,12 @@
                 // 🔥 CRITICAL ROLLBACK: If sale_items fails, delete the main sale record
                 if (itemError) {
                     console.error('❌ Failed to save sale items:', itemError);
+                    if (editCtx) {
+                        // EDITING: never delete the original invoice -- undo the edit instead.
+                        const undo = await rollbackEditedSale(editCtx);
+                        alert('❌ Failed to save the edited invoice lines, so the edit was undone and the invoice is as it was.\nError: ' + itemError.message + (undo.length ? '\nCould NOT undo: ' + undo.join('; ') + ' -- tell an admin.' : ''));
+                        return;
+                    }
                     await supabaseClient.from('sales').delete().eq('id', savedData[0].id);
                     alert('❌ Failed to save sale items. Transaction cancelled.\nError: ' + itemError.message);
                     return;
@@ -5356,21 +5510,12 @@
                         return stockProblems;
                     }
 
-                    await Promise.all((batches || []).map(async (batchData) => {
-                        const totalQtyToDeduct = qtyByBatch.get(batchData.id) || 0;
-                        const newQty = batchData.total_qty - totalQtyToDeduct;
-                        const { error: updateError } = await supabaseClient
-                            .from('batches')
-                            .update({ total_qty: newQty })
-                            .eq('id', batchData.id);
-
-                        if (updateError) {
-                            console.error('Stock update error for batch:', batchData.id, updateError);
-                            stockProblems.push(`not deducted: ${describeBatches([batchData.id])}`);
-                        } else {
-                            console.log(`Stock updated for batch ${batchData.id}: ${batchData.total_qty} -> ${newQty}`);
+                    const dedAdj = await adjustBatchStock((batches || []).map(b => ({ batch_id: b.id, delta: -(qtyByBatch.get(b.id) || 0) })));
+                    if (!dedAdj.ok) {
+                        for (const failedId of dedAdj.failedIds) {
+                            stockProblems.push(`not deducted: ${describeBatches([failedId])}`);
                         }
-                    }));
+                    }
                     return stockProblems;
                 })();
 
