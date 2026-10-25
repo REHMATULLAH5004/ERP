@@ -66,6 +66,15 @@ let ROLE_ACCESS = FALLBACK_ROLE_ACCESS; // replaced with DB data once loaded, se
 // the DOM if its ticket is still the latest one when its fetch resolves.
 let navToken = 0;
 
+// A network call that never answers must not leave the screen blank. Races the
+// call against a timer; on timeout the caller carries on (retry / safe default).
+function withTimeout(promise, ms, label) {
+    return Promise.race([
+        promise,
+        new Promise((_, reject) => setTimeout(() => reject(new Error((label || 'request') + ' timed out')), ms))
+    ]);
+}
+
 document.addEventListener('DOMContentLoaded', async () => {
     
     console.log("1. app.js starting...");
@@ -121,11 +130,25 @@ document.addEventListener('DOMContentLoaded', async () => {
             // employees.employee_id), so the navbar can show a real name
             // instead of the static "User" placeholder, without a
             // second round trip.
-            const { data: profile, error: profileError } = await supabaseClient
-                .from('user_profiles')
-                .select('role, employees(first_name, last_name)')
-                .eq('id', session.user.id)
-                .maybeSingle();
+            // Up to 3 tries of 5 seconds each. This call very occasionally never came back,
+            // which left the screen blank after "Session found" with nothing else happening.
+            let profile = null, profileError = null;
+            for (let attempt = 1; attempt <= 3; attempt++) {
+                try {
+                    const res = await withTimeout(
+                        supabaseClient
+                            .from('user_profiles')
+                            .select('role, employees(first_name, last_name)')
+                            .eq('id', session.user.id)
+                            .maybeSingle(),
+                        5000, 'profile lookup');
+                    profile = res.data; profileError = res.error;
+                    break;
+                } catch (e) {
+                    console.warn(`Profile lookup attempt ${attempt} failed:`, e.message);
+                    profileError = e;
+                }
+            }
 
             if (profileError) {
                 console.warn("Could not load user role, defaulting to '" + DEFAULT_ROLE + "':", profileError);
@@ -153,9 +176,9 @@ document.addEventListener('DOMContentLoaded', async () => {
     // has no rows for this role yet (e.g. before Admin has saved
     // anything from the Roles & Permissions page).
     try {
-        const { data: permRows, error: permError } = await supabaseClient
-            .from('role_permissions')
-            .select('role, module');
+        const { data: permRows, error: permError } = await withTimeout(
+            supabaseClient.from('role_permissions').select('role, module'),
+            5000, 'permissions lookup');
 
         if (permError) throw permError;
 
