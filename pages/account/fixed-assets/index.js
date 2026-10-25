@@ -178,7 +178,9 @@
             monthlyDepreciation,
             totalDepreciation,
             netBookValue: cost - totalDepreciation,
-            remainingLife: Math.max(0, usefulLife - (totalDepreciation / annualDepreciation)),
+            // TEST-DRIVEN FIX: when the yearly depreciation is 0 (cost equals salvage value, or a zero-cost
+            // asset) the old line divided by zero and showed "NaN" -- nothing is left to depreciate, so 0.
+            remainingLife: annualDepreciation > 0 ? Math.max(0, usefulLife - (totalDepreciation / annualDepreciation)) : 0,
             isFullyDepreciated: totalDepreciation >= maxDepreciation
         };
     }

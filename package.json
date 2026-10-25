@@ -1,0 +1,10 @@
+{
+  "name": "griffins-erp-tests",
+  "private": true,
+  "description": "Unit and integration tests for the Griffins ERP (Node built-in test runner, no dependencies).",
+  "scripts": {
+    "test": "node tests/run.js",
+    "test:unit": "node tests/run.js unit",
+    "test:integration": "node tests/run.js integration"
+  }
+}

@@ -773,7 +773,10 @@
                 } else {
                     cur += ch;
                 }
-            } else if (ch === '"') {
+            } else if (ch === '"' && cur === '') {
+                // TEST-DRIVEN FIX: a quote only OPENS a quoted field at the start of the field.
+                // Mid-field (e.g. an unquoted  5" tube ) it is ordinary text; before this, it
+                // swallowed every following comma and merged the rest of the row into one cell.
                 inQuotes = true;
             } else if (ch === ',') {
                 result.push(cur);
