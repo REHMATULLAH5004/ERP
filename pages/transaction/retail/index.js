@@ -178,6 +178,38 @@
         return maxPct * Math.pow(minPct / maxPct, t);
     }
 
+    // ADDED: "clean" prices for REGULAR retail. The pack price (cost per pack plus
+    // the markup) is rounded to a tidy figure, with a finer step for cheaper packs
+    // so a small price never collapses to 0:
+    //   under K10  -> nearest K0.50 (never below K0.50)
+    //   K10-K50    -> nearest K1
+    //   K50-K100   -> nearest K5
+    //   K100-K1000 -> nearest K10
+    //   K1000+     -> nearest K50
+    // Safety: the rounded price is never allowed below cost + 25%; if rounding
+    // down would do that it rounds UP instead. To change the steps, edit the
+    // table below (same table is used in Retail POS, Quick Sale, CRM quick sale
+    // and the Pricing page).
+    const REGULAR_PRICE_STEPS = [
+        { below: 10, step: 0.5 },
+        { below: 50, step: 1 },
+        { below: 100, step: 5 },
+        { below: 1000, step: 10 },
+        { below: Infinity, step: 50 }
+    ];
+    const REGULAR_MIN_MARGIN = 0.25;
+    function roundRegularPackPrice(price, costPerPack) {
+        price = Number(price) || 0;
+        if (!(price > 0)) return price;
+        const tier = REGULAR_PRICE_STEPS.find(t => price < t.below);
+        const step = tier.step;
+        let rounded = Math.round(price / step) * step;
+        const floor = (Number(costPerPack) || 0) * (1 + REGULAR_MIN_MARGIN);
+        if (rounded < floor) rounded = Math.ceil(price / step) * step;
+        if (rounded < step) rounded = step;
+        return Math.round(rounded * 100) / 100;
+    }
+
     // 🔥 FIX: tracks the `sales.id` (database UUID) of the invoice currently
     // loaded for in-place editing via the search modal's "Edit" button. Save
     // previously ALWAYS inserted a new `sales` row -- even when editing an
@@ -4028,7 +4060,9 @@
             rateInput.value = nhimaPrice.toFixed(2);
         } else {
             packInput.value = packSize + 's';
-            const saleRate = costPrice * packSize * (1 + (percent / 100));
+            let saleRate = costPrice * packSize * (1 + (percent / 100));
+            // REGULAR: round the pack price to a clean figure (see roundRegularPackPrice)
+            if (currentClientType === 'REGULAR') saleRate = roundRegularPackPrice(saleRate, costPrice * packSize);
             rateInput.value = saleRate.toFixed(2);
         }
     }
@@ -7165,7 +7199,7 @@
         }
         function packRate(batch, pack) {
             const costPerPack = (Number(batch.cost_price) || 0) * pack;
-            return round2(costPerPack * (1 + markupPercent(costPerPack) / 100));
+            return roundRegularPackPrice(round2(costPerPack * (1 + markupPercent(costPerPack) / 100)), costPerPack);
         }
 
         async function ensureCatalog() {

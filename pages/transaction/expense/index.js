@@ -353,6 +353,22 @@
         document.getElementById('todayExpenses').textContent = `${symbol} ${formatNumber(stats.todayTotal)}`;
     }
 
+    // ADDED: the list had no Expense # column. The table's header lives in the
+    // page's HTML, so add the "Expense #" header here (once) rather than
+    // depending on that file. The number in each row opens the expense.
+    function ensureExpenseNumberHeader(tbody) {
+        const table = tbody.closest('table');
+        const headRow = table && table.querySelector('thead tr');
+        if (!headRow || headRow.querySelector('th[data-expense-number]')) return;
+        const oldFirst = headRow.querySelector('th');
+        const th = document.createElement('th');
+        th.setAttribute('data-expense-number', '1');
+        th.textContent = 'Expense #';
+        th.style.paddingLeft = '20px';
+        headRow.insertBefore(th, oldFirst);
+        if (oldFirst) oldFirst.style.paddingLeft = '';
+    }
+
     function renderExpenses(data = null) {
         const expenses = data || state.expenses;
         const tbody = document.getElementById('expenseTableBody');
@@ -374,6 +390,7 @@
             filtered = filtered.filter(tx => 
                 (tx.description || '').toLowerCase().includes(searchTerm) ||
                 (tx.reference || '').toLowerCase().includes(searchTerm) ||
+                (tx.transaction_number || '').toLowerCase().includes(searchTerm) ||
                 (tx.expense_category || '').toLowerCase().includes(searchTerm)
             );
         }
@@ -394,7 +411,7 @@
         }
 
         if (filtered.length === 0) {
-            tbody.innerHTML = `<tr><td colspan="7" style="text-align: center; padding: 40px; color: #94a3b8;">
+            tbody.innerHTML = `<tr><td colspan="8" style="text-align: center; padding: 40px; color: #94a3b8;">
                 <i class="fa-regular fa-circle-check" style="font-size: 2rem; display: block; margin-bottom: 10px;"></i>
                 ${expenses.length === 0 ? 'No expenses recorded yet.' : 'No expenses match the filters.'}
             </td></tr>`;
@@ -428,6 +445,8 @@
             'Other': '#64748b'
         };
 
+        ensureExpenseNumberHeader(tbody);
+
         tbody.innerHTML = filtered.map(tx => {
             const symbol = getCurrencySymbol(tx.account);
             const date = tx.transaction_date ? new Date(tx.transaction_date).toLocaleDateString() : 'N/A';
@@ -436,7 +455,12 @@
 
             return `
             <tr>
-                <td style="padding-left: 20px;">${date}</td>
+                <td style="padding-left: 20px; white-space: nowrap;">
+                    <a href="#" class="expense-number-link" onclick="viewExpense('${tx.id}'); return false;" title="Open this expense"
+                       style="color: #2563eb; font-weight: 600; text-decoration: none; cursor: pointer;"
+                       onmouseover="this.style.textDecoration='underline'" onmouseout="this.style.textDecoration='none'">${tx.transaction_number || 'N/A'}</a>
+                </td>
+                <td>${date}</td>
                 <td><span class="account-badge ${getAccountBadge(tx.account)}">${tx.account}</span></td>
                 <td>
                     <span class="expense-category-badge" style="background: ${color}20; color: ${color};">

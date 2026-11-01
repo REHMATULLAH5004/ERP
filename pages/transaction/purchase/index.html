@@ -28,6 +28,14 @@
             <h4>Total Orders</h4>
             <p id="totalOrders">0</p>
         </div>
+        <!-- ADDED: purchases for the current month (ZMW + USD x exchange rate).
+             Green below K800,000, yellow from K800,000, red from K1,200,000.
+             Warning colour only -- it never blocks anything. -->
+        <div class="stat-card" id="monthPurchaseCard" style="border-left: 4px solid #10b981; min-width: 220px;">
+            <h4>Purchases This Month</h4>
+            <p id="monthPurchaseTotal">K 0.00</p>
+            <small id="monthPurchaseNote" style="display:block; font-size: 0.68rem; color: #64748b; margin-top: 2px;"></small>
+        </div>
         <div class="stat-card" style="border-left: 4px solid #f59e0b;">
             <h4>Pending Approval</h4>
             <p id="pendingOrders">0</p>
@@ -126,6 +134,7 @@
                 <thead>
                     <tr>
                         <th style="padding-left: 20px;">PO #</th>
+                        <th>GRN #</th>
                         <th>Supplier</th>
                         <th>Expected Date</th>
                         <th>Status</th>
@@ -135,7 +144,7 @@
                 </thead>
                 <tbody id="purchaseTableBody">
                     <tr>
-                        <td colspan="6" style="text-align: center; padding: 40px; color: #94a3b8;">
+                        <td colspan="7" style="text-align: center; padding: 40px; color: #94a3b8;">
                             <i class="fa-solid fa-spinner fa-spin"></i> Loading orders...
                         </td>
                     </tr>

@@ -105,6 +105,23 @@
 // the physical count during an actual stock take.
 // ============================================
 
+// Reads EVERY batch row, 1000 at a time. The old code asked for the batches of all products
+// with .in('product_id', [every product id]) -- with ~850 products that web address is too
+// long, the request failed, the error was ignored, and every product showed 0 stock.
+async function fetchAllBatchRows(columns, newestFirst) {
+    const rows = [];
+    const PAGE = 1000;
+    for (let from = 0; ; from += PAGE) {
+        let q = supabaseClient.from('batches').select(columns);
+        if (newestFirst) q = q.order('created_at', { ascending: false });
+        const { data, error } = await q.order('id', { ascending: true }).range(from, from + PAGE - 1);
+        if (error) return { data: null, error };
+        rows.push(...(data || []));
+        if (!data || data.length < PAGE) break;
+    }
+    return { data: rows, error: null };
+}
+
 async function printStockTakeSheet() {
     const btn = document.getElementById('printStockTakeSheetBtn');
     const originalHtml = btn ? btn.innerHTML : null;
@@ -127,10 +144,7 @@ async function printStockTakeSheet() {
         const productIds = (products || []).map(p => p.id);
         let qtyMap = {};
         if (productIds.length > 0) {
-            const { data: batches, error: batchErr } = await supabaseClient
-                .from('batches')
-                .select('product_id, total_qty')
-                .in('product_id', productIds);
+            const { data: batches, error: batchErr } = await fetchAllBatchRows('product_id, total_qty', false);
             if (batchErr) throw batchErr;
             (batches || []).forEach(b => {
                 qtyMap[b.product_id] = (qtyMap[b.product_id] || 0) + (b.total_qty || 0);
@@ -538,10 +552,7 @@ async function loadProductsBySubCategory(subCategoryId, subCategoryName) {
         // quantity at all -- not useful for stock taking. Now sums
         // batches.total_qty per product to show real current stock.
         const productIds = products.map(p => p.id);
-        const { data: batches } = await supabaseClient
-            .from('batches')
-            .select('product_id, total_qty')
-            .in('product_id', productIds);
+        const { data: batches } = await fetchAllBatchRows('product_id, total_qty', false);
 
         // 🔥 FIX: re-check after the second await too.
         listNow = document.getElementById('productListContent');

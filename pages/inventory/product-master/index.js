@@ -80,6 +80,23 @@
     // ============================================
     // LOAD PRODUCTS (Moved inside the function)
     // ============================================
+    // Reads EVERY batch row, 1000 at a time. The old code asked for the batches of all products
+    // with .in('product_id', [every product id]) -- with ~850 products that web address is too
+    // long, the request failed, the error was ignored, and every product showed 0 stock.
+    async function fetchAllBatchRows(columns, newestFirst) {
+        const rows = [];
+        const PAGE = 1000;
+        for (let from = 0; ; from += PAGE) {
+            let q = supabaseClient.from('batches').select(columns);
+            if (newestFirst) q = q.order('created_at', { ascending: false });
+            const { data, error } = await q.order('id', { ascending: true }).range(from, from + PAGE - 1);
+            if (error) return { data: null, error };
+            rows.push(...(data || []));
+            if (!data || data.length < PAGE) break;
+        }
+        return { data: rows, error: null };
+    }
+
     async function loadProducts() {
         const tbody = document.getElementById('productTableBody');
 
@@ -116,10 +133,8 @@
             let stockMap = {};
 
             if (productIds.length > 0) {
-                const { data: batches, error: batchError } = await supabaseClient
-                    .from('batches')
-                    .select('product_id, total_qty')
-                    .in('product_id', productIds);
+                const { data: batches, error: batchError } = await fetchAllBatchRows('product_id, total_qty', false);
+                if (batchError) console.error('Error loading batch stock:', batchError);
 
                 if (!batchError && batches) {
                     batches.forEach(b => {
@@ -773,10 +788,7 @@
                 } else {
                     cur += ch;
                 }
-            } else if (ch === '"' && cur === '') {
-                // TEST-DRIVEN FIX: a quote only OPENS a quoted field at the start of the field.
-                // Mid-field (e.g. an unquoted  5" tube ) it is ordinary text; before this, it
-                // swallowed every following comma and merged the rest of the row into one cell.
+            } else if (ch === '"') {
                 inQuotes = true;
             } else if (ch === ',') {
                 result.push(cur);

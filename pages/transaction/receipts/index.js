@@ -2895,212 +2895,612 @@
             openStatement(data.customer, data);
         };
     
-        function openStatement(customer, customerData) {
-            const transactions = [];
-            const allEntries = [];
-            let runningBalance = customerData.opening_balance_zmw || 0;
-    
-            if (runningBalance > 0) {
-                transactions.push({ date: 'Opening Balance', type: 'Opening Balance', reference: 'Opening', amount: runningBalance, balance: runningBalance, isOpening: true });
-            }
-    
-            customerData.sales?.forEach(sale => {
-                allEntries.push({
-                    date: new Date(sale.created_at),
-                    type: `Sale (${customer._type || 'RETAIL'} ${customer._subType || 'REGULAR'})`,
-                    reference: sale.sale_id,
-                    amount: sale.grand_total || 0,
-                    isReceipt: false
-                });
-            });
-    
-            customerData.receipts?.forEach(r => {
-                // 🔥 ADDED: the statement used to show a receipt's own
-                // reference (RCT-2026-XXXX) with no way to tell WHICH
-                // invoice it actually paid off -- exactly what was raised
-                // today looking at DR JAVIA MEDICAL CENTER's payment.
-                // customer_receipt_invoices links every receipt back to
-                // the sale(s)/opening balance it was applied against
-                // (see loadPaymentInvoices()/state.customerReceiptInvoices
-                // and the invoice-selection logic in
-                // saveRetailReceipt()/saveWholesaleReceipt() above), so
-                // look that up here and fold the invoice number(s) into
-                // the reference shown on the statement.
-                const appliedTo = (state.customerReceiptInvoices || [])
-                    .filter(ri => ri.receipt_id === r.id)
-                    .map(ri => {
-                        if (ri.is_opening_balance) return 'Opening Balance';
-                        const sale = state.sales.find(s => s.id === ri.sale_id);
-                        return sale ? sale.sale_id : null;
-                    })
-                    .filter(Boolean);
-                const referenceText = appliedTo.length
-                    ? `${r.receipt_number} (Inv: ${appliedTo.join(', ')})`
-                    : r.receipt_number;
+        // ============================================
+        // CUSTOMER STATEMENT -- same layout as the Supplier Statement
+        // ============================================
+        // 🔥 CHANGED (by request, "take idea from payable to make it more
+        // accurate"): the customer statement used to be a plain
+        //   Date | Type | Reference | Amount | Balance
+        // list. A payment (e.g. DR JAVIA MEDICAL CENTER-NDOLA's bank
+        // transfer FC1371) showed no description of what it settled, and
+        // nothing showed which invoices were still open. It now uses the
+        // exact layout of the Supplier Statement on the Payments page:
+        //   Date | Invoice # | Type | Reference | Amount DUE | Amount PAID | Balance
+        // followed by three "for information" columns -- Paid so far |
+        // PAID ON | Remaining -- that NEVER affect the balance.
+        //   Balance = previous balance + Amount DUE - Amount PAID
+        // One receipt = ONE row (even when it settles several invoices); its
+        // Invoice # cell lists everything it covered, e.g.
+        // "Opening Balance/GPI-2026-584782-9163".
+        // The closing balance is unchanged: opening + invoices - receipts
+        // (the same figure the receivables list shows).
 
-                allEntries.push({
-                    date: new Date(r.receipt_date),
-                    type: 'Receipt',
-                    reference: referenceText,
-                    amount: -(r.amount || 0),
-                    isReceipt: true,
-                    method: r.payment_method
+        // Local-time YYYY-MM-DD key for a date-only string ("2026-09-29") or
+        // a full timestamp, so rows sort by real calendar date and never by
+        // a locale-formatted string.
+        function statementDateKey(value) {
+            if (!value) return '0000-00-00';
+            if (typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value)) return value;
+            const d = new Date(value);
+            if (isNaN(d.getTime())) return '0000-00-00';
+            return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+        }
+        function statementDateLabel(key) {
+            return new Date(key + 'T00:00:00').toLocaleDateString();
+        }
+        function escapeStatementHtml(value) {
+            return String(value == null ? '' : value)
+                .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+        }
+
+        function buildCustomerStatementLedger(customer, customerData) {
+            const round2 = n => Math.round((Number(n) || 0) * 100) / 100;
+            const opening = round2(customerData.opening_balance_zmw || 0);
+            const custId = customer._customerId || customer._id || null;
+            const idField = customer._source === 'wholesale' ? 'wholesale_customer_id' : 'customer_id';
+            const allLinks = state.customerReceiptInvoices || [];
+            const lineKey = ri => statementDateKey(ri.payment_date || ri.created_at);
+            const latestKey = lines => lines.reduce((m, ri) => (lineKey(ri) > m ? lineKey(ri) : m), '');
+            // 🔥 CHANGED (by request): the grey PAID ON cell used to show only
+            // the LATEST payment date, so an opening balance paid three times
+            // looked like it was paid once. Now every payment is listed on its
+            // own line -- "date - amount" -- oldest first. A single payment
+            // still shows just its date.
+            const paidOnText = lines => {
+                if (!lines.length) return '';
+                const sorted = [...lines].sort((a, b) => lineKey(a).localeCompare(lineKey(b)));
+                if (sorted.length === 1) return statementDateLabel(lineKey(sorted[0]));
+                return sorted
+                    .map(ri => statementDateLabel(lineKey(ri)) + '  -  ZK' + formatNumber(ri.amount_paid || 0))
+                    .join('\n');
+            };
+
+            const openingLinks = custId
+                ? allLinks.filter(ri => ri.is_opening_balance === true && ri[idField] === custId)
+                : [];
+            const paidOpening = round2(openingLinks.reduce((s, ri) => s + (ri.amount_paid || 0), 0));
+
+            const events = [];
+            let seq = 0;
+
+            // ---- invoices (sales) ----
+            (customerData.sales || []).forEach(sale => {
+                const amount = round2(sale.grand_total || 0);
+                const invoiceNumber = sale.sale_id || ('INV-' + String(sale.id).slice(0, 8));
+                const invoiceKey = statementDateKey(sale.created_at);
+                const links = allLinks.filter(ri => ri.sale_id === sale.id && !ri.is_opening_balance);
+                const paidAmount = round2(links.reduce((s, ri) => s + (ri.amount_paid || 0), 0));
+                events.push({
+                    key: invoiceKey, order: 0, seq: seq++,
+                    stamp: new Date(sale.created_at || 0).getTime() || 0,
+                    row: {
+                        type: 'Sale', reference: sale.claim_number || '-',
+                        due: amount, amount: amount,
+                        isOpening: false, isPayment: false,
+                        invoiceNumber: invoiceNumber,
+                        invoiceRefs: [{ label: invoiceNumber, saleId: sale.id }],
+                        paidSoFar: paidAmount, remaining: round2(amount - paidAmount),
+                        paidOn: paidOnText(links)
+                    }
                 });
             });
-    
-            allEntries.sort((a, b) => a.date - b.date);
-    
-            allEntries.forEach(entry => {
-                runningBalance += entry.amount;
-                transactions.push({
-                    date: entry.date.toLocaleDateString(),
-                    type: entry.type + (entry.method ? ' (' + entry.method + ')' : ''),
-                    reference: entry.reference,
-                    amount: entry.amount,
-                    balance: runningBalance,
-                    isReceipt: entry.isReceipt
+
+            // ---- receipts (one row per receipt) ----
+            (customerData.receipts || []).forEach(r => {
+                const links = allLinks.filter(ri => ri.receipt_id === r.id);
+                const labels = [];
+                const refIds = {};
+                links.forEach(ri => {
+                    let label = null;
+                    if (ri.is_opening_balance) label = 'Opening Balance';
+                    else {
+                        const sale = (state.sales || []).find(s => s.id === ri.sale_id);
+                        label = sale ? sale.sale_id : null;
+                        if (sale) refIds[sale.sale_id] = sale.id;
+                    }
+                    if (label && !labels.includes(label)) labels.push(label);
+                });
+                // Opening Balance first, then invoices in date order
+                labels.sort((a, b) => (a === 'Opening Balance' ? -1 : b === 'Opening Balance' ? 1 : 0));
+                const amount = round2(r.amount || 0);
+                const allocated = round2(links.reduce((s, ri) => s + (ri.amount_paid || 0), 0));
+                let invoiceText = labels.length ? labels.join('/') : 'Not allocated';
+                if (labels.length && Math.abs(allocated - amount) > 0.01) {
+                    invoiceText += ' (ZK' + formatNumber(allocated) + ' of ZK' + formatNumber(amount) + ' allocated)';
+                }
+                const invoiceSuffix = invoiceText.slice((labels.length ? labels.join('/') : 'Not allocated').length);
+                const refParts = [r.reference_number, r.receipt_number].filter(Boolean);
+                events.push({
+                    key: statementDateKey(r.receipt_date), order: 1, seq: seq++,
+                    stamp: new Date(r.created_at || 0).getTime() || 0,
+                    row: {
+                        type: 'Receipt', method: r.payment_method,
+                        reference: refParts.join(' / ') || 'RECEIPT',
+                        notes: r.notes || '',
+                        due: 0, amount: -amount, credit: amount,
+                        isOpening: false, isPayment: true,
+                        invoiceNumber: invoiceText,
+                        invoiceRefs: labels.map(l => ({ label: l, saleId: refIds[l] || '' })),
+                        invoiceSuffix: invoiceSuffix
+                    }
                 });
             });
-    
+
+            // Same day: invoices first, then receipts; otherwise by entry time.
+            events.sort((a, b) =>
+                a.key.localeCompare(b.key) || a.order - b.order || a.stamp - b.stamp || a.seq - b.seq
+            );
+
+            const rows = [];
+            let running = opening;
+            if (opening > 0 || openingLinks.length > 0) {
+                rows.push({
+                    date: 'Opening Balance', type: 'Opening Balance', reference: 'Opening',
+                    due: opening, amount: opening, balance: running, isOpening: true, invoiceNumber: '-',
+                    paidSoFar: paidOpening, remaining: round2(opening - paidOpening),
+                    paidOn: paidOnText(openingLinks)
+                });
+            }
+            events.forEach(ev => {
+                running = round2(running + ev.row.amount); // invoices add, receipts are already negative
+                rows.push(Object.assign({ date: statementDateLabel(ev.key), balance: running }, ev.row));
+            });
+            return rows;
+        }
+
+        // ---- shared HTML for the statement table (modal + print) ----
+        const STMT_INFO_STYLE = 'background:#f8fafc; color:#64748b; font-size:0.85em;';
+
+        function statementHeadHtml() {
+            return `
+                    <tr>
+                        <th>Date</th>
+                        <th>Invoice #</th>
+                        <th>Type</th>
+                        <th>Reference</th>
+                        <th style="text-align: right;">Amount (ZMW) DUE</th>
+                        <th style="text-align: right;">Amount (ZMW) PAID</th>
+                        <th style="text-align: right;">Balance (ZMW)</th>
+                        <th style="text-align: right; ${STMT_INFO_STYLE}">Paid so far (ZMW)</th>
+                        <th style="text-align: right; ${STMT_INFO_STYLE}">PAID ON</th>
+                        <th style="text-align: right; ${STMT_INFO_STYLE}">Remaining (ZMW)</th>
+                    </tr>`;
+        }
+
+        // The ten cell texts of one statement row. Used by the screen/print
+        // table AND the PDF download, so all three always show the same figures.
+        function statementRowCells(t) {
+            const f = n => 'ZK' + formatNumber(n);
+            const isPayment = !!t.isPayment;
+            return [
+                t.date,
+                t.invoiceNumber || '-',
+                t.type + (t.method ? ' (' + t.method + ')' : ''),
+                t.reference,
+                isPayment ? '-' : f(t.due !== undefined ? t.due : t.amount),   // Amount DUE
+                isPayment ? f(Math.abs(t.amount)) : '',                         // Amount PAID
+                f(t.balance),                                                   // Balance
+                isPayment ? '-' : f(t.paidSoFar || 0),                          // Paid so far (info)
+                isPayment ? '-' : (t.paidOn || ''),                             // PAID ON (info)
+                isPayment ? '-' : f(t.remaining || 0)                           // Remaining (info)
+            ];
+        }
+
+        // `clickable` is true only for the on-screen statement: each invoice
+        // number that belongs to a sale then opens that invoice. The printed
+        // copy keeps plain text.
+        function statementInvoiceCellHtml(t, plain, clickable) {
+            const refs = t.invoiceRefs || [];
+            if (!clickable || !refs.some(r => r.saleId)) return `<strong>${plain}</strong>`;
+            const link = r => r.saleId
+                ? `<a href="#" onclick="openStatementInvoice('${escapeStatementHtml(r.saleId)}'); return false;" title="Open this invoice"
+                      style="color:#2563eb; text-decoration:none;"
+                      onmouseover="this.style.textDecoration='underline'" onmouseout="this.style.textDecoration='none'">${escapeStatementHtml(r.label)}</a>`
+                : escapeStatementHtml(r.label);
+            return `<strong>${refs.map(link).join('/')}${escapeStatementHtml(t.invoiceSuffix || '')}</strong>`;
+        }
+
+        function statementRowHtml(t, clickable) {
+            const isPayment = !!t.isPayment;
+            const c = statementRowCells(t).map(escapeStatementHtml).map(x => x.replace(/\n/g, '<br>'));
+            const notes = t.notes ? `<div style="font-size:0.85em;color:#64748b;">${escapeStatementHtml(t.notes)}</div>` : '';
+            return `
+                <tr class="${t.isOpening ? 'total-row' : ''}">
+                    <td>${c[0]}</td>
+                    <td>${statementInvoiceCellHtml(t, c[1], clickable)}</td>
+                    <td>${c[2]}</td>
+                    <td>${c[3]}${notes}</td>
+                    <td class="text-right ${!isPayment && t.amount > 0 ? 'debit' : ''}">${c[4]}</td>
+                    <td class="text-right ${isPayment ? 'credit' : ''}">${c[5]}</td>
+                    <td class="text-right"><strong>${c[6]}</strong></td>
+                    <td class="text-right" style="${STMT_INFO_STYLE}">${c[7]}</td>
+                    <td class="text-right" style="${STMT_INFO_STYLE} white-space:nowrap;">${c[8]}</td>
+                    <td class="text-right" style="${STMT_INFO_STYLE}">${c[9]}</td>
+                </tr>`;
+        }
+
+        function statementFootHtml(closingBalance) {
+            return `
+                    <tr class="total-row">
+                        <td colspan="6" style="text-align: right;">Closing Balance (ZMW):</td>
+                        <td style="text-align: right; color: ${closingBalance > 0 ? '#dc2626' : '#15803d'};">ZK${formatNumber(closingBalance)}</td>
+                        <td colspan="3" style="${STMT_INFO_STYLE}"></td>
+                    </tr>`;
+        }
+
+        function statementTableHtml(transactions, closingBalance, clickable) {
+            return `
+            <table class="statement-table">
+                <thead>${statementHeadHtml()}
+                </thead>
+                <tbody>${transactions.map(t => statementRowHtml(t, clickable)).join('')}
+                </tbody>
+                <tfoot>${statementFootHtml(closingBalance)}
+                </tfoot>
+            </table>`;
+        }
+
+        function statementCustomerBlockHtml(customer, customerType, customerSubType) {
+            return `
+                <strong>Statement For:</strong> ${escapeStatementHtml(customer._displayName)}<br>
+                ${escapeStatementHtml(customer._address || '')} ${customer._phone ? '| Phone: ' + escapeStatementHtml(customer._phone) : ''}<br>
+                Client Type: ${escapeStatementHtml(customerType)} (${escapeStatementHtml(customerSubType)})
+                ${customer.nhima_number ? '<br>NHIMA #: ' + escapeStatementHtml(customer.nhima_number) : ''}`;
+        }
+
+        function openStatement(customer, customerData) {
+            const transactions = buildCustomerStatementLedger(customer, customerData);
+            const closingBalance = transactions.length
+                ? transactions[transactions.length - 1].balance
+                : (customerData.opening_balance_zmw || 0);
+
             state.currentStatementData = {
                 customer: customer,
                 customerData: customerData,
                 transactions: transactions,
-                closingBalance: runningBalance,
+                closingBalance: closingBalance,
                 customerType: customer._type || 'RETAIL',
                 customerSubType: customer._subType || 'REGULAR'
             };
-    
+
             renderStatement(state.currentStatementData);
-            
+
             const modal = document.getElementById('statementModal');
             if (modal) modal.classList.add('show');
         }
-    
+
+        // ADDED: clicking an invoice number on the customer statement opens that
+        // invoice (items, totals, what has been paid) in a read-only window.
+        window.openStatementInvoice = async function(saleId) {
+            try {
+                let sale = (state.sales || []).find(x => x.id === saleId);
+                if (!sale) {
+                    const { data, error } = await supabaseClient.from('sales').select('*').eq('id', saleId).single();
+                    if (error) throw error;
+                    sale = data;
+                }
+                const esc = escapeStatementHtml;
+                const items = Array.isArray(sale.items) ? sale.items : [];
+                const cust = sale.customer_data || {};
+                const paidLinks = (state.customerReceiptInvoices || []).filter(ri => ri.sale_id === sale.id && !ri.is_opening_balance);
+                const paid = paidLinks.reduce((sum, ri) => sum + (parseFloat(ri.amount_paid) || 0), 0);
+                const grand = parseFloat(sale.grand_total) || 0;
+                const num = v => 'ZK' + formatNumber(parseFloat(v) || 0);
+                const payType = (sale.payment && sale.payment.type) || '-';
+                const detail = (label, value) => `<div style="display:flex; justify-content:space-between; gap:16px; padding:6px 0; border-bottom:1px solid #f1f5f9;"><span style="color:#64748b;">${label}</span><span style="text-align:right;">${value}</span></div>`;
+                const cell = 'padding:7px; border:1px solid #e2e8f0;';
+
+                const old = document.getElementById('statementInvoiceOverlay');
+                if (old) old.remove();
+                const overlay = document.createElement('div');
+                overlay.id = 'statementInvoiceOverlay';
+                overlay.style.cssText = 'position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(15,23,42,0.6); z-index:3000; display:flex; justify-content:center; align-items:center; padding:20px; box-sizing:border-box;';
+                overlay.innerHTML = `
+                    <div style="background:#fff; border-radius:12px; width:100%; max-width:860px; max-height:90vh; display:flex; flex-direction:column; box-shadow:0 20px 50px rgba(0,0,0,0.4);">
+                        <div style="display:flex; justify-content:space-between; align-items:center; padding:14px 20px; border-bottom:1px solid #e2e8f0;">
+                            <strong style="font-size:1.05rem;">Invoice ${esc(sale.sale_id)}</strong>
+                            <button type="button" id="statementInvoiceClose" style="background:none; border:none; font-size:1.4rem; cursor:pointer; color:#64748b;">&times;</button>
+                        </div>
+                        <div style="padding:14px 20px; overflow:auto; font-size:0.88rem;">
+                            <div style="display:grid; grid-template-columns:1fr 1fr; gap:0 30px;">
+                                <div>
+                                    ${detail('Invoice #', `<strong>${esc(sale.sale_id)}</strong>`)}
+                                    ${detail('Date', esc(sale.created_at ? new Date(sale.created_at).toLocaleString() : '-'))}
+                                    ${detail('Customer', esc(cust.customer_name || cust.name || '-'))}
+                                    ${cust.phone ? detail('Phone', esc(cust.phone)) : ''}
+                                </div>
+                                <div>
+                                    ${detail('Client type', esc((sale.client_type || '-') + (sale.client_sub_type ? ' (' + sale.client_sub_type + ')' : '')))}
+                                    ${detail('Payment', esc(payType))}
+                                    ${detail('Status', esc(sale.status || '-'))}
+                                    ${sale.claim_number ? detail('Claim #', esc(sale.claim_number)) : ''}
+                                </div>
+                            </div>
+                            <table style="width:100%; border-collapse:collapse; margin-top:14px; font-size:0.82rem;">
+                                <thead><tr style="background:#f1f5f9;">
+                                    <th style="text-align:left; ${cell}">#</th>
+                                    <th style="text-align:left; ${cell}">Product</th>
+                                    <th style="text-align:left; ${cell}">Batch</th>
+                                    <th style="text-align:left; ${cell}">Expiry</th>
+                                    <th style="text-align:right; ${cell}">Qty</th>
+                                    <th style="text-align:right; ${cell}">Rate</th>
+                                    <th style="text-align:right; ${cell}">Total</th>
+                                </tr></thead>
+                                <tbody>${items.length ? items.map((it, i) => `<tr>
+                                    <td style="${cell}">${i + 1}</td>
+                                    <td style="${cell}"><strong>${esc(it.product_name || it.name || 'Unknown')}</strong></td>
+                                    <td style="${cell}">${esc(it.batch_number || '-')}</td>
+                                    <td style="${cell}">${esc(it.expiry || '-')}</td>
+                                    <td style="${cell} text-align:right;">${esc(it.qty != null ? it.qty : (it.quantity != null ? it.quantity : ''))}</td>
+                                    <td style="${cell} text-align:right;">${num(it.rate != null ? it.rate : it.unit_price)}</td>
+                                    <td style="${cell} text-align:right;">${num(it.total)}</td>
+                                </tr>`).join('') : `<tr><td colspan="7" style="padding:20px; text-align:center; color:#94a3b8;">No items recorded on this invoice.</td></tr>`}</tbody>
+                            </table>
+                            <div style="margin-top:12px; margin-left:auto; max-width:320px;">
+                                ${detail('Subtotal', num(sale.subtotal))}
+                                ${(parseFloat(sale.tax) || 0) ? detail('Tax', num(sale.tax)) : ''}
+                                ${detail('<strong>Invoice total</strong>', `<strong>${num(grand)}</strong>`)}
+                                ${paid > 0 ? detail('Paid so far (receipts)', num(paid)) : ''}
+                                ${detail('Remaining', `<strong style="color:${grand - paid > 0.005 ? '#dc2626' : '#15803d'};">${num(Math.max(0, grand - paid))}</strong>`)}
+                            </div>
+                            ${payType === 'Cash' ? '<p style="margin:10px 0 0; color:#64748b; font-size:0.78rem;">Cash sale: paid at the time of sale, so it does not appear in receipts.</p>' : ''}
+                        </div>
+                        <div style="padding:12px 20px; border-top:1px solid #e2e8f0; text-align:right;">
+                            <button type="button" id="statementInvoiceClose2" style="padding:6px 18px; border:1px solid #cbd5e1; border-radius:6px; background:#fff; cursor:pointer;">Close</button>
+                        </div>
+                    </div>`;
+                document.body.appendChild(overlay);
+                const close = () => { overlay.remove(); document.removeEventListener('keydown', onKey, true); };
+                const onKey = e => { if (e.key === 'Escape') { e.stopPropagation(); close(); } };
+                document.addEventListener('keydown', onKey, true);
+                overlay.addEventListener('click', e => { if (e.target === overlay) close(); });
+                overlay.querySelector('#statementInvoiceClose').addEventListener('click', close);
+                overlay.querySelector('#statementInvoiceClose2').addEventListener('click', close);
+            } catch (error) {
+                console.error('Error opening invoice from statement:', error);
+                safeToast('Could not open the invoice: ' + error.message, 'error');
+            }
+        };
+
         function renderStatement(data) {
             const { customer, customerData, transactions, closingBalance, customerType, customerSubType } = data;
-            const typeDisplay = `${customerType} (${customerSubType})`;
             const openingBalance = customerData?.opening_balance_zmw || 0;
-            const totalSales = customerData?.totalSales || 0;
-            const totalReceived = customerData?.totalReceived || 0;
-    
-            let html = `
+
+            const html = `
+                <style>
+                    #statementContent .statement-table th, #statementContent .statement-table td { padding: 6px 7px; font-size: 0.78rem; }
+                </style>
                 <div class="statement-header">
-                    <h2>${customer._displayName}</h2>
-                    <p>${customer._address || ''} ${customer._phone ? '| Phone: ' + customer._phone : ''}</p>
-                    <p>Client Type: <strong>${typeDisplay}</strong></p>
-                    ${customer.nhima_number ? `<p>NHIMA #: ${customer.nhima_number}</p>` : ''}
+                    <h2 style="margin-bottom:2px;">Griffins Medicals Limited</h2>
+                    <p style="margin:0 0 12px; color:#64748b; font-size:0.8rem; text-transform:uppercase; letter-spacing:0.05em;">Customer Statement</p>
+                    <div style="text-align:left; background:#f8fafc; padding:10px 15px; border-radius:6px; font-size:0.9rem;">
+                        ${statementCustomerBlockHtml(customer, customerType, customerSubType)}
+                    </div>
                 </div>
                 <div class="statement-info">
                     <table>
                         <tr>
-                            <td class="label">Opening Balance:</td>
+                            <td class="label">Opening Balance (ZMW):</td>
                             <td>ZK${formatNumber(openingBalance)}</td>
-                            <td class="label">Total Sales:</td>
-                            <td>ZK${formatNumber(totalSales)}</td>
-                        </tr>
-                        <tr>
-                            <td class="label">Total Received:</td>
-                            <td>ZK${formatNumber(totalReceived)}</td>
-                            <td class="label">Closing Balance:</td>
-                            <td style="font-weight:bold;color:${closingBalance > 0 ? '#dc2626' : '#15803d'};">
-                                ZK${formatNumber(closingBalance)}
-                            </td>
+                            <td class="label">Closing Balance (ZMW):</td>
+                            <td style="font-weight:bold;color:${closingBalance > 0 ? '#dc2626' : '#15803d'};">ZK${formatNumber(closingBalance)}</td>
                         </tr>
                     </table>
                 </div>
-                <table class="statement-table">
-                    <thead>
-                        <tr>
-                            <th>Date</th>
-                            <th>Type</th>
-                            <th>Reference</th>
-                            <th style="text-align:right;">Amount</th>
-                            <th style="text-align:right;">Balance</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        ${transactions.map(t => {
-                            const isReceipt = t.isReceipt;
-                            const amountClass = isReceipt ? 'credit' : (t.amount > 0 ? 'debit' : '');
-                            const amountDisplay = isReceipt ? `(ZK${formatNumber(Math.abs(t.amount))})` : `ZK${formatNumber(t.amount)}`;
-                            return `<tr>
-                                <td>${t.date}</td>
-                                <td>${t.type}</td>
-                                <td>${t.reference}</td>
-                                <td class="text-right ${amountClass}">${amountDisplay}</td>
-                                <td class="text-right">ZK${formatNumber(t.balance)}</td>
-                            </tr>`;
-                        }).join('')}
-                    </tbody>
-                    <tfoot>
-                        <tr class="total-row">
-                            <td colspan="4" style="text-align:right;">Closing Balance:</td>
-                            <td style="text-align:right;color:${closingBalance > 0 ? '#dc2626' : '#15803d'};">
-                                ZK${formatNumber(closingBalance)}
-                            </td>
-                        </tr>
-                    </tfoot>
-                </table>
+                <div style="text-align:right; margin:0 0 8px;">
+                    <button type="button" id="customerStatementPdfBtn" onclick="downloadCustomerStatementPDF()"
+                        style="padding:6px 14px; border:1px solid #cbd5e1; border-radius:6px; background:#fff; cursor:pointer; font-size:0.85rem;">
+                        Download PDF
+                    </button>
+                </div>
+                ${transactions.length === 0
+                    ? '<p style="text-align:center; padding:30px; color:#94a3b8;">No transactions found.</p>'
+                    : `<div style="overflow-x:auto;">${statementTableHtml(transactions, closingBalance, true)}</div>
+                       <p style="font-size:0.72rem; color:#94a3b8; margin:6px 2px 0;">
+                           Balance = previous balance + Amount DUE &minus; Amount PAID. The grey columns (Paid so far, PAID ON, Remaining) are for information only and do not change the balance.
+                       </p>`}
             `;
-            
+
             const content = document.getElementById('statementContent');
             if (content) content.innerHTML = html;
         }
-    
+
         // ============================================
         // PRINT FUNCTIONS
         // ============================================
-    
+
         window.printStatement = function() {
             const data = state.currentStatementData;
             if (!data) { safeToast('No statement data to print', 'error'); return; }
-    
+
             const { customer, customerData, transactions, closingBalance, customerType, customerSubType } = data;
-            const printWindow = window.open('', '_blank', 'width=800,height=600');
+            const printWindow = window.open('', '_blank', 'width=900,height=650');
             if (!printWindow) { safeToast('Please allow popups', 'error'); return; }
-    
+
             printWindow.document.write(`
-                <!DOCTYPE html><html><head><title>Statement - ${customer._displayName}</title>
+                <!DOCTYPE html><html><head><title>Customer Statement - ${escapeStatementHtml(customer._displayName)}</title>
                 <style>
-                    body{font-family:Arial;padding:20px;max-width:1000px;margin:0 auto;}
-                    .statement-header{text-align:center;border-bottom:2px solid #333;padding-bottom:15px;margin-bottom:20px;}
-                    .statement-header h2{margin:0;color:#0f172a;}
-                    .statement-info{background:#f8fafc;padding:15px;border-radius:6px;margin-bottom:20px;}
-                    .statement-info td{padding:4px 8px;}.statement-info .label{font-weight:600;width:150px;}
-                    table{width:100%;border-collapse:collapse;margin:15px 0;font-size:0.9rem;}
-                    th{background:#f1f5f9;padding:10px;text-align:left;border:1px solid #e2e8f0;}
-                    td{padding:10px;border:1px solid #e2e8f0;}
-                    .text-right{text-align:right;}.total-row{font-weight:bold;background:#f8fafc;}
-                    .credit{color:#15803d;}.debit{color:#dc2626;}
+                    body { font-family: Arial, sans-serif; padding: 20px; max-width: 1150px; margin: 0 auto; }
+                    .statement-header { text-align: center; border-bottom: 2px solid #333; padding-bottom: 15px; margin-bottom: 20px; }
+                    .statement-header h1 { margin: 0; color: #0f172a; font-size: 1.5rem; }
+                    .statement-subtitle { margin: 4px 0 15px 0; color: #64748b; font-size: 0.95rem; text-transform: uppercase; letter-spacing: 0.05em; }
+                    .statement-for { text-align: left; background: #f8fafc; padding: 10px 15px; border-radius: 6px; font-size: 0.9rem; line-height: 1.6; }
+                    .statement-info { background: #f8fafc; padding: 15px; border-radius: 6px; margin-bottom: 20px; }
+                    .statement-info table { width: 100%; }
+                    .statement-info td { padding: 4px 8px; }
+                    .statement-info .label { font-weight: 600; width: 150px; }
+                    table { width: 100%; border-collapse: collapse; margin: 15px 0; font-size: 0.9rem; }
+                    th { background: #f1f5f9; padding: 10px; text-align: left; border: 1px solid #e2e8f0; }
+                    td { padding: 10px; border: 1px solid #e2e8f0; }
+                    .statement-table th, .statement-table td { padding: 6px 7px; font-size: 0.78rem; }
+                    .text-right { text-align: right; }
+                    .total-row { font-weight: bold; background: #f8fafc; }
+                    .credit { color: #15803d; }
+                    .debit { color: #dc2626; }
+                    @media print { body { margin: 0; padding: 10px; } }
                 </style></head>
                 <body>
                     <div class="statement-header">
-                        <h2>${customer._displayName}</h2>
-                        <p>${customer._address || ''} ${customer._phone ? '| Phone: ' + customer._phone : ''}</p>
-                        <p>Client Type: <strong>${customerType} (${customerSubType})</strong></p>
+                        <h1>Griffins Medicals Limited</h1>
+                        <p class="statement-subtitle">Customer Statement</p>
+                        <div class="statement-for">${statementCustomerBlockHtml(customer, customerType, customerSubType)}</div>
                     </div>
                     <div class="statement-info"><table>
-                        <tr><td class="label">Opening Balance:</td><td>ZK${formatNumber(customerData?.opening_balance_zmw || 0)}</td>
-                            <td class="label">Total Sales:</td><td>ZK${formatNumber(customerData?.totalSales || 0)}</td></tr>
-                        <tr><td class="label">Total Received:</td><td>ZK${formatNumber(customerData?.totalReceived || 0)}</td>
-                            <td class="label">Closing Balance:</td><td style="font-weight:bold;color:${closingBalance > 0 ? '#dc2626' : '#15803d'};">ZK${formatNumber(closingBalance)}</td></tr>
+                        <tr><td class="label">Opening Balance (ZMW):</td><td>ZK${formatNumber(customerData?.opening_balance_zmw || 0)}</td></tr>
+                        <tr><td class="label">Closing Balance (ZMW):</td><td style="font-weight:bold;color:${closingBalance > 0 ? '#dc2626' : '#15803d'};">ZK${formatNumber(closingBalance)}</td></tr>
                     </table></div>
-                    <table>
-                        <thead><tr><th>Date</th><th>Type</th><th>Reference</th><th style="text-align:right;">Amount</th><th style="text-align:right;">Balance</th></tr></thead>
-                        <tbody>${transactions.map(t => {
-                            const amountDisplay = t.isReceipt ? `(ZK${formatNumber(Math.abs(t.amount))})` : `ZK${formatNumber(t.amount)}`;
-                            return `<tr><td>${t.date}</td><td>${t.type}</td><td>${t.reference}</td><td class="text-right ${t.isReceipt ? 'credit' : 'debit'}">${amountDisplay}</td><td class="text-right">ZK${formatNumber(t.balance)}</td></tr>`;
-                        }).join('')}</tbody>
-                        <tfoot><tr class="total-row"><td colspan="4" style="text-align:right;">Closing Balance:</td><td style="text-align:right;color:${closingBalance > 0 ? '#dc2626' : '#15803d'};">ZK${formatNumber(closingBalance)}</td></tr></tfoot>
-                    </table>
+                    ${statementTableHtml(transactions, closingBalance)}
+                    <p style="font-size:0.75rem;color:#64748b;">The grey columns (Paid so far, PAID ON, Remaining) are for information only.</p>
                     <div style="text-align:center;margin-top:30px;padding-top:20px;border-top:1px solid #e2e8f0;color:#64748b;font-size:0.9rem;">
+                        <p>This is a computer-generated statement.</p>
                         <p>Generated on: ${new Date().toLocaleString()}</p>
                     </div>
                 </body></html>
             `);
             printWindow.document.close();
             setTimeout(() => { printWindow.focus(); printWindow.print(); }, 500);
+        };
+
+        // ============================================
+        // STATEMENT PDF DOWNLOAD
+        // ============================================
+        // Same layout and same figures as the on-screen / printed statement
+        // (rows come from statementRowCells), saved as a real PDF file.
+        // jsPDF is loaded on demand, exactly like the Supplier Statement PDF.
+        async function ensureStatementPdfLibs() {
+            const load = src => new Promise((resolve, reject) => {
+                const s = document.createElement('script');
+                s.src = src;
+                s.onload = resolve;
+                s.onerror = () => reject(new Error('Could not load the PDF library -- check your internet connection.'));
+                document.head.appendChild(s);
+            });
+            if (!(window.jspdf && window.jspdf.jsPDF)) {
+                await load('https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.2/jspdf.umd.min.js');
+            }
+            const probe = new window.jspdf.jsPDF();
+            if (typeof probe.autoTable !== 'function') {
+                await load('https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js');
+            }
+        }
+
+        function buildCustomerStatementPdf(data) {
+            const { jsPDF } = window.jspdf;
+            const { customer, customerData, transactions, closingBalance, customerType, customerSubType } = data;
+            const doc = new jsPDF({ orientation: 'landscape', unit: 'mm', format: 'a4' });
+            const pageW = doc.internal.pageSize.getWidth();
+            const f = n => 'ZK' + formatNumber(n);
+
+            doc.setTextColor(15, 23, 42);
+            doc.setFont(undefined, 'bold');
+            doc.setFontSize(16);
+            doc.text('Griffins Medicals Limited', pageW / 2, 14, { align: 'center' });
+            doc.setFont(undefined, 'normal');
+            doc.setFontSize(9);
+            doc.setTextColor(100, 116, 139);
+            doc.text('CUSTOMER STATEMENT', pageW / 2, 19.5, { align: 'center' });
+
+            doc.setTextColor(15, 23, 42);
+            doc.setFontSize(10);
+            let y = 28;
+            const info = [
+                ['Statement For:', String(customer._displayName || '')],
+                ['Address / Phone:', [customer._address, customer._phone].filter(Boolean).join('  |  ') || '-'],
+                ['Client Type:', customerType + ' (' + customerSubType + ')'],
+                ['Opening Balance (ZMW):', f(customerData?.opening_balance_zmw || 0)],
+                ['Closing Balance (ZMW):', f(closingBalance)]
+            ];
+            info.forEach(([label, value]) => {
+                doc.setFont(undefined, 'bold');
+                doc.text(label, 14, y);
+                doc.setFont(undefined, 'normal');
+                doc.text(value, 64, y);
+                y += 5.5;
+            });
+
+            const head = [[
+                'Date', 'Invoice #', 'Type', 'Reference',
+                'Amount (ZMW) DUE', 'Amount (ZMW) PAID', 'Balance (ZMW)',
+                'Paid so far (ZMW)', 'PAID ON', 'Remaining (ZMW)'
+            ]];
+            const body = transactions.map(t => statementRowCells(t));
+            const infoFill = [248, 250, 252];
+            const infoText = [100, 116, 139];
+
+            doc.autoTable({
+                startY: y + 3,
+                head: head,
+                body: body,
+                foot: [[
+                    { content: 'Closing Balance (ZMW):', colSpan: 6, styles: { halign: 'right' } },
+                    { content: f(closingBalance), styles: { halign: 'right', textColor: closingBalance > 0 ? [220, 38, 38] : [21, 128, 61] } },
+                    { content: '', colSpan: 3 }
+                ]],
+                showFoot: 'lastPage',
+                theme: 'grid',
+                margin: { left: 10, right: 10, bottom: 14 },
+                styles: { fontSize: 8, cellPadding: 1.8, lineColor: [226, 232, 240], lineWidth: 0.2, textColor: [15, 23, 42], overflow: 'linebreak' },
+                headStyles: { fillColor: [241, 245, 249], textColor: [15, 23, 42], fontStyle: 'bold', halign: 'left' },
+                footStyles: { fillColor: [248, 250, 252], textColor: [15, 23, 42], fontStyle: 'bold' },
+                columnStyles: {
+                    0: { cellWidth: 24 }, 1: { cellWidth: 44 }, 2: { cellWidth: 34 }, 3: { cellWidth: 30 },
+                    4: { halign: 'right' }, 5: { halign: 'right' }, 6: { halign: 'right', fontStyle: 'bold' },
+                    7: { halign: 'right', fillColor: infoFill, textColor: infoText },
+                    8: { halign: 'right', fillColor: infoFill, textColor: infoText },
+                    9: { halign: 'right', fillColor: infoFill, textColor: infoText }
+                },
+                didParseCell: function (h) {
+                    const col = h.column.index;
+                    if (h.section === 'head') {
+                        if (col >= 4) h.cell.styles.halign = 'right';
+                        if (col >= 7) { h.cell.styles.fillColor = infoFill; h.cell.styles.textColor = infoText; }
+                    }
+                    if (h.section === 'body') {
+                        const t = transactions[h.row.index];
+                        if (t && t.isOpening) h.cell.styles.fontStyle = 'bold';
+                        if (t && col === 1) h.cell.styles.fontStyle = 'bold';
+                        if (t && t.isPayment && col === 5) h.cell.styles.textColor = [21, 128, 61];
+                        if (t && !t.isPayment && col === 4 && t.amount > 0) h.cell.styles.textColor = [220, 38, 38];
+                    }
+                    if (h.section === 'foot' && col >= 7) { h.cell.styles.fillColor = infoFill; }
+                },
+                didDrawPage: function () {
+                    const pageH = doc.internal.pageSize.getHeight();
+                    doc.setFontSize(7.5);
+                    doc.setFont(undefined, 'normal');
+                    doc.setTextColor(100, 116, 139);
+                    doc.text('This is a computer-generated statement. Generated on: ' + new Date().toLocaleString(), 10, pageH - 7);
+                    doc.text('Page ' + doc.internal.getNumberOfPages(), pageW - 10, pageH - 7, { align: 'right' });
+                }
+            });
+
+            const endY = (doc.lastAutoTable && doc.lastAutoTable.finalY) || y + 20;
+            doc.setFontSize(7.5);
+            doc.setTextColor(100, 116, 139);
+            doc.text('Balance = previous balance + Amount DUE - Amount PAID. The grey columns (Paid so far, PAID ON, Remaining) are for information only.', 10, endY + 5);
+            return doc;
+        }
+
+        window.downloadCustomerStatementPDF = async function() {
+            const data = state.currentStatementData;
+            if (!data || !data.transactions || data.transactions.length === 0) {
+                safeToast('No statement data to download', 'error');
+                return;
+            }
+            const btn = document.getElementById('customerStatementPdfBtn');
+            const original = btn ? btn.innerHTML : '';
+            if (btn) { btn.disabled = true; btn.innerHTML = 'Preparing PDF...'; }
+            try {
+                await ensureStatementPdfLibs();
+                const doc = buildCustomerStatementPdf(data);
+                const safeName = String(data.customer._displayName || 'Customer').replace(/[^A-Za-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+                doc.save('Customer_Statement_' + safeName + '_' + statementDateKey(new Date()) + '.pdf');
+            } catch (error) {
+                console.error('Customer statement PDF failed:', error);
+                safeToast('Could not create the PDF: ' + error.message, 'error');
+            } finally {
+                if (btn) { btn.disabled = false; btn.innerHTML = original; }
+            }
         };
     
         window.printReceiptDocument = async function() {

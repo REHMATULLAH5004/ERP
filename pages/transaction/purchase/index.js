@@ -305,6 +305,32 @@
         }
     }
 
+    // ADDED: GRN numbers per purchase order, shown beside the PO number in the
+    // list. One paged query for all GRNs (not one per PO). A PO can have more
+    // than one GRN (partial deliveries), so each PO maps to a list.
+    async function loadGRNNumbersByPO() {
+        const map = {};
+        try {
+            const pageSize = 1000;
+            for (let from = 0; ; from += pageSize) {
+                const { data, error } = await supabaseClient
+                    .from('goods_receipt_notes')
+                    .select('purchase_order_id, grn_number, created_at')
+                    .order('created_at', { ascending: true })
+                    .range(from, from + pageSize - 1);
+                if (error) throw error;
+                (data || []).forEach(g => {
+                    if (!g.purchase_order_id || !g.grn_number) return;
+                    (map[g.purchase_order_id] = map[g.purchase_order_id] || []).push(g.grn_number);
+                });
+                if (!data || data.length < pageSize) break;
+            }
+        } catch (err) {
+            console.error('Error loading GRN numbers:', err);
+        }
+        state.grnByPO = map;
+    }
+
     async function loadPurchaseOrders() {
         try {
             const { data, error } = await supabaseClient
@@ -317,6 +343,7 @@
 
             if (error) throw error;
             state.orders = data || [];
+            await loadGRNNumbersByPO();
             console.log(`✅ Loaded ${state.orders.length} purchase orders`);
             renderPurchaseOrders();
             updateStats(state.orders);
@@ -433,10 +460,14 @@
     // pattern initSearchableSelect() already uses for Supplier search.
     let productSearchResults = [];
     let productSearchHighlightIndex = -1;
+    // true once the user has pressed Up/Down in the open list, so Tab can pick
+    // the highlighted product even when nothing has been typed.
+    let productSearchNavigated = false;
 
     function displaySearchResults(products) {
         productSearchResults = products || [];
         productSearchHighlightIndex = productSearchResults.length ? 0 : -1;
+        productSearchNavigated = false;
         renderSearchResultsList();
         const resultsDiv = document.getElementById('poSearchResults');
         if (resultsDiv) resultsDiv.style.display = 'block';
@@ -489,11 +520,21 @@
         try { search.focus(); } finally { poSuppressFocusOpen = false; }
     }
 
+    // After a keyboard pick the cursor goes straight to that line's Qty box
+    // (typing replaces the 1), so a product can be added without the mouse.
+    function focusPOLineQty(productId) {
+        const idx = state.poLines.findIndex(l => l.product_id === productId);
+        const row = idx >= 0 ? document.querySelectorAll('#poLinesBody tr')[idx] : null;
+        const qty = row ? row.querySelector('input') : null;
+        if (qty) { qty.focus(); try { qty.select(); } catch (_) {} }
+        else refocusProductSearch();
+    }
+
     // ============================================
     // ADD PRODUCT TO PO
     // ============================================
 
-    async function addProductToPO(productId) {
+    async function addProductToPO(productId, viaKeyboard = false) {
         try {
             // 🔥 CHANGED: this used to re-fetch the product row, then
             // re-fetch its generic name, then re-fetch its last purchase
@@ -543,7 +584,7 @@
                 renderPOLines();
                 updatePOTotal();
                 clearSearchResults();
-                refocusProductSearch();
+                if (viaKeyboard) focusPOLineQty(productId); else refocusProductSearch();
                 return;
             }
 
@@ -561,7 +602,7 @@
             renderPOLines();
             updatePOTotal();
             clearSearchResults();
-            refocusProductSearch();
+            if (viaKeyboard) focusPOLineQty(product.id); else refocusProductSearch();
         } catch (error) {
             console.error('Error adding product:', error);
             showToast('Error adding product: ' + error.message, 'error');
@@ -1252,7 +1293,7 @@
         const filtered = applyFilters(list);
         
         if (filtered.length === 0) {
-            tbody.innerHTML = `<tr><td colspan="6" style="text-align: center; padding: 40px; color: #94a3b8;">
+            tbody.innerHTML = `<tr><td colspan="7" style="text-align: center; padding: 40px; color: #94a3b8;">
                 <i class="fa-regular fa-file-lines" style="font-size: 2rem; display: block; margin-bottom: 10px;"></i>
                 No purchase orders found
             </td></tr>`;
@@ -1320,6 +1361,11 @@
                 ${order.po_number || 'N/A'}
                 ${isOverdue && !['Cancelled', 'Closed', 'Goods Received'].includes(order.status) ? 
                     `<span style="font-size: 0.6rem; color: #dc2626; display: block;">⚠️ OVERDUE</span>` : ''}
+            </td>
+            <td style="font-size: 0.82rem; white-space: nowrap;">
+                ${(state.grnByPO && state.grnByPO[order.id] && state.grnByPO[order.id].length)
+                    ? state.grnByPO[order.id].map(n => `<div>${n}</div>`).join('')
+                    : '<span style="color: #cbd5e1;">&mdash;</span>'}
             </td>
             <td>${supplierName}</td>
             <td>
@@ -2373,6 +2419,56 @@
     function showModal(modalId) {
         const modal = document.getElementById(modalId);
         if (modal) modal.classList.add('show');
+        // Opening from a button leaves the cursor on that button BEHIND the
+        // modal, so the first Tab wandered through the page underneath. Move
+        // the cursor into the modal's first useful field instead.
+        setTimeout(() => focusFirstFieldInModal(modalId), 60);
+    }
+
+    function focusFirstFieldInModal(modalId) {
+        const modal = document.getElementById(modalId);
+        if (!modal || !modal.classList.contains('show')) return;
+        const visible = el => el && !el.disabled && el.offsetParent !== null;
+        let target = null;
+        if (modalId === 'grnModal') {
+            const dn = document.getElementById('grnDeliveryNoteNumber');
+            const inv = document.getElementById('grnInvoiceNumber');
+            target = visible(inv) ? inv : (visible(dn) ? dn : modal.querySelector('#grnLinesBody input:not([disabled]):not([type="checkbox"])'));
+        } else if (modalId === 'poModal') {
+            const sup = document.getElementById('poSupplierSearch');
+            const search = document.getElementById('poProductSearch');
+            // supplier first when none is chosen yet, otherwise straight to the products
+            const supplierChosen = !!document.getElementById('poSupplier')?.value;
+            target = (!supplierChosen && visible(sup)) ? sup : (visible(search) ? search : sup);
+        }
+        if (!target) return;
+        try { target.focus(); if (target.select && target.type !== 'date') target.select(); } catch (_) {}
+    }
+
+    // Keeps Tab / Shift+Tab inside the open modal (wraps at the ends and pulls
+    // the cursor back in if it ever ends up on the page behind).
+    function trapTabInOpenModal(e) {
+        if (e.key !== 'Tab') return;
+        if (document.getElementById('grnSummaryModal') || document.getElementById('cnSummaryModal')) return;
+        const open = Array.from(document.querySelectorAll('.modal.show'));
+        const modal = open[open.length - 1];
+        if (!modal) return;
+        const focusables = Array.from(modal.querySelectorAll(
+            'input:not([disabled]):not([type="hidden"]), select:not([disabled]), textarea:not([disabled]), button:not([disabled]), [href], [tabindex]:not([tabindex="-1"])'
+        )).filter(el => el.tabIndex !== -1 && el.offsetParent !== null && getComputedStyle(el).visibility !== 'hidden');
+        if (!focusables.length) return;
+        const first = focusables[0], last = focusables[focusables.length - 1];
+        const active = document.activeElement;
+        if (!modal.contains(active)) {
+            // cursor is on the page behind -- but leave the floating supplier/search panels alone
+            if (active && active !== document.body && active.closest && active.closest('[id$="Panel"], #poSearchResults')) return;
+            e.preventDefault();
+            (e.shiftKey ? last : first).focus();
+        } else if (e.shiftKey && active === first) {
+            e.preventDefault(); last.focus();
+        } else if (!e.shiftKey && active === last) {
+            e.preventDefault(); first.focus();
+        }
     }
 
     function closeModal(modalId) {
@@ -2640,7 +2736,7 @@
         // already went through). This name is a PLACEHOLDER -- if the
         // template gets approved under a different exact name, update it
         // here to match.
-        PO_DOCUMENT: 'po_document_supplier'
+        PO_DOCUMENT: 'po_created_supplier_notice' // 🔥 CHANGED: the template that actually exists and is approved in Meta WhatsApp Manager (document header + 4 variables: supplier, PO #, date, total)
     };
 
     async function notifySupplierWhatsApp(phone, templateName, bodyParams) {
@@ -4381,21 +4477,99 @@
             const ratePerUnit = ratePerPack / packSize;
             const costPriceZmw = currency === 'USD' ? ratePerUnit * (exchangeRate || 1) : ratePerUnit;
 
+            // Same product + same batch number = ONE batch. If this batch
+            // already exists (opening stock or an earlier purchase), add the
+            // new quantity to it instead of creating a second row.
+            await addToOrCreateBatch({
+                product_id: line.product_id,
+                product_name: line.product_name,
+                batch_number: line.batch_number,
+                expiry_date: line.expiry_date,
+                qty: qtyToAdd,
+                cost: costPriceZmw
+            });
+        }
+    }
+
+    function normBatchNo(v) {
+        return String(v == null ? '' : v).trim().toLowerCase();
+    }
+
+    async function addToOrCreateBatch(b) {
+        const key = normBatchNo(b.batch_number);
+        let existing = null;
+        if (key) {
+            const { data: rows, error: findErr } = await supabaseClient
+                .from('batches')
+                .select('id, batch_number, expiry_date, total_qty, cost_price, created_at')
+                .eq('product_id', b.product_id)
+                .order('created_at', { ascending: true });
+            if (findErr) throw findErr;
+            existing = (rows || []).find(r => normBatchNo(r.batch_number) === key) || null;
+        }
+
+        if (!existing) {
             const { error } = await supabaseClient
                 .from('batches')
                 .insert([{
-                    product_id: line.product_id,
-                    batch_number: line.batch_number,
-                    expiry_date: line.expiry_date,
-                    total_qty: qtyToAdd,
-                    cost_price: costPriceZmw
+                    product_id: b.product_id,
+                    batch_number: b.batch_number,
+                    expiry_date: b.expiry_date,
+                    total_qty: b.qty,
+                    cost_price: b.cost
                 }]);
-
             if (error) {
-                console.error(`Error creating batch for ${line.product_name}:`, error);
+                console.error(`Error creating batch for ${b.product_name}:`, error);
                 throw error;
             }
+            return;
         }
+
+        // Add to the existing batch. The .eq('total_qty', ...) guard makes
+        // sure a sale made at the same moment is never overwritten; retry
+        // a few times with a fresh read if it was.
+        for (let attempt = 0; attempt < 4; attempt++) {
+            const { data: cur, error: curErr } = await supabaseClient
+                .from('batches')
+                .select('id, expiry_date, total_qty, cost_price')
+                .eq('id', existing.id)
+                .single();
+            if (curErr) throw curErr;
+
+            const oldQty = Number(cur.total_qty) || 0;
+            const oldCost = Number(cur.cost_price) || 0;
+            const newQty = oldQty + b.qty;
+            // Weighted-average cost by quantity (if nothing is on hand,
+            // the new purchase cost simply replaces the old one).
+            const avgCost = oldQty > 0 && newQty > 0
+                ? ((oldQty * oldCost) + (b.qty * b.cost)) / newQty
+                : b.cost;
+
+            const upd = { total_qty: newQty, cost_price: avgCost };
+            if (!cur.expiry_date && b.expiry_date) {
+                upd.expiry_date = b.expiry_date;
+            } else if (cur.expiry_date && b.expiry_date && cur.expiry_date !== b.expiry_date) {
+                // Different expiry on the same batch number: keep the
+                // EARLIER one so nothing is sold past its real expiry.
+                if (b.expiry_date < cur.expiry_date) upd.expiry_date = b.expiry_date;
+                try {
+                    showToast(`${b.product_name}: batch ${b.batch_number} already exists with expiry ${cur.expiry_date}. Merged into it (kept ${upd.expiry_date || cur.expiry_date}).`, 'warning');
+                } catch (e) { /* toast is only informational */ }
+            }
+
+            const { data: done, error: updErr } = await supabaseClient
+                .from('batches')
+                .update(upd)
+                .eq('id', existing.id)
+                .eq('total_qty', cur.total_qty)
+                .select('id');
+            if (updErr) {
+                console.error(`Error adding stock to batch for ${b.product_name}:`, updErr);
+                throw updErr;
+            }
+            if (done && done.length) return;
+        }
+        throw new Error(`Batch ${b.batch_number} of ${b.product_name} was changing while saving. Please try again.`);
     }
 
     async function updatePOLinesFromGRN(orderId) {
@@ -4874,8 +5048,7 @@
             state.creditNoteLines = lines.map(line => {
                 const matches = (batchRows || []).filter(b =>
                     b.product_id === line.product_id &&
-                    (b.batch_number || '') === (line.batch_number || '') &&
-                    (b.expiry_date || '') === (line.expiry_date || '')
+                    normBatchNo(b.batch_number) === normBatchNo(line.batch_number)
                 );
                 const availableUnits = matches.reduce((sum, b) => sum + (b.total_qty || 0), 0);
                 const packSize = line.pack_size || 1;
@@ -5781,6 +5954,8 @@
             return expectedDate < today;
         });
 
+        updateMonthPurchaseCard(orders);
+
         document.getElementById('totalOrders').textContent = total;
         document.getElementById('pendingOrders').textContent = pending;
         document.getElementById('receivedOrders').textContent = received;
@@ -5793,6 +5968,57 @@
             overdueEl.style.color = '#dc2626';
         } else {
             overdueEl.style.color = '#0f172a';
+        }
+    }
+
+    // ADDED: total purchases for the current month = Kwacha orders + (USD orders
+    // x the exchange rate saved on each order; today's shared rate if an old
+    // order has none). Drafts and cancelled orders are left out, and any part of
+    // an order that was cancelled is taken off. Colour is a warning only:
+    // green below K800,000, yellow above K800,000, red from K1,200,000.
+    const PURCHASE_MONTH_YELLOW_FROM = 800000;
+    const PURCHASE_MONTH_RED_FROM = 1200000;
+
+    function updateMonthPurchaseCard(orders) {
+        const card = document.getElementById('monthPurchaseCard');
+        const totalEl = document.getElementById('monthPurchaseTotal');
+        const noteEl = document.getElementById('monthPurchaseNote');
+        if (!card || !totalEl) return;
+
+        const now = new Date();
+        let zmwTotal = 0, usdTotal = 0, usdInZmw = 0;
+        (orders || []).forEach(o => {
+            if (!o.created_at) return;
+            const d = new Date(o.created_at);
+            if (d.getFullYear() !== now.getFullYear() || d.getMonth() !== now.getMonth()) return;
+            if (o.status === 'Draft' || o.status === 'Cancelled') return;
+            const amount = Math.max(0, (parseFloat(o.total_amount) || 0) - (parseFloat(o.total_cancelled_amount) || 0));
+            if (o.currency === 'USD') {
+                const rate = parseFloat(o.exchange_rate) > 0 ? parseFloat(o.exchange_rate) : (sharedZmwPerUsd || 1);
+                usdTotal += amount;
+                usdInZmw += amount * rate;
+            } else {
+                zmwTotal += amount;
+            }
+        });
+
+        const grand = zmwTotal + usdInZmw;
+        let color = '#10b981', bg = '', msg = '';
+        if (grand >= PURCHASE_MONTH_RED_FROM) {
+            color = '#dc2626'; bg = '#fef2f2';
+            msg = `Over K${formatNumber(PURCHASE_MONTH_RED_FROM)} this month`;
+        } else if (grand > PURCHASE_MONTH_YELLOW_FROM) {
+            color = '#d97706'; bg = '#fffbeb';
+            msg = `Over K${formatNumber(PURCHASE_MONTH_YELLOW_FROM)} this month`;
+        }
+        card.style.borderLeft = `4px solid ${color}`;
+        card.style.background = bg;
+        totalEl.style.color = bg ? color : '';
+        totalEl.textContent = `K ${formatNumber(grand)}`;
+        if (noteEl) {
+            const monthName = now.toLocaleString('en-GB', { month: 'long', year: 'numeric' });
+            noteEl.innerHTML = `${monthName}: K ${formatNumber(zmwTotal)} + $ ${formatNumber(usdTotal)} &times; rate` +
+                (msg ? `<br><strong style="color:${color};">&#9888; ${msg}</strong>` : '');
         }
     }
 
@@ -6339,7 +6565,8 @@
         if (searchTerm) {
             filtered = filtered.filter(o => 
                 (o.po_number || '').toLowerCase().includes(searchTerm) ||
-                (o.suppliers?.name || '').toLowerCase().includes(searchTerm)
+                (o.suppliers?.name || '').toLowerCase().includes(searchTerm) ||
+                ((state.grnByPO && state.grnByPO[o.id]) || []).some(n => String(n).toLowerCase().includes(searchTerm))
             );
         }
         if (statusFilter) {
@@ -6382,6 +6609,7 @@
     // ============================================
 
     function setupEventListeners() {
+        document.addEventListener('keydown', trapTabInOpenModal);
         document.addEventListener('keydown', (e) => {
             if (e.key === 'Escape') {
                 document.querySelectorAll('.modal.show').forEach(modal => {
@@ -6448,6 +6676,7 @@
                     e.preventDefault();
                     if (!open) { searchProducts(); return; }
                     if (!productSearchResults.length) return;
+                    productSearchNavigated = true;
                     productSearchHighlightIndex = e.key === 'ArrowDown'
                         ? Math.min(productSearchHighlightIndex + 1, productSearchResults.length - 1)
                         : Math.max(productSearchHighlightIndex - 1, 0);
@@ -6459,12 +6688,15 @@
                 if (e.key === 'Enter') {
                     e.preventDefault();
                     const hit = productSearchResults[productSearchHighlightIndex];
-                    if (hit) addProductToPO(hit.id);
+                    if (hit) addProductToPO(hit.id, true);
                 } else if (e.key === 'Tab') {
+                    // Tab picks the highlighted product when something is typed
+                    // OR the user arrowed down the list. Shift+Tab and a plain
+                    // Tab on an untouched list just close it and move on.
                     const hit = productSearchResults[productSearchHighlightIndex];
-                    if (hit && searchInput.value.trim()) {
+                    if (!e.shiftKey && hit && (searchInput.value.trim() || productSearchNavigated)) {
                         e.preventDefault();
-                        addProductToPO(hit.id);
+                        addProductToPO(hit.id, true);
                     } else {
                         results.style.display = 'none';
                     }
@@ -6487,6 +6719,45 @@
                 const results = document.getElementById('poSearchResults');
                 if (results && !searchInput.contains(e.target) && !results.contains(e.target)) {
                     results.style.display = 'none';
+                }
+            });
+        }
+
+        // New PO lines: Enter on Qty goes to Rate; Enter (or Tab) on the LAST
+        // line's Rate goes back to the product search for the next product.
+        // Typing replaces the number you land on.
+        const poBodyEl = document.getElementById('poLinesBody');
+        if (poBodyEl) {
+            poBodyEl.addEventListener('focusin', function(e) {
+                const el = e.target;
+                if (el && el.tagName === 'INPUT' && !el.disabled) { try { el.select(); } catch (_) {} }
+            });
+            poBodyEl.addEventListener('keydown', function(e) {
+                const el = e.target;
+                if (!el || el.tagName !== 'INPUT') return;
+                const isEnter = e.key === 'Enter';
+                const isTab = e.key === 'Tab' && !e.shiftKey;
+                if (!isEnter && !isTab) return;
+                const row = el.closest('tr');
+                const inputs = row ? Array.from(row.querySelectorAll('input')) : [];
+                const pos = inputs.indexOf(el);
+                if (pos === 0 && isEnter) {              // Qty -> Rate
+                    e.preventDefault();
+                    if (inputs[1]) inputs[1].focus();
+                } else if (pos === 1) {                  // Rate -> next line / product search
+                    const rows = Array.from(poBodyEl.querySelectorAll('tr'));
+                    const isLast = rows[rows.length - 1] === row;
+                    if (isLast) {
+                        e.preventDefault();
+                        // commit the value (onchange fires on blur) then go back to search
+                        el.blur();
+                        const search = document.getElementById('poProductSearch');
+                        if (search) search.focus();
+                    } else if (isEnter) {
+                        e.preventDefault();
+                        const nextQty = rows[rows.indexOf(row) + 1]?.querySelector('input');
+                        if (nextQty) nextQty.focus();
+                    }
                 }
             });
         }

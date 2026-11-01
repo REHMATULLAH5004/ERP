@@ -181,13 +181,17 @@
     // instead of always the fixed admin number. notifyAdminWhatsApp() is
     // now a thin wrapper so every existing call site (Leave/Advance
     // requests below) is unaffected.
+    // 🔥 CHANGED: now RETURNS true/false (sent / not sent) so the Notice
+    // Board can tell the poster how many people were actually reached.
+    // Existing callers (Leave/Advance) ignore the return value, so they
+    // behave exactly as before.
     async function notifyWhatsApp(to, templateName, bodyParams) {
         if (!to) {
             console.log('WhatsApp: no phone number on file -- skipping notification.');
-            return;
+            return false;
         }
         try {
-            await supabaseClient.functions.invoke('send-whatsapp-message', {
+            const { data, error } = await supabaseClient.functions.invoke('send-whatsapp-message', {
                 body: {
                     to,
                     template_name: templateName,
@@ -198,11 +202,44 @@
                     }]
                 }
             });
+            if (error || (data && data.success === false) || (data && data.error)) {
+                console.warn(`WhatsApp notification (${templateName}) to ${to} was not accepted:`, error || data);
+                return false;
+            }
+            return true;
         } catch (err) {
             // Non-fatal -- never block the actual action (request
             // submission / notice post) on WhatsApp delivery.
             console.warn(`WhatsApp notification (${templateName}) failed:`, err);
+            return false;
         }
+    }
+
+    // 🔥 ADDED: Zambian numbers are saved in different shapes ("+260...",
+    // "097...", "97..."). WhatsApp needs digits only, with country code.
+    // Returns '' for anything that cannot be a real number (for example the
+    // "+260000000" placeholder some employee records carry), so those are
+    // skipped instead of failing.
+    function normalizeZambiaWhatsAppNumber(raw) {
+        let d = String(raw || '').replace(/[^0-9]/g, '');
+        if (d.startsWith('00260')) d = d.slice(2);
+        if (d.length === 10 && d.startsWith('0')) d = '260' + d.slice(1);
+        else if (d.length === 9 && /^[79]/.test(d)) d = '260' + d;
+        if (!/^260[0-9]{9}$/.test(d)) return '';
+        // all-zero subscriber part = placeholder, not a real phone
+        if (/^2600+$/.test(d)) return '';
+        return d;
+    }
+
+    // WhatsApp template variables may not contain line breaks, tabs or 4+
+    // spaces in a row -- flatten the notice text so Meta accepts it.
+    function flattenForWhatsAppVariable(text) {
+        return String(text || '')
+            .replace(/[\r\n\t]+/g, ' | ')
+            .replace(/ {2,}/g, ' ')
+            .replace(/(\| ){2,}/g, '| ')
+            .trim()
+            .slice(0, 900);
     }
 
     async function notifyAdminWhatsApp(templateName, bodyParams) {
@@ -1899,7 +1936,7 @@
         if (dashPostNoticeHelperText) {
             dashPostNoticeHelperText.textContent = isEmployeeTarget
                 ? 'Only that employee sees this on their Dashboard sidebar -- they also get a WhatsApp message on their own number.'
-                : 'Everyone sees this on the Dashboard sidebar the moment they open it.';
+                : 'Everyone sees this on the Dashboard sidebar -- and every active employee also gets it as a WhatsApp message on their own number.';
         }
     }
     if (dashPostNoticeTargetSelect) {
@@ -1937,17 +1974,38 @@
             // on their own number -- fire-and-forget, same as every other
             // WhatsApp notification in this file, so a slow/failed send
             // never blocks the notice from posting.
-            if (targetType === 'employee') {
-                const targetEmp = noticeTargetEmployees.find(emp => emp.employee_id === targetEmployeeId);
-                if (targetEmp?.phone) {
-                    notifyWhatsApp(targetEmp.phone, WHATSAPP_TEMPLATES.NOTICE_BOARD, [
-                        `${targetEmp.first_name} ${targetEmp.last_name}`,
-                        message
-                    ]);
-                } else {
-                    console.log('WhatsApp: targeted employee has no phone number on file -- skipping notification.');
+            // 🔥 CHANGED (by request): a notice for EVERYONE now also goes to
+            // every active employee on WhatsApp (before, only a notice for
+            // one particular person was sent). A notice for one person goes
+            // only to that person, as before. Sending runs in the
+            // background, one message at a time, so posting never waits on it;
+            // when it finishes a small toast says how many were reached and
+            // names anyone whose phone number is missing or invalid.
+            const recipients = targetType === 'employee'
+                ? noticeTargetEmployees.filter(emp => emp.employee_id === targetEmployeeId)
+                : noticeTargetEmployees;
+            const flatMessage = flattenForWhatsAppVariable(message);
+            (async () => {
+                const sentTo = [];
+                const failed = [];
+                const noNumber = [];
+                const seen = new Set();
+                for (const emp of recipients) {
+                    const fullName = `${emp.first_name} ${emp.last_name}`.trim();
+                    const number = normalizeZambiaWhatsAppNumber(emp.phone);
+                    if (!number) { noNumber.push(fullName); continue; }
+                    if (seen.has(number)) continue;
+                    seen.add(number);
+                    const ok = await notifyWhatsApp(number, WHATSAPP_TEMPLATES.NOTICE_BOARD, [fullName, flatMessage]);
+                    (ok ? sentTo : failed).push(fullName);
+                    await new Promise(r => setTimeout(r, 400));
                 }
-            }
+                console.log('Notice WhatsApp -- sent:', sentTo, 'failed:', failed, 'no valid number:', noNumber);
+                let summary = `WhatsApp: notice sent to ${sentTo.length} of ${recipients.length}.`;
+                if (noNumber.length) summary += ` No valid number: ${noNumber.join(', ')}.`;
+                if (failed.length) summary += ` Not delivered: ${failed.join(', ')}.`;
+                showToastSimple(summary);
+            })();
 
             document.getElementById('dashPostNoticeForm').reset();
             updatePostNoticeTargetUI();
@@ -2027,9 +2085,40 @@
             const t = (c - cs.costMin) / (cs.costMax - cs.costMin);
             return cs.max * Math.pow(cs.min / cs.max, t);
         }
+        // ADDED: "clean" prices for REGULAR retail. The pack price (cost per pack plus
+        // the markup) is rounded to a tidy figure, with a finer step for cheaper packs
+        // so a small price never collapses to 0:
+        //   under K10  -> nearest K0.50 (never below K0.50)
+        //   K10-K50    -> nearest K1
+        //   K50-K100   -> nearest K5
+        //   K100-K1000 -> nearest K10
+        //   K1000+     -> nearest K50
+        // Safety: the rounded price is never allowed below cost + 25%; if rounding
+        // down would do that it rounds UP instead. To change the steps, edit the
+        // table below (same table is used in Retail POS, Quick Sale, CRM quick sale
+        // and the Pricing page).
+        const REGULAR_PRICE_STEPS = [
+            { below: 10, step: 0.5 },
+            { below: 50, step: 1 },
+            { below: 100, step: 5 },
+            { below: 1000, step: 10 },
+            { below: Infinity, step: 50 }
+        ];
+        const REGULAR_MIN_MARGIN = 0.25;
+        function roundRegularPackPrice(price, costPerPack) {
+            price = Number(price) || 0;
+            if (!(price > 0)) return price;
+            const tier = REGULAR_PRICE_STEPS.find(t => price < t.below);
+            const step = tier.step;
+            let rounded = Math.round(price / step) * step;
+            const floor = (Number(costPerPack) || 0) * (1 + REGULAR_MIN_MARGIN);
+            if (rounded < floor) rounded = Math.ceil(price / step) * step;
+            if (rounded < step) rounded = step;
+            return Math.round(rounded * 100) / 100;
+        }
         function packRate(batch, pack) {
             const costPerPack = (Number(batch.cost_price) || 0) * pack;
-            return round2(costPerPack * (1 + markupPercent(costPerPack) / 100));
+            return roundRegularPackPrice(round2(costPerPack * (1 + markupPercent(costPerPack) / 100)), costPerPack);
         }
 
         async function ensureCatalog() {

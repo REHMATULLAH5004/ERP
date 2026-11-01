@@ -45,6 +45,8 @@
         payments: [],
         purchaseOrders: [],
         grns: [],
+        grnLookup: {},   // id -> { grn_number, purchase_order_id } for the statement's GRN # column
+        poLookup: {},    // id -> po_number
         supplierPayables: [],
         paymentInvoices: [],
         currentStatementData: null,
@@ -919,10 +921,16 @@
             const invoiceNumber = sp.invoice_number || 'INV-' + sp.id.slice(0, 8);
             const invoiceKey = statementDateKey(sp.invoice_date || sp.created_at);
 
-            // Human-readable GRN/PO number instead of the raw UUID
-            const relatedGrn = state.grns.find(g => g.id === sp.grn_id);
+            // Human-readable GRN/PO number instead of the raw UUID.
+            // state.grns only holds GRNs flagged "posted", which none of the
+            // saved GRNs are, so the GRN number never showed up (the statement
+            // fell back to the PO number). Look the GRN up by its id instead.
+            const relatedGrn = state.grnLookup[sp.grn_id] || state.grns.find(g => g.id === sp.grn_id);
             const relatedPo = state.purchaseOrders.find(p => p.id === sp.po_id);
-            const referenceDisplay = relatedGrn?.grn_number || relatedPo?.po_number || 'PO';
+            const poNumber = relatedPo?.po_number || state.poLookup[sp.po_id]
+                || (relatedGrn && state.poLookup[relatedGrn.purchase_order_id]) || '';
+            const grnNumber = relatedGrn?.grn_number || '';
+            const referenceDisplay = poNumber || grnNumber || 'PO';
 
             const paymentsAgainst = state.paymentInvoices.filter(pi => pi.supplier_id === supplier.id && pi.payable_id === sp.id);
             const paidAmount = round2(paymentsAgainst.reduce((sum, pi) => sum + (pi.amount_paid || 0), 0));
@@ -932,6 +940,7 @@
                 stamp: new Date(sp.created_at || 0).getTime() || 0,
                 row: {
                     type: 'Purchase', reference: referenceDisplay, due: amount, amount: amount,
+                    grnNumber: grnNumber, grnId: grnNumber ? sp.grn_id : '',
                     isOpening: false, isPayment: false, invoiceNumber: invoiceNumber,
                     invoiceDate: statementDateLabel(invoiceKey),
                     paidSoFar: paidAmount, remaining: round2(amount - paidAmount),
@@ -999,6 +1008,7 @@
                         <th>Invoice #</th>
                         <th>Type</th>
                         <th>Reference</th>
+                        <th>GRN #</th>
                         <th style="text-align: right;">Amount (${currency}) DUE</th>
                         <th style="text-align: right;">Amount (${currency}) PAID</th>
                         <th style="text-align: right;">Balance (${currency})</th>
@@ -1008,7 +1018,7 @@
                     </tr>`;
     }
 
-    // The ten cell texts of one statement row. Used by the screen/print table
+    // The eleven cell texts of one statement row. Used by the screen/print table
     // AND the PDF download, so all three always show exactly the same figures.
     function statementRowCells(t, symbol) {
         const f = n => symbol + formatNumber(n);
@@ -1018,6 +1028,7 @@
             t.invoiceNumber || '-',
             t.type + (t.method ? ' (' + t.method + ')' : ''),
             t.reference,
+            t.grnNumber || '-',                                             // GRN #
             isPayment ? '-' : f(t.due !== undefined ? t.due : t.amount),   // Amount DUE
             isPayment ? f(Math.abs(t.amount)) : '',                         // Amount PAID
             f(t.balance),                                                   // Balance
@@ -1027,31 +1038,155 @@
         ];
     }
 
-    function statementRowHtml(t, symbol) {
+    // `clickable` is true only for the on-screen statement: the GRN # then opens
+    // that goods receipt. In the printed copy it is plain text.
+    function statementRowHtml(t, symbol, clickable) {
         const isPayment = !!t.isPayment;
         const c = statementRowCells(t, symbol);
+        const grnCell = (clickable && t.grnId && t.grnNumber)
+            ? `<a href="#" onclick="openStatementGRN('${t.grnId}'); return false;" title="Open this goods receipt"
+                  style="color:#2563eb; font-weight:600; text-decoration:none; white-space:nowrap;"
+                  onmouseover="this.style.textDecoration='underline'" onmouseout="this.style.textDecoration='none'">${t.grnNumber}</a>`
+            : c[4];
         return `
                 <tr class="${t.isOpening ? 'total-row' : ''}">
                     <td>${c[0]}</td>
                     <td><strong>${c[1]}</strong></td>
                     <td>${c[2]}</td>
                     <td>${c[3]}</td>
-                    <td class="text-right ${!isPayment && t.amount > 0 ? 'debit' : ''}">${c[4]}</td>
-                    <td class="text-right ${isPayment ? 'credit' : ''}">${c[5]}</td>
-                    <td class="text-right"><strong>${c[6]}</strong></td>
-                    <td class="text-right" style="${STMT_INFO_STYLE}">${c[7]}</td>
+                    <td>${grnCell}</td>
+                    <td class="text-right ${!isPayment && t.amount > 0 ? 'debit' : ''}">${c[5]}</td>
+                    <td class="text-right ${isPayment ? 'credit' : ''}">${c[6]}</td>
+                    <td class="text-right"><strong>${c[7]}</strong></td>
                     <td class="text-right" style="${STMT_INFO_STYLE}">${c[8]}</td>
                     <td class="text-right" style="${STMT_INFO_STYLE}">${c[9]}</td>
+                    <td class="text-right" style="${STMT_INFO_STYLE}">${c[10]}</td>
                 </tr>`;
     }
 
     function statementFootHtml(currency, symbol, closingBalance) {
         return `
                     <tr class="total-row">
-                        <td colspan="6" style="text-align: right;">Closing Balance (${currency}):</td>
+                        <td colspan="7" style="text-align: right;">Closing Balance (${currency}):</td>
                         <td style="text-align: right; color: ${closingBalance > 0 ? '#dc2626' : '#15803d'};">${symbol}${formatNumber(closingBalance)}</td>
                         <td colspan="3" style="${STMT_INFO_STYLE}"></td>
                     </tr>`;
+    }
+
+    // ADDED: fetch the GRN / PO numbers the statement needs, by id, in small
+    // groups (a long id list would make the web address too long).
+    async function loadStatementDocNumbers(payables) {
+        try {
+            const chunk = (arr, n) => { const out = []; for (let i = 0; i < arr.length; i += n) out.push(arr.slice(i, i + n)); return out; };
+            const grnIds = [...new Set(payables.map(p => p.grn_id).filter(id => id && !state.grnLookup[id]))];
+            for (const ids of chunk(grnIds, 40)) {
+                const { data, error } = await supabaseClient.from('goods_receipt_notes')
+                    .select('id, grn_number, purchase_order_id').in('id', ids);
+                if (error) throw error;
+                (data || []).forEach(g => { state.grnLookup[g.id] = g; });
+            }
+            const poIds = new Set(payables.map(p => p.po_id).filter(Boolean));
+            payables.forEach(p => { const g = state.grnLookup[p.grn_id]; if (g && g.purchase_order_id) poIds.add(g.purchase_order_id); });
+            const needPo = [...poIds].filter(id => !state.poLookup[id] && !state.purchaseOrders.some(po => po.id === id));
+            for (const ids of chunk(needPo, 40)) {
+                const { data, error } = await supabaseClient.from('purchase_orders').select('id, po_number').in('id', ids);
+                if (error) throw error;
+                (data || []).forEach(po => { state.poLookup[po.id] = po.po_number; });
+            }
+        } catch (err) {
+            console.error('Could not load GRN/PO numbers for the statement:', err);
+        }
+    }
+
+    // ADDED: clicking a GRN # on the statement opens that goods receipt in a
+    // read-only window on top of the statement.
+    async function openStatementGRN(grnId) {
+        try {
+            const { data: grn, error } = await supabaseClient.from('goods_receipt_notes')
+                .select('*, goods_receipt_lines (*), purchase_orders:purchase_order_id (po_number), suppliers:supplier_id (name)')
+                .eq('id', grnId).single();
+            if (error) throw error;
+
+            const esc = v => String(v == null ? '' : v).replace(/[&<>"']/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
+            const cur = grn.currency || 'USD';
+            const sym = cur === 'ZMW' ? 'ZK' : '$';
+            const dateOf = v => v ? new Date(String(v).length <= 10 ? v + 'T00:00:00' : v).toLocaleDateString() : '-';
+            const lines = (grn.goods_receipt_lines || []).slice().sort((a, b) => String(a.created_at || '').localeCompare(String(b.created_at || '')));
+            const sub = lines.reduce((sum, l) => sum + (parseFloat(l.total_amount) || 0), 0);
+            const detail = (label, value) => `<div style="display:flex; justify-content:space-between; gap:16px; padding:6px 0; border-bottom:1px solid #f1f5f9;"><span style="color:#64748b;">${label}</span><span style="text-align:right;">${value}</span></div>`;
+
+            const old = document.getElementById('statementGrnOverlay');
+            if (old) old.remove();
+            const overlay = document.createElement('div');
+            overlay.id = 'statementGrnOverlay';
+            overlay.style.cssText = 'position:fixed; inset:0; background:rgba(15,23,42,0.6); z-index:3000; display:flex; justify-content:center; align-items:center; padding:20px;';
+            overlay.innerHTML = `
+                <div style="background:#fff; border-radius:12px; width:100%; max-width:860px; max-height:90vh; display:flex; flex-direction:column; box-shadow:0 20px 50px rgba(0,0,0,0.4);">
+                    <div style="display:flex; justify-content:space-between; align-items:center; padding:14px 20px; border-bottom:1px solid #e2e8f0;">
+                        <strong style="font-size:1.05rem;"><i class="fa-solid fa-boxes"></i> Goods Receipt ${esc(grn.grn_number)}</strong>
+                        <button type="button" id="statementGrnClose" style="background:none; border:none; font-size:1.4rem; cursor:pointer; color:#64748b;">&times;</button>
+                    </div>
+                    <div style="padding:14px 20px; overflow:auto; font-size:0.88rem;">
+                        <div style="display:grid; grid-template-columns:1fr 1fr; gap:0 30px;">
+                            <div>
+                                ${detail('GRN #', `<strong>${esc(grn.grn_number)}</strong>`)}
+                                ${detail('PO #', esc(grn.purchase_orders?.po_number || '-'))}
+                                ${detail('Supplier', esc(grn.suppliers?.name || '-'))}
+                                ${detail('Date received', dateOf(grn.received_date || grn.entry_date))}
+                            </div>
+                            <div>
+                                ${detail('Invoice #', esc(grn.invoice_number || '-'))}
+                                ${detail('Invoice date', dateOf(grn.invoice_date))}
+                                ${grn.delivery_note_number ? detail('Delivery note #', esc(grn.delivery_note_number)) : ''}
+                                ${detail('Currency', esc(cur) + (cur === 'USD' && grn.exchange_rate ? ' @ ' + esc(grn.exchange_rate) : ''))}
+                            </div>
+                        </div>
+                        <table style="width:100%; border-collapse:collapse; margin-top:14px; font-size:0.82rem;">
+                            <thead><tr style="background:#f1f5f9;">
+                                <th style="text-align:left; padding:7px; border:1px solid #e2e8f0;">#</th>
+                                <th style="text-align:left; padding:7px; border:1px solid #e2e8f0;">Product</th>
+                                <th style="text-align:right; padding:7px; border:1px solid #e2e8f0;">Pack</th>
+                                <th style="text-align:right; padding:7px; border:1px solid #e2e8f0;">Qty received</th>
+                                <th style="text-align:right; padding:7px; border:1px solid #e2e8f0;">Rate</th>
+                                <th style="text-align:left; padding:7px; border:1px solid #e2e8f0;">Batch</th>
+                                <th style="text-align:left; padding:7px; border:1px solid #e2e8f0;">Expiry</th>
+                                <th style="text-align:right; padding:7px; border:1px solid #e2e8f0;">Total</th>
+                            </tr></thead>
+                            <tbody>${lines.length ? lines.map((l, i) => `<tr>
+                                <td style="padding:7px; border:1px solid #e2e8f0;">${i + 1}</td>
+                                <td style="padding:7px; border:1px solid #e2e8f0;"><strong>${esc(l.product_name || 'Unknown')}</strong></td>
+                                <td style="padding:7px; border:1px solid #e2e8f0; text-align:right;">${esc(l.pack_size || 1)}</td>
+                                <td style="padding:7px; border:1px solid #e2e8f0; text-align:right;">${esc(l.received_quantity || 0)}</td>
+                                <td style="padding:7px; border:1px solid #e2e8f0; text-align:right;">${sym}${formatNumber(parseFloat(l.purchase_rate) || 0)}</td>
+                                <td style="padding:7px; border:1px solid #e2e8f0;">${esc(l.batch_number || '-')}</td>
+                                <td style="padding:7px; border:1px solid #e2e8f0;">${esc(l.expiry_date || '-')}</td>
+                                <td style="padding:7px; border:1px solid #e2e8f0; text-align:right;">${sym}${formatNumber(parseFloat(l.total_amount) || 0)}</td>
+                            </tr>`).join('') : `<tr><td colspan="8" style="padding:20px; text-align:center; color:#94a3b8;">No items on this GRN.</td></tr>`}</tbody>
+                        </table>
+                        <div style="margin-top:12px; margin-left:auto; max-width:300px;">
+                            ${detail('Items subtotal', `${sym}${formatNumber(sub)}`)}
+                            ${(parseFloat(grn.freight) || 0) ? detail('Freight', `${sym}${formatNumber(parseFloat(grn.freight))}`) : ''}
+                            ${(parseFloat(grn.insurance) || 0) ? detail('Insurance', `${sym}${formatNumber(parseFloat(grn.insurance))}`) : ''}
+                            ${detail('<strong>GRN total</strong>', `<strong>${sym}${formatNumber(parseFloat(grn.total_amount) || (sub + (parseFloat(grn.freight) || 0) + (parseFloat(grn.insurance) || 0)))}</strong>`)}
+                        </div>
+                        ${grn.notes ? `<p style="margin:12px 0 0; color:#64748b;"><strong>Notes:</strong> ${esc(grn.notes)}</p>` : ''}
+                    </div>
+                    <div style="padding:12px 20px; border-top:1px solid #e2e8f0; text-align:right;">
+                        <button type="button" id="statementGrnClose2" class="btn btn-outline" style="padding:6px 18px; cursor:pointer;">Close</button>
+                    </div>
+                </div>`;
+            document.body.appendChild(overlay);
+
+            const close = () => { overlay.remove(); document.removeEventListener('keydown', onKey, true); };
+            const onKey = e => { if (e.key === 'Escape') { e.stopPropagation(); close(); } };
+            document.addEventListener('keydown', onKey, true);
+            overlay.addEventListener('click', e => { if (e.target === overlay) close(); });
+            overlay.querySelector('#statementGrnClose').addEventListener('click', close);
+            overlay.querySelector('#statementGrnClose2').addEventListener('click', close);
+        } catch (error) {
+            console.error('Error opening GRN from statement:', error);
+            showToast('Could not open the GRN: ' + error.message, 'error');
+        }
     }
 
     async function openSupplierStatement(supplierId) {
@@ -1064,6 +1199,9 @@
 
             // Get payables for this supplier
             const supplierPayables = state.supplierPayables.filter(sp => sp.supplier_id === supplierId);
+
+            // GRN numbers (and PO numbers) for this supplier's invoices
+            await loadStatementDocNumbers(supplierPayables);
             
             // 🔥 FIX: the statement used to compute each row's running
             // balance WHILE building the list (an invoice, then straight
@@ -1164,7 +1302,7 @@
             <table class="statement-table">
                 <thead>${statementHeadHtml(currency)}
                 </thead>
-                <tbody>${transactions.map(t => statementRowHtml(t, symbol)).join('')}
+                <tbody>${transactions.map(t => statementRowHtml(t, symbol, true)).join('')}
                 </tbody>
                 <tfoot>${statementFootHtml(currency, symbol, closingBalance)}
                 </tfoot>
@@ -1349,7 +1487,7 @@
         });
 
         const head = [[
-            'Date', 'Invoice #', 'Type', 'Reference',
+            'Date', 'Invoice #', 'Type', 'Reference', 'GRN #',
             'Amount (' + currency + ') DUE', 'Amount (' + currency + ') PAID', 'Balance (' + currency + ')',
             'Paid so far (' + currency + ')', 'PAID ON', 'Remaining (' + currency + ')'
         ]];
@@ -1362,7 +1500,7 @@
             head: head,
             body: body,
             foot: [[
-                { content: 'Closing Balance (' + currency + '):', colSpan: 6, styles: { halign: 'right' } },
+                { content: 'Closing Balance (' + currency + '):', colSpan: 7, styles: { halign: 'right' } },
                 { content: f(closingBalance), styles: { halign: 'right', textColor: closingBalance > 0 ? [220, 38, 38] : [21, 128, 61] } },
                 { content: '', colSpan: 3 }
             ]],
@@ -1373,26 +1511,26 @@
             headStyles: { fillColor: [241, 245, 249], textColor: [15, 23, 42], fontStyle: 'bold', halign: 'left' },
             footStyles: { fillColor: [248, 250, 252], textColor: [15, 23, 42], fontStyle: 'bold' },
             columnStyles: {
-                0: { cellWidth: 24 }, 1: { cellWidth: 44 }, 2: { cellWidth: 34 }, 3: { cellWidth: 30 },
-                4: { halign: 'right' }, 5: { halign: 'right' }, 6: { halign: 'right', fontStyle: 'bold' },
-                7: { halign: 'right', fillColor: infoFill, textColor: infoText },
+                0: { cellWidth: 22 }, 1: { cellWidth: 36 }, 2: { cellWidth: 26 }, 3: { cellWidth: 26 }, 4: { cellWidth: 26 },
+                5: { halign: 'right' }, 6: { halign: 'right' }, 7: { halign: 'right', fontStyle: 'bold' },
                 8: { halign: 'right', fillColor: infoFill, textColor: infoText },
-                9: { halign: 'right', fillColor: infoFill, textColor: infoText }
+                9: { halign: 'right', fillColor: infoFill, textColor: infoText },
+                10: { halign: 'right', fillColor: infoFill, textColor: infoText }
             },
             didParseCell: function (h) {
                 const col = h.column.index;
                 if (h.section === 'head') {
-                    if (col >= 4) h.cell.styles.halign = 'right';
-                    if (col >= 7) { h.cell.styles.fillColor = infoFill; h.cell.styles.textColor = infoText; }
+                    if (col >= 5) h.cell.styles.halign = 'right';
+                    if (col >= 8) { h.cell.styles.fillColor = infoFill; h.cell.styles.textColor = infoText; }
                 }
                 if (h.section === 'body') {
                     const t = transactions[h.row.index];
                     if (t && t.isOpening) h.cell.styles.fontStyle = 'bold';
                     if (t && col === 1) h.cell.styles.fontStyle = 'bold';
-                    if (t && t.isPayment && col === 5) h.cell.styles.textColor = [21, 128, 61];
-                    if (t && !t.isPayment && col === 4 && t.amount > 0) h.cell.styles.textColor = [220, 38, 38];
+                    if (t && t.isPayment && col === 6) h.cell.styles.textColor = [21, 128, 61];
+                    if (t && !t.isPayment && col === 5 && t.amount > 0) h.cell.styles.textColor = [220, 38, 38];
                 }
-                if (h.section === 'foot' && col >= 7) { h.cell.styles.fillColor = infoFill; }
+                if (h.section === 'foot' && col >= 8) { h.cell.styles.fillColor = infoFill; }
             },
             didDrawPage: function () {
                 const pageH = doc.internal.pageSize.getHeight();
@@ -2146,6 +2284,7 @@
     window.openRecordPayment = openRecordPayment;
     window.savePayment = savePayment;
     window.openSupplierStatement = openSupplierStatement;
+    window.openStatementGRN = openStatementGRN;
     window.switchStatementTab = switchStatementTab;
     window.printStatement = printStatement;
     window.downloadStatementPDF = downloadStatementPDF;

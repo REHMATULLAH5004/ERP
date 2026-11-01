@@ -46,6 +46,7 @@
         poItems: [],
         grnLines: [],           // ← ADDED: GRN lines for purchase data
         stockCountBatches: [],  // 🔥 ADDED: Stock Take variance data
+        purchaseReturns: [],    // ADDED: lines of posted purchase credit notes (stock sent back to suppliers)
         categories: [],         // 🔥 ADDED: for resolving real category names
         currentStockDetail: null,
         currentProductId: null,
@@ -167,7 +168,8 @@
                 .select(`
                     *,
                     goods_receipt_notes (
-                        grn_number
+                        grn_number,
+                        invoice_number
                     )
                 `)
                 .order('created_at', { ascending: true })
@@ -219,6 +221,33 @@
         } catch (error) {
             console.error('Error loading stock count batches:', error);
             state.stockCountBatches = [];
+            return [];
+        }
+    }
+
+    // ADDED: stock sent back to a supplier (Purchase > Credit Note) leaves batches.total_qty
+    // but used to be invisible here, so the product never reconciled.
+    async function loadPurchaseReturns() {
+        try {
+            const [linesRes, notesRes] = await Promise.all([
+                supabaseClient.from('purchase_credit_note_lines').select('*'),
+                supabaseClient.from('purchase_credit_notes').select('id, credit_note_number, status, created_at, reason, supplier_id, grn_id')
+            ]);
+            if (linesRes.error || notesRes.error) {
+                console.warn('Error loading purchase returns:', linesRes.error || notesRes.error);
+                state.purchaseReturns = [];
+                return [];
+            }
+            const notes = {};
+            (notesRes.data || []).forEach(n => { notes[n.id] = n; });
+            state.purchaseReturns = (linesRes.data || [])
+                .map(l => ({ ...l, note: notes[l.credit_note_id] || null }))
+                // a cancelled / void / draft credit note did not take stock out
+                .filter(l => l.note && !/cancel|void|draft|reject/i.test(l.note.status || ''));
+            return state.purchaseReturns;
+        } catch (error) {
+            console.error('Error loading purchase returns:', error);
+            state.purchaseReturns = [];
             return [];
         }
     }
@@ -356,6 +385,26 @@
         return isNaN(parsed) || parsed <= 0 ? 1 : parsed;
     }
 
+    // ADDED: units bought into ONE batch, from the GRN lines (packs received x
+    // pack size) for that product and batch number. The batches table has no
+    // "purchased" column, so the batch list showed +0 for every batch even
+    // though the product's Purchases total (from the GRN lines) was correct.
+    function batchPurchasedQty(batch) {
+        const norm = v => String(v == null ? '' : v).trim().toLowerCase();
+        const key = norm(batch.batch_number);
+        // Same batch number entered more than once for one product: the GRN lines
+        // can't say which row they belong to, so count them once, on the earliest
+        // row, so the batch list still adds up to the product's Purchases total.
+        const twins = (state.batches || []).filter(b => b.product_id === batch.product_id && norm(b.batch_number) === key);
+        if (twins.length > 1) {
+            const first = twins.slice().sort((a, b) => String(a.created_at || '').localeCompare(String(b.created_at || '')) || String(a.id).localeCompare(String(b.id)))[0];
+            if (first.id !== batch.id) return 0;
+        }
+        return (state.grnLines || [])
+            .filter(gl => gl.product_id === batch.product_id && String(gl.batch_number == null ? '' : gl.batch_number).trim().toLowerCase() === key)
+            .reduce((sum, gl) => sum + ((gl.received_quantity || 0) * (gl.pack_size || 1)), 0);
+    }
+
     function calculateStockMovement() {
         return state.products.map(product => {
             // Get batches for this product
@@ -478,9 +527,18 @@
             // product that had a stock take done on it.
             const productStockCounts = state.stockCountBatches.filter(sc => sc.product_id === product.id);
             const totalStockTakeVariance = productStockCounts.reduce((sum, sc) => sum + (sc.variance || 0), 0);
+            // Same variance split in two, so the product window can show it inside
+            // Stock In (found more than the system said) and Stock Out (found less).
+            const stockTakeGain = productStockCounts.reduce((sum, sc) => sum + Math.max(0, sc.variance || 0), 0);
+            const stockTakeLoss = productStockCounts.reduce((sum, sc) => sum + Math.max(0, -(sc.variance || 0)), 0);
+
+            // ---- PURCHASE RETURNS (stock sent back to suppliers) ----
+            const totalPurchaseReturned = (state.purchaseReturns || [])
+                .filter(l => l.product_id === product.id)
+                .reduce((sum, l) => sum + ((l.quantity_returned || 0) * (l.pack_size || 1)), 0);
 
             // ---- CALCULATE TOTALS ----
-            const totalStockOut = totalSold + totalDonated + totalWrittenOff + totalExpired;
+            const totalStockOut = totalSold + totalDonated + totalWrittenOff + totalExpired + totalPurchaseReturned;
             // Total Stock In = everything that came in: opening stock + purchases.
             // (It used to show purchases only, so a product with opening stock looked like it
             // had less coming in than it started with.)
@@ -501,7 +559,10 @@
                 totalDonated,
                 totalWrittenOff,
                 totalExpired,
+                totalPurchaseReturned,
                 totalStockTakeVariance,
+                stockTakeGain,
+                stockTakeLoss,
                 totalStockIn,
                 totalStockOut,
                 currentStock,
@@ -516,7 +577,26 @@
     // RENDER FUNCTIONS
     // ============================================
 
+    // ADDED: the page's HTML has no heading for the Purchase Returns column, so add it
+    // (once) right after "Expired".
+    function ensureReturnsHeader() {
+        const table = document.getElementById('stockTable');
+        if (!table || table.querySelector('th[data-col="purchase-returns"]')) return;
+        const ths = Array.from(table.querySelectorAll('thead th'));
+        const expiredTh = ths.find(th => /expired/i.test(th.textContent));
+        if (!expiredTh) return;
+        const th = document.createElement('th');
+        th.setAttribute('data-col', 'purchase-returns');
+        th.style.textAlign = 'right';
+        th.className = expiredTh.className;
+        th.title = 'Stock sent back to suppliers (purchase credit notes)';
+        th.setAttribute('onclick', "sortStockBy('totalPurchaseReturned')");
+        th.innerHTML = 'Purch. Returns <i class="fa-solid fa-sort"></i>';
+        expiredTh.insertAdjacentElement('afterend', th);
+    }
+
     function renderStockList(data = null) {
+        ensureReturnsHeader();
         const stockData = data || calculateStockMovement();
         const tbody = document.getElementById('stockTableBody');
         const countSpan = document.getElementById('stockListCount');
@@ -569,7 +649,7 @@
         });
 
         if (filtered.length === 0) {
-            tbody.innerHTML = `<tr><td colspan="12" style="text-align: center; padding: 40px; color: #94a3b8;">
+            tbody.innerHTML = `<tr><td colspan="13" style="text-align: center; padding: 40px; color: #94a3b8;">
                 <i class="fa-regular fa-circle-check" style="font-size: 2rem; display: block; margin-bottom: 10px;"></i>
                 ${stockData.length === 0 ? 'No products found' : 'No products match the filters.'}
             </td></tr>`;
@@ -615,6 +695,11 @@
                 <td style="text-align: right;">
                     <span class="clickable-qty" style="color: #f59e0b;" onclick="openStockMovementDetail('${p.id}', 'expired')" title="Click to view expired details">
                         ${formatNumber(p.totalExpired)}
+                    </span>
+                </td>
+                <td style="text-align: right;">
+                    <span class="clickable-qty" style="color: #0d9488;" onclick="openStockMovementDetail('${p.id}', 'return')" title="Click to view purchase returns (stock sent back to suppliers)">
+                        ${formatNumber(p.totalPurchaseReturned)}
                     </span>
                 </td>
                 <td style="text-align: right;">
@@ -713,8 +798,9 @@
             </div>
 
             <div class="stock-summary-grid">
-                <div class="stock-summary-box">
-                    <h6>📥 Stock In</h6>
+                <div class="stock-summary-box" onclick="openStockMovementDetail('${data.id}', 'allin')"
+                     style="cursor: pointer;" title="Click to see every Stock In document (opening stock, purchases and stock take)">
+                    <h6>📥 Stock In <span style="font-weight: 400; font-size: 0.7rem; color: #2563eb;">&mdash; click to see all documents</span></h6>
                     <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px;">
                         <div>
                             <div style="font-size: 0.7rem; color: #64748b;">Opening Stock</div>
@@ -724,17 +810,22 @@
                             <div style="font-size: 0.7rem; color: #64748b;">Purchases (GRN)</div>
                             <div style="font-weight: 600; color: #059669;">+${formatNumber(data.totalPurchased)}</div>
                         </div>
+                        <div>
+                            <div style="font-size: 0.7rem; color: #64748b;">Stock Take (found more)</div>
+                            <div style="font-weight: 600; color: #7c3aed;">+${formatNumber(data.stockTakeGain)}</div>
+                        </div>
                     </div>
                     <div style="margin-top: 10px; padding-top: 10px; border-top: 1px solid #e2e8f0;">
                         <div style="display: flex; justify-content: space-between; align-items: center;">
                             <span style="font-weight: 600;">Total Stock In</span>
-                            <span class="total in">${formatNumber(data.totalStockIn)}</span>
+                            <span class="total in">${formatNumber(data.totalStockIn + data.stockTakeGain)}</span>
                         </div>
                     </div>
                 </div>
 
-                <div class="stock-summary-box">
-                    <h6>📤 Stock Out</h6>
+                <div class="stock-summary-box" onclick="openStockMovementDetail('${data.id}', 'allout')"
+                     style="cursor: pointer;" title="Click to see every Stock Out document (sales, donations, write-offs, expired, supplier returns, stock take)">
+                    <h6>📤 Stock Out <span style="font-weight: 400; font-size: 0.7rem; color: #2563eb;">&mdash; click to see all documents</span></h6>
                     <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px;">
                         <div>
                             <div style="font-size: 0.7rem; color: #64748b;">Sales</div>
@@ -752,11 +843,19 @@
                             <div style="font-size: 0.7rem; color: #64748b;">Expired</div>
                             <div style="font-weight: 600; color: #f59e0b;">-${formatNumber(data.totalExpired)}</div>
                         </div>
+                        <div>
+                            <div style="font-size: 0.7rem; color: #64748b;">Returned to Supplier</div>
+                            <div style="font-weight: 600; color: #0d9488;">-${formatNumber(data.totalPurchaseReturned)}</div>
+                        </div>
+                        <div>
+                            <div style="font-size: 0.7rem; color: #64748b;">Stock Take (found less)</div>
+                            <div style="font-weight: 600; color: #7c3aed;">-${formatNumber(data.stockTakeLoss)}</div>
+                        </div>
                     </div>
                     <div style="margin-top: 10px; padding-top: 10px; border-top: 1px solid #e2e8f0;">
                         <div style="display: flex; justify-content: space-between; align-items: center;">
                             <span style="font-weight: 600;">Total Stock Out</span>
-                            <span class="total out">${formatNumber(data.totalStockOut)}</span>
+                            <span class="total out">${formatNumber(data.totalStockOut + data.stockTakeLoss)}</span>
                         </div>
                     </div>
                 </div>
@@ -767,6 +866,10 @@
                     <h6 style="color: #059669;">📊 Current Stock</h6>
                     <div style="font-size: 2rem; font-weight: 700; color: #059669; text-align: center; padding: 10px;">
                         ${formatNumber(data.currentStock)}
+                    </div>
+                    <div style="font-size: 0.75rem; text-align: center; color: #64748b;">
+                        ${formatNumber(data.totalStockIn + data.stockTakeGain)} in &minus; ${formatNumber(data.totalStockOut + data.stockTakeLoss)} out = ${formatNumber(data.expectedClosing)}
+                        ${data.isReconciled ? '<span style="color:#059669;">&#10003; matches</span>' : '<span style="color:#dc2626;">&#9888; does not match current stock</span>'}
                     </div>
                 </div>
                 <div class="stock-summary-box" style="background: ${data.currentStock <= 10 ? '#fef2f2' : '#f0fdf4'}; border-color: ${data.currentStock <= 10 ? '#ef4444' : '#22c55e'};">
@@ -807,7 +910,7 @@
                                     const statusColor = isExpired ? '#ef4444' : (batch.total_qty > 0 ? '#059669' : '#f59e0b');
                                     
                                     const opening = batch.opening_qty || 0;
-                                    const purchased = batch.purchased_qty || 0;
+                                    const purchased = batchPurchasedQty(batch);
                                     
                                     return `
                                         <tr>
@@ -857,11 +960,19 @@
             let total = 0;
             let isIn = false;
 
+            // true time of an entry, so mixed lists sort in real date order
+            const tsOf = v => { const t = v ? new Date(v).getTime() : 0; return isNaN(t) ? 0 : t; };
+
+            // Builds title/items/total/isIn for ONE movement type. The "all in" and
+            // "all out" views below run it for several types and merge the results.
+            const collectItems = (movementType) => {
+            title = ''; items = []; total = 0; isIn = false;
             switch (movementType) {
                 case 'opening':
                     title = `Opening Stock - ${product.product_name}`;
                     items = stockData.batches.map(b => ({
                         date: b.created_at ? new Date(b.created_at).toLocaleDateString() : 'N/A',
+                        ts: tsOf(b.created_at),
                         description: `Batch: ${b.batch_number}`,
                         qty: b.opening_qty || 0,
                         type: 'opening',
@@ -888,6 +999,8 @@
                         const receivedPacks = gl.received_quantity || 0;
                         return {
                             date: gl.created_at ? new Date(gl.created_at).toLocaleDateString() : 'N/A',
+                            ts: tsOf(gl.created_at),
+                            invoiceNo: gl.goods_receipt_notes?.invoice_number || '',
                             description: `GRN: ${gl.goods_receipt_notes?.grn_number || 'N/A'} | ${gl.product_name || product.product_name}`,
                             qty: receivedPacks * packSize,
                             type: 'in',
@@ -910,11 +1023,12 @@
                                 const multiplier = getSaleQtyMultiplier(sale, item);
                                 items.push({
                                     date: sale.created_at ? new Date(sale.created_at).toLocaleDateString() : 'N/A',
+                                    ts: tsOf(sale.created_at),
                                     description: `Sale: ${sale.sale_id} | ${item.product_name}`,
                                     qty: (item.qty || 0) * multiplier,
                                     type: 'out',
                                     reference: sale.sale_id,
-                                    customer: sale.customer_data?.full_name || 'N/A',
+                                    customer: sale.customer_data?.full_name || sale.customer_data?.customer_name || 'N/A',
                                     clientType: sale.client_type || 'RETAIL',
                                     packInfo: multiplier > 1 ? `${item.qty} pack(s) × ${multiplier} units/pack` : null
                                 });
@@ -934,11 +1048,12 @@
                                 const multiplier = getSaleQtyMultiplier(donation, item);
                                 items.push({
                                     date: donation.created_at ? new Date(donation.created_at).toLocaleDateString() : 'N/A',
+                                    ts: tsOf(donation.created_at),
                                     description: `Donation: ${donation.sale_id} | ${item.product_name}`,
                                     qty: (item.qty || 0) * multiplier,
                                     type: 'out',
                                     reference: donation.sale_id,
-                                    donee: donation.customer_data?.full_name || 'N/A',
+                                    donee: donation.customer_data?.full_name || donation.customer_data?.customer_name || 'N/A',
                                     packInfo: multiplier > 1 ? `${item.qty} pack(s) × ${multiplier} units/pack` : null
                                 });
                             }
@@ -956,6 +1071,7 @@
                                 const wo = state.writeoffs.find(w => w.id === woItem.write_off_id);
                                 items.push({
                                     date: wo?.date || wo?.created_at ? new Date(wo.date || wo.created_at).toLocaleDateString() : 'N/A',
+                                    ts: tsOf(wo?.date || wo?.created_at),
                                     description: `Write-Off: ${wo?.reference_number || 'N/A'} | ${woItem.product_name}`,
                                     qty: woItem.qty_written_off || 0,
                                     type: 'out',
@@ -969,12 +1085,34 @@
                     isIn = false;
                     break;
 
+                case 'return':
+                    title = `Stock Out (Returned to Supplier) - ${product.product_name}`;
+                    (state.purchaseReturns || [])
+                        .filter(l => l.product_id === productId)
+                        .forEach(l => {
+                            const units = (l.quantity_returned || 0) * (l.pack_size || 1);
+                            items.push({
+                                date: l.note?.created_at ? new Date(l.note.created_at).toLocaleDateString() : 'N/A',
+                                ts: tsOf(l.note?.created_at),
+                                description: `Credit Note: ${l.note?.credit_note_number || 'N/A'} | Batch: ${l.batch_number || 'N/A'}`,
+                                qty: units,
+                                type: 'out',
+                                reference: l.note?.credit_note_number || 'N/A',
+                                reason: l.note?.reason || null,
+                                packInfo: (l.pack_size || 1) > 1 ? `${l.quantity_returned} pack(s) × ${l.pack_size} units/pack` : null
+                            });
+                        });
+                    total = stockData.totalPurchaseReturned;
+                    isIn = false;
+                    break;
+
                 case 'expired':
                     title = `Stock Out (Expired) - ${product.product_name}`;
                     stockData.batches.forEach(batch => {
                         if (batch.expiry_date && new Date(batch.expiry_date) < new Date()) {
                             items.push({
                                 date: new Date(batch.expiry_date).toLocaleDateString(),
+                                ts: tsOf(batch.expiry_date),
                                 description: `Batch: ${batch.batch_number} - Expired`,
                                 qty: batch.total_qty || 0,
                                 type: 'out',
@@ -1000,7 +1138,8 @@
                         .forEach(sc => {
                             items.push({
                                 date: sc.stock_counts?.date ? new Date(sc.stock_counts.date).toLocaleDateString() : 'N/A',
-                                description: `Batch: ${sc.batch_number || 'N/A'} | System: ${formatNumber(sc.system_qty)} → Physical: ${formatNumber(sc.physical_qty)}`,
+                                ts: tsOf(sc.stock_counts?.date),
+                                description: `Stock take | Batch: ${sc.batch_number || 'N/A'} | System: ${formatNumber(sc.system_qty)} → Physical: ${formatNumber(sc.physical_qty)}`,
                                 qty: sc.variance || 0,
                                 type: 'variance',
                                 reference: sc.batch_number || 'N/A'
@@ -1012,11 +1151,45 @@
 
                 default:
                     showToast('Invalid movement type', 'error');
-                    return;
+                    return false;
+            }
+            return true;
+            };
+
+            // ADDED: click Stock In / Stock Out in the product's detail window to see
+            // EVERY document behind the number. Stock In = opening stock + GRN
+            // purchases. Stock Out = sales + donations + write-offs + expired.
+            if (movementType === 'allin' || movementType === 'allout') {
+                const KIND = { opening: 'Opening stock', in: 'Purchase (GRN)', out: 'Sale', donation: 'Donation', writeoff: 'Write-off', expired: 'Expired', return: 'Returned to supplier' };
+                const wantIn = movementType === 'allin';
+                const parts = wantIn ? ['opening', 'in', 'stocktake'] : ['out', 'donation', 'writeoff', 'expired', 'return', 'stocktake'];
+                const merged = [];
+                let mergedTotal = 0;
+                parts.forEach(part => {
+                    if (!collectItems(part)) return;
+                    if (part === 'stocktake') {
+                        // a stock take counts as Stock In where it found MORE than the
+                        // system said, and as Stock Out where it found LESS
+                        const mine = items
+                            .filter(i => wantIn ? i.qty > 0 : i.qty < 0)
+                            .map(i => ({ ...i, qty: Math.abs(i.qty), kind: wantIn ? 'Stock take (found more)' : 'Stock take (found less)', kindKey: 'stocktake' }));
+                        mine.forEach(i => merged.push(i));
+                        mergedTotal += mine.reduce((sum, i) => sum + i.qty, 0);
+                        return;
+                    }
+                    items.filter(i => i.qty > 0).forEach(i => merged.push({ ...i, kind: KIND[part], kindKey: part }));
+                    mergedTotal += total;
+                });
+                items = merged;
+                total = mergedTotal;
+                isIn = movementType === 'allin';
+                title = (isIn ? 'Stock In' : 'Stock Out') + ' (all documents) - ' + product.product_name;
+            } else if (!collectItems(movementType)) {
+                return;
             }
 
-            // Sort items by date
-            items.sort((a, b) => a.date.localeCompare(b.date));
+            // Sort items by date (true date order)
+            items.sort((a, b) => ((a.ts || 0) - (b.ts || 0)) || a.date.localeCompare(b.date));
 
             // Remove zero qty items
             // 🔥 FIX: for every other movement type, qty <= 0 genuinely
@@ -1034,7 +1207,9 @@
             }
 
             renderStockMovementDetail(title, items, total, movementType, product);
-            document.getElementById('stockMovementDetailModal').classList.add('show');
+            const movementModal = document.getElementById('stockMovementDetailModal');
+            movementModal.style.zIndex = '1200'; // opens on top of the product detail window
+            movementModal.classList.add('show');
         } catch (error) {
             console.error('Error opening stock movement detail:', error);
             showToast('Error loading movement details: ' + error.message, 'error');
@@ -1045,7 +1220,10 @@
         const content = document.getElementById('stockMovementDetailContent');
 
         const isStocktake = type === 'stocktake';
-        const isIn = type === 'in' || type === 'opening' || (isStocktake && total >= 0);
+        const isIn = type === 'in' || type === 'opening' || type === 'allin' || (isStocktake && total >= 0);
+        const KIND_COLORS = { opening: '#0ea5e9', in: '#059669', out: '#dc2626', donation: '#8b5cf6', writeoff: '#ef4444', expired: '#f59e0b', return: '#0d9488', stocktake: '#7c3aed' };
+        const listedQty = items.reduce((sum, i) => sum + (i.qty || 0), 0);
+        const hasGap = !isStocktake && Math.abs(listedQty - total) > 0.01;
         const totalColor = isIn ? '#059669' : '#dc2626';
         // 🔥 FIX: formatNumber() already includes a native minus sign for
         // negative numbers (it uses toLocaleString, not an abs-based
@@ -1075,6 +1253,9 @@
                 <div style="margin-top: 8px; font-size: 0.85rem; color: #64748b;">
                     ${items.length} transaction(s)
                 </div>
+                ${hasGap ? `<div style="margin-top: 6px; font-size: 0.8rem; color: #b45309;">
+                    The documents listed below add up to ${formatNumber(listedQty)}. The other ${formatNumber(Math.abs(total - listedQty))} of the total has no document on record (for example stock entered directly or from older records).
+                </div>` : ''}
             </div>
 
             <div class="table-responsive">
@@ -1096,7 +1277,8 @@
                                 <td>${index + 1}</td>
                                 <td>${item.date}</td>
                                 <td>
-                                    ${item.description}
+                                    ${item.kind ? `<span style="background: ${KIND_COLORS[item.kindKey] || '#64748b'}; color: #fff; padding: 1px 8px; border-radius: 10px; font-size: 0.68rem; margin-right: 6px;">${item.kind}</span>` : ''}${item.description}
+                                    ${item.invoiceNo ? `<br><small style="color: #64748b;">Supplier invoice: ${item.invoiceNo}</small>` : ''}
                                     ${item.customer ? `<br><small style="color: #64748b;">Customer: ${item.customer}</small>` : ''}
                                     ${item.clientType ? `<br><small style="color: #64748b;">Type: ${item.clientType}</small>` : ''}
                                     ${item.donee ? `<br><small style="color: #64748b;">Donee: ${item.donee}</small>` : ''}
@@ -1153,11 +1335,12 @@
                         <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px;">
                             <div><div style="font-size: 0.7rem; color: #64748b;">Opening Stock</div><strong>${formatNumber(data.openingStock)}</strong></div>
                             <div><div style="font-size: 0.7rem; color: #64748b;">Purchases (GRN)</div><strong style="color: #059669;">+${formatNumber(data.totalPurchased)}</strong></div>
+                            <div><div style="font-size: 0.7rem; color: #64748b;">Stock Take (found more)</div><strong style="color: #7c3aed;">+${formatNumber(data.stockTakeGain)}</strong></div>
                         </div>
                         <div style="margin-top: 10px; padding-top: 10px; border-top: 1px solid #e2e8f0;">
                             <div style="display: flex; justify-content: space-between;">
                                 <span><strong>Total Stock In</strong></span>
-                                <span style="color: #059669; font-weight: 700;">${formatNumber(data.totalStockIn)}</span>
+                                <span style="color: #059669; font-weight: 700;">${formatNumber(data.totalStockIn + data.stockTakeGain)}</span>
                             </div>
                         </div>
                     </div>
@@ -1169,11 +1352,13 @@
                             <div><div style="font-size: 0.7rem; color: #64748b;">Donations</div><strong style="color: #8b5cf6;">-${formatNumber(data.totalDonated)}</strong></div>
                             <div><div style="font-size: 0.7rem; color: #64748b;">Write-Offs</div><strong style="color: #ef4444;">-${formatNumber(data.totalWrittenOff)}</strong></div>
                             <div><div style="font-size: 0.7rem; color: #64748b;">Expired</div><strong style="color: #f59e0b;">-${formatNumber(data.totalExpired)}</strong></div>
+                            <div><div style="font-size: 0.7rem; color: #64748b;">Returned to Supplier</div><strong style="color: #0d9488;">-${formatNumber(data.totalPurchaseReturned)}</strong></div>
+                            <div><div style="font-size: 0.7rem; color: #64748b;">Stock Take (found less)</div><strong style="color: #7c3aed;">-${formatNumber(data.stockTakeLoss)}</strong></div>
                         </div>
                         <div style="margin-top: 10px; padding-top: 10px; border-top: 1px solid #e2e8f0;">
                             <div style="display: flex; justify-content: space-between;">
                                 <span><strong>Total Stock Out</strong></span>
-                                <span style="color: #dc2626; font-weight: 700;">${formatNumber(data.totalStockOut)}</span>
+                                <span style="color: #dc2626; font-weight: 700;">${formatNumber(data.totalStockOut + data.stockTakeLoss)}</span>
                             </div>
                         </div>
                     </div>
@@ -1202,7 +1387,7 @@
                                     <tr>
                                         <td style="padding: 8px; border: 1px solid #e2e8f0;"><strong>${batch.batch_number}</strong></td>
                                         <td style="padding: 8px; text-align: right; border: 1px solid #e2e8f0;">${formatNumber(batch.opening_qty || 0)}</td>
-                                        <td style="padding: 8px; text-align: right; border: 1px solid #e2e8f0; color: #059669;">+${formatNumber(batch.purchased_qty || 0)}</td>
+                                        <td style="padding: 8px; text-align: right; border: 1px solid #e2e8f0; color: #059669;">+${formatNumber(batchPurchasedQty(batch))}</td>
                                         <td style="padding: 8px; text-align: right; border: 1px solid #e2e8f0; font-weight: 600;">${formatNumber(batch.total_qty || 0)}</td>
                                         <td style="padding: 8px; text-align: center; border: 1px solid #e2e8f0;">${batch.expiry_date ? new Date(batch.expiry_date).toLocaleDateString() : 'N/A'}</td>
                                     </tr>
@@ -1266,6 +1451,7 @@
         await loadDonations();
         await loadWriteoffs();
         await loadStockCountBatches();  // 🔥 ADDED: Load stock take variance data
+        await loadPurchaseReturns();
         const stockData = calculateStockMovement();
         renderStockList(stockData);
         showToast('Stock data refreshed successfully', 'success');
@@ -1387,6 +1573,7 @@
     await loadDonations();
     await loadWriteoffs();
     await loadStockCountBatches();  // 🔥 ADDED: Load stock take variance data
+    await loadPurchaseReturns();
 
     const stockData = calculateStockMovement();
     renderStockList(stockData);

@@ -146,6 +146,12 @@
     // currently has focus; activeItemSearchRow/Input/Select track which
     // row that dropdown is currently acting on.
     let productCatalogCache = [];
+    // SPEED FIX: shared product list (see getProductList() below). Declared up here
+    // because the page's start-up code calls it before the functions further down.
+    let productListCache = null;   // { products, genericMap, at }
+    let productListPromise = null;
+    const PRODUCT_LIST_TTL_MS = 3 * 60 * 1000;
+
     const itemSearchDropdownEl = document.getElementById('wholesaleItemSearchDropdown');
     let activeItemSearchRow = null;
     let activeItemSearchInput = null;
@@ -353,16 +359,18 @@
     // ============================================
     // LOAD CUSTOMERS
     // ============================================
-    await loadCustomers();
-
+    // SPEED FIX: customers and products now load at the same time (they used
+    // to load one after the other), and the accounts check is warmed up in the
+    // background so the first Save is not slower than the rest.
     // ============================================
     // LOAD PRODUCT DROPDOWNS
     // ============================================
     try {
-        await loadProductDropdowns();
+        await Promise.all([loadCustomers(), loadProductDropdowns()]);
     } catch (e) {
-        console.warn("Could not load products:", e);
+        console.warn("Could not load customers/products:", e);
     }
+    ensureChartOfAccounts().catch(() => {});
 
     // ============================================
     // CUSTOMER SELECTION
@@ -678,27 +686,31 @@
                 // -- those manual per-product columns are gone. Internal/Regular markup
                 // is now the flat global rate from Admin (company_settings), applied in
                 // updateRowRate().
-                const { data: product, error: prodError } = await supabaseClient
-                    .from('products')
-                    .select('conversion_rate, tax_percent')
-                    .eq('id', productId)
-                    .single();
+                // SPEED FIX: the product and its batches are fetched together
+                // (they used to be fetched one after the other).
+                const [prodRes, batchRes] = await Promise.all([
+                    supabaseClient
+                        .from('products')
+                        .select('conversion_rate, tax_percent')
+                        .eq('id', productId)
+                        .single(),
+                    supabaseClient
+                        .from('batches')
+                        .select(`
+                            id,
+                            batch_number,
+                            expiry_date,
+                            total_qty,
+                            cost_price
+                        `)
+                        .eq('product_id', productId)
+                        .gt('total_qty', 0)
+                        .order('expiry_date', { ascending: true })
+                ]);
+                const { data: product, error: prodError } = prodRes;
+                const { data: batches, error: batchError } = batchRes;
 
                 if (prodError) throw prodError;
-
-                const { data: batches, error: batchError } = await supabaseClient
-                    .from('batches')
-                    .select(`
-                        id,
-                        batch_number,
-                        expiry_date,
-                        total_qty,
-                        cost_price
-                    `)
-                    .eq('product_id', productId)
-                    .gt('total_qty', 0)
-                    .order('expiry_date', { ascending: true });
-
                 if (batchError) throw batchError;
 
                 if (batchSelect) {
@@ -1179,39 +1191,103 @@
     // item row's dropdown option can carry a data-generic attribute,
     // which is how getSaleData() picks up the Generic Name for the new
     // Delivery Note print-out below.
-    async function buildGenericNameMap(products) {
-        const genericIds = [...new Set((products || []).map(p => p.generic_name_id).filter(Boolean))];
+    async function buildGenericNameMap() {
+        // 🔥 SPEED FIX (Oct 2026): one simple query for all generic names (it used
+        // to put hundreds of ids into the web address, which also breaks once
+        // the list gets long). Paged so the database's 1000-row limit can never
+        // silently cut the list short.
         const map = {};
-        if (genericIds.length === 0) return map;
-        const { data: generics, error } = await supabaseClient
-            .from('generic_names')
-            .select('id, name')
-            .in('id', genericIds);
-        if (!error && generics) {
+        try {
+            const generics = await fetchAllRows(() =>
+                supabaseClient.from('generic_names').select('id, name').order('id'));
             generics.forEach(g => { map[g.id] = g.name; });
+        } catch (e) {
+            console.warn('Could not load generic names:', e);
         }
         return map;
     }
 
-    // 🔥 FIX: shared by both product-dropdown loaders below. They fetch the
-    // product list in the background and then REBUILD the <select>'s options,
-    // which silently blanked any item that had been selected in the meantime
-    // -- most visibly when a saved quotation/invoice was loaded into the form
-    // (selecting its customer triggers resetPOSTable(), which starts one of
-    // these reloads; if the reload finished AFTER the saved item had been
-    // filled in, the select went back to "Select Item" while the search box
-    // still showed the name, and Save then said "Please add at least one
-    // item"). Now whatever was selected is remembered and put back.
+    // 🔥 SPEED FIX (Oct 2026): the product list used to be downloaded from the
+    // database EVERY time the page opened, every time a row was added (which
+    // happens automatically after each item) and every time the form was
+    // reset -- two round trips each time -- and then the drop-down was rebuilt
+    // with `select.innerHTML += ...` inside a loop, which makes the browser
+    // re-parse the whole list once per product (850+ times). That is why the
+    // table opened with one row and the next empty row only appeared seconds
+    // later, and why everything felt slow after opening. Now: the list is
+    // fetched ONCE (in pages of 1000, so it can never be cut off at the
+    // database's 1000-row limit), shared by every row, refreshed at most every
+    // 3 minutes, and each drop-down is built with a single assignment.
+    async function fetchAllRows(makeQuery) {
+        const pageSize = 1000;
+        const all = [];
+        for (let from = 0; ; from += pageSize) {
+            const { data, error } = await makeQuery().range(from, from + pageSize - 1);
+            if (error) throw error;
+            const rows = data || [];
+            all.push(...rows);
+            if (rows.length < pageSize) break;
+        }
+        return all;
+    }
+
+    async function getProductList(forceRefresh) {
+        const fresh = productListCache && (Date.now() - productListCache.at) < PRODUCT_LIST_TTL_MS;
+        if (fresh && !forceRefresh) return productListCache;
+        if (productListPromise) return productListPromise;
+        productListPromise = (async () => {
+            try {
+                const [products, genericMap] = await Promise.all([
+                    fetchAllRows(() => supabaseClient
+                        .from('products')
+                        .select('id, product_name, generic_name_id')
+                        .order('product_name')
+                        .order('id')),
+                    buildGenericNameMap()
+                ]);
+                productListCache = { products, genericMap, at: Date.now() };
+                // feeds the item search box's filtering (matches on BOTH
+                // product_name and generic name) -- see the item-search block above.
+                productCatalogCache = products.map(p => ({
+                    id: p.id,
+                    product_name: p.product_name,
+                    generic: genericMap[p.generic_name_id] || ''
+                }));
+                return productListCache;
+            } finally {
+                productListPromise = null;
+            }
+        })();
+        return productListPromise;
+    }
+
+    function escapeHtmlAttr(v) {
+        return String(v == null ? '' : v)
+            .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    }
+
+    // 🔥 FIX: shared by both product-dropdown loaders below. They rebuild the
+    // <select>'s options, which silently blanked any item that had been
+    // selected in the meantime -- most visibly when a saved quotation/invoice
+    // was loaded into the form (selecting its customer triggers
+    // resetPOSTable(), which starts one of these reloads; if the reload
+    // finished AFTER the saved item had been filled in, the select went back
+    // to "Select Item" while the search box still showed the name, and Save
+    // then said "Please add at least one item"). Now whatever was selected is
+    // remembered and put back.
     function rebuildItemSelectOptions(select, products, genericMap) {
         const prevValue = select.value;
         const prevOpt = select.options[select.selectedIndex];
         const prevText = prevOpt ? prevOpt.textContent : '';
         const prevGeneric = prevOpt ? (prevOpt.dataset.generic || '') : '';
 
-        select.innerHTML = `<option value="">Select Item</option>`;
-        products.forEach(p => {
-            select.innerHTML += `<option value="${p.id}" data-generic="${genericMap[p.generic_name_id] || ''}">${p.product_name}</option>`;
-        });
+        // ONE assignment (was one per product).
+        const parts = ['<option value="">Select Item</option>'];
+        for (const p of products) {
+            parts.push(`<option value="${escapeHtmlAttr(p.id)}" data-generic="${escapeHtmlAttr(genericMap[p.generic_name_id] || '')}">${escapeHtmlAttr(p.product_name)}</option>`);
+        }
+        select.innerHTML = parts.join('');
 
         if (prevValue) {
             let opt = Array.from(select.options).find(o => o.value === prevValue);
@@ -1227,27 +1303,9 @@
     }
 
     async function loadProductDropdowns() {
-        const selects = document.querySelectorAll('.wholesale-pos-item');
         try {
-            const { data: products, error } = await supabaseClient
-                .from('products')
-                .select('id, product_name, generic_name_id')
-                .order('product_name');
-
-            if (error) throw error;
-
-            const genericMap = await buildGenericNameMap(products);
-
-            // 🔥 ADDED: feeds the item search box's filtering (matches on
-            // BOTH product_name and generic name) -- see the item-search
-            // block above.
-            productCatalogCache = products.map(p => ({
-                id: p.id,
-                product_name: p.product_name,
-                generic: genericMap[p.generic_name_id] || ''
-            }));
-
-            selects.forEach(select => {
+            const { products, genericMap } = await getProductList();
+            document.querySelectorAll('.wholesale-pos-item').forEach(select => {
                 if (select) rebuildItemSelectOptions(select, products, genericMap);
             });
         } catch (e) {
@@ -1258,24 +1316,7 @@
     async function loadProductDropdownsForRow(select) {
         if (!select) return;
         try {
-            const { data: products, error } = await supabaseClient
-                .from('products')
-                .select('id, product_name, generic_name_id')
-                .order('product_name');
-
-            if (error) throw error;
-
-            const genericMap = await buildGenericNameMap(products);
-
-            // Keep the shared search cache fresh here too -- this runs on
-            // every Reset/new-row, so it doubles as a periodic refresh in
-            // case products were added since the page loaded.
-            productCatalogCache = products.map(p => ({
-                id: p.id,
-                product_name: p.product_name,
-                generic: genericMap[p.generic_name_id] || ''
-            }));
-
+            const { products, genericMap } = await getProductList();
             rebuildItemSelectOptions(select, products, genericMap);
         } catch (e) {
             console.warn("Could not load products for row:", e);
@@ -3023,6 +3064,28 @@
 
                 editCtx = { saleDbId: editingWholesaleDbId, origRow, oldItems: oldItems || [], restoredDeltas: [], deductedDeltas: [],
                     flags: { stockRestored: false, itemsDeleted: false, headerUpdated: false, stockDeducted: false } };
+
+                // 🔥 FIX (found 2026-10-27, Dr Javia Ndola invoice GPI-2026-452221-3476):
+                // an edit must NEVER rename the invoice. While the invoice is being
+                // loaded for editing, the customer drop-down's async 'change' handler
+                // can still finish AFTER the load and quietly generate a brand-new
+                // invoice number into the form. Save then renamed the invoice, and the
+                // next step (reverse_sale_accounting, which looks the invoice up by its
+                // ORIGINAL number) failed with 'sale ... not found', so every edit was
+                // stopped and undone. The original number and prefix are now always kept.
+                if (origRow.sale_id && saleData.sale_id !== origRow.sale_id) {
+                    console.warn('Edit tried to rename invoice', origRow.sale_id, '->', saleData.sale_id, '-- keeping the original.');
+                    saleData.sale_id = origRow.sale_id;
+                    dbRecord.sale_id = origRow.sale_id;
+                    const keepInvoiceNumber = document.getElementById('invoiceNumber');
+                    if (keepInvoiceNumber) keepInvoiceNumber.value = origRow.sale_id;
+                    const keepInvoiceDisplay = document.getElementById('saleIdDisplay');
+                    if (keepInvoiceDisplay) keepInvoiceDisplay.textContent = `Invoice #: ${origRow.sale_id}`;
+                }
+                if (origRow.prefix) {
+                    saleData.prefix = origRow.prefix;
+                    dbRecord.prefix = origRow.prefix;
+                }
 
                 if (oldItems && oldItems.length > 0 && originalWasDeducted) {
                     const qtyToRestoreByBatch = new Map();

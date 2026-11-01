@@ -23,6 +23,23 @@
 // Retail/Wholesale POS screens do, or it would show stale/zero prices for
 // every product added or edited after the cutover.
 // ============================================
+// Reads EVERY batch row, 1000 at a time. The old code asked for the batches of all products
+// with .in('product_id', [every product id]) -- with ~850 products that web address is too
+// long, the request failed, the error was ignored, and every product showed 0 stock.
+async function fetchAllBatchRows(columns, newestFirst) {
+    const rows = [];
+    const PAGE = 1000;
+    for (let from = 0; ; from += PAGE) {
+        let q = supabaseClient.from('batches').select(columns);
+        if (newestFirst) q = q.order('created_at', { ascending: false });
+        const { data, error } = await q.order('id', { ascending: true }).range(from, from + PAGE - 1);
+        if (error) return { data: null, error };
+        rows.push(...(data || []));
+        if (!data || data.length < PAGE) break;
+    }
+    return { data: rows, error: null };
+}
+
 async function loadPricingSettings() {
     const fallback = {
         retail_regular_markup_max_percent: 60,
@@ -62,6 +79,38 @@ function computeExponentialMarkupPercent(cost, maxPct, minPct, costMin, costMax)
     return maxPct * Math.pow(minPct / maxPct, t);
 }
 
+// ADDED: "clean" prices for REGULAR retail. The pack price (cost per pack plus
+// the markup) is rounded to a tidy figure, with a finer step for cheaper packs
+// so a small price never collapses to 0:
+//   under K10  -> nearest K0.50 (never below K0.50)
+//   K10-K50    -> nearest K1
+//   K50-K100   -> nearest K5
+//   K100-K1000 -> nearest K10
+//   K1000+     -> nearest K50
+// Safety: the rounded price is never allowed below cost + 25%; if rounding
+// down would do that it rounds UP instead. To change the steps, edit the
+// table below (same table is used in Retail POS, Quick Sale, CRM quick sale
+// and the Pricing page).
+var REGULAR_PRICE_STEPS = [
+    { below: 10, step: 0.5 },
+    { below: 50, step: 1 },
+    { below: 100, step: 5 },
+    { below: 1000, step: 10 },
+    { below: Infinity, step: 50 }
+];
+var REGULAR_MIN_MARGIN = 0.25;
+function roundRegularPackPrice(price, costPerPack) {
+    price = Number(price) || 0;
+    if (!(price > 0)) return price;
+    const tier = REGULAR_PRICE_STEPS.find(t => price < t.below);
+    const step = tier.step;
+    let rounded = Math.round(price / step) * step;
+    const floor = (Number(costPerPack) || 0) * (1 + REGULAR_MIN_MARGIN);
+    if (rounded < floor) rounded = Math.ceil(price / step) * step;
+    if (rounded < step) rounded = step;
+    return Math.round(rounded * 100) / 100;
+}
+
 // ============================================
 // LOAD PRICING DATA
 // ============================================
@@ -91,11 +140,7 @@ async function loadPricing() {
 
         // 2. Fetch the most recent batch for each product
         const productIds = products.map(p => p.id);
-        const { data: batches, error: batchError } = await supabaseClient
-            .from('batches')
-            .select('product_id, cost_price, created_at')
-            .in('product_id', productIds)
-            .order('created_at', { ascending: false });
+        const { data: batches, error: batchError } = await fetchAllBatchRows('product_id, cost_price, created_at', true);
 
         if (batchError) throw batchError;
 
@@ -137,7 +182,8 @@ function renderPricing(products, costMap, pricingSettings) {
             pricingSettings.markup_cost_min,
             pricingSettings.markup_cost_max
         );
-        const retailPrice = costPerPack * (1 + (retailMarkup / 100));
+        // REGULAR retail pack price, rounded to a clean figure (same rule as Retail POS)
+        const retailPrice = roundRegularPackPrice(costPerPack * (1 + (retailMarkup / 100)), costPerPack);
 
         // 🔥 CHANGED: Wholesale Regular markup is now the flat global rate
         // (same as Wholesale POS), not a stored per-product percent.
@@ -149,7 +195,7 @@ function renderPricing(products, costMap, pricingSettings) {
                 <td style="padding-left: 20px; font-weight: 500;">${p.product_name}</td>
                 <td>${packSize}</td>
                 <td style="text-align: right; font-weight: bold;">
-                    ${costPrice > 0 ? `K${Math.round(retailPrice)}` : 'No Cost Set'}
+                    ${costPrice > 0 ? `K${Number.isInteger(retailPrice) ? retailPrice : retailPrice.toFixed(2)}` : 'No Cost Set'}
                 </td>
                 <td style="padding-right: 20px; text-align: right; font-weight: bold;">
                     ${costPrice > 0 ? `K${Math.round(wholesalePrice)}` : 'No Cost Set'}
