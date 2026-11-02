@@ -1178,6 +1178,18 @@
         btn.disabled = true;
         try {
             await ensureChartOfAccounts();
+            // 1) Mark the record first and CHECK a row really changed. If the
+            //    database blocks the update, Supabase returns no error and zero
+            //    rows -- stop here, before any journal is posted.
+            const paidAtIso = new Date(payDate + 'T12:00:00').toISOString();
+            const { data: updRows, error: uErr } = await supabaseClient.from('payroll_records')
+                .update({ paid_from: paidFrom, paid_at: paidAtIso })
+                .eq('id', rec.id).select('id');
+            if (uErr) throw uErr;
+            if (!updRows || updRows.length === 0) {
+                throw new Error('The database did not allow the payroll record to be updated (missing UPDATE permission on payroll_records). Nothing was posted. Run 04_payroll_update_policy.sql in the Supabase SQL Editor.');
+            }
+            // 2) Post the journal; undo the record change if it fails.
             const journal = {
                 entry_date: payDate,
                 reference: `PAYROLL-PAID-${b.year}-${String(b.month).padStart(2, '0')}-${employeeId.slice(0, 8)}`,
@@ -1186,20 +1198,18 @@
                 status: 'Posted',
                 created_at: new Date().toISOString()
             };
+            const undoRecord = () => supabaseClient.from('payroll_records').update({ paid_from: '2140' }).eq('id', rec.id);
             const { data: jd, error: jErr } = await supabaseClient.from('journal_entries').insert([journal]).select();
-            if (jErr) throw jErr;
+            if (jErr) { await undoRecord(); throw jErr; }
             const { error: lErr } = await supabaseClient.from('journal_lines').insert([
                 { journal_entry_id: jd[0].id, account_code: '2140', description: `Salary paid: ${b.name}`, debit: amount, credit: 0 },
                 { journal_entry_id: jd[0].id, account_code: paidFrom, description: `Salary paid: ${b.name}`, debit: 0, credit: amount }
             ]);
             if (lErr) {
                 await supabaseClient.from('journal_entries').update({ status: 'Voided' }).eq('id', jd[0].id);
+                await undoRecord();
                 throw lErr;
             }
-            const { error: uErr } = await supabaseClient.from('payroll_records')
-                .update({ paid_from: paidFrom, paid_at: new Date(payDate + 'T12:00:00').toISOString() })
-                .eq('id', rec.id);
-            if (uErr) throw uErr;
 
             document.getElementById('settleOwedModal').remove();
             alert(`✅ ${b.name}: K${formatNumber(amount)} recorded as paid.`);
@@ -1222,4 +1232,3 @@
 
     console.log("✅ Payroll initialized successfully!");
 })();
-
