@@ -115,7 +115,7 @@
                 .lte('start_date', monthEnd).gte('end_date', yearStart),
             supabaseClient.from('employee_attendance').select('employee_id, overtime_hours')
                 .gte('attendance_date', monthStart).lte('attendance_date', monthEnd),
-            supabaseClient.from('payroll_records').select('id, employee_id, net_pay, paid_at, paid_from')
+            supabaseClient.from('payroll_records').select('id, employee_id, gross_salary, paye, napsa, nhima, net_pay, paid_at, paid_from')
                 .eq('pay_period_month', month).eq('pay_period_year', year)
         ]);
 
@@ -238,9 +238,21 @@
                 daysInMonth, month, year,
                 bankName: job.bank_name || '', bankBranch: job.bank_branch || '', bankAccount: job.bank_account_number || ''
             };
-            currentBreakdown[emp.employee_id] = breakdown;
-
+            // A row already recorded for this month shows what was actually
+            // recorded, not a fresh calculation from today's pay settings.
+            // (Otherwise a corrected record -- e.g. an employee with no
+            // NAPSA/NHIMA -- would keep showing the calculated deductions.)
             const alreadyPaid = paidByEmployee[emp.employee_id];
+            if (alreadyPaid && alreadyPaid.net_pay != null) {
+                breakdown.grossSalary = Number(alreadyPaid.gross_salary ?? breakdown.grossSalary);
+                breakdown.paye = Number(alreadyPaid.paye ?? 0);
+                breakdown.napsaEmployee = Number(alreadyPaid.napsa ?? 0);
+                breakdown.napsaEmployer = breakdown.napsaEmployee;
+                breakdown.nhimaEmployee = Number(alreadyPaid.nhima ?? 0);
+                breakdown.nhimaEmployer = breakdown.nhimaEmployee;
+                breakdown.netPay = Number(alreadyPaid.net_pay);
+            }
+            currentBreakdown[emp.employee_id] = breakdown;
 
             return { breakdown, alreadyPaid };
         });
