@@ -1,0 +1,109 @@
+<!-- ============================================ -->
+<!-- MONTH-END RECORDS: bank statements, filed returns, collection notes, accruals & prepayments -->
+<!-- Needs sql/03_month_end_records.sql to have been run once in Supabase. -->
+<!-- ============================================ -->
+<div class="module-view-container" id="monthEndRoot">
+    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:14px; flex-wrap:wrap; gap:10px;">
+        <h3 style="margin:0;"><i class="fa-solid fa-calendar-check"></i> Month-End Records</h3>
+        <span style="font-size:0.8rem; color:#94a3b8; background:#f1f5f9; padding:2px 10px; border-radius:10px;">Bank &middot; Returns &middot; Collections &middot; Accruals</span>
+    </div>
+
+    <div id="meSetupWarning" style="display:none; background:#fef3c7; color:#92400e; padding:12px 16px; border-radius:8px; margin-bottom:14px; font-size:0.9rem;"></div>
+
+    <div style="display:flex; gap:6px; border-bottom:1px solid #e2e8f0; margin-bottom:16px; flex-wrap:wrap;">
+        <button class="btn btn-outline me-tab" data-tab="bank" onclick="meShowTab('bank')">Bank statements</button>
+        <button class="btn btn-outline me-tab" data-tab="returns" onclick="meShowTab('returns')">Filed returns</button>
+        <button class="btn btn-outline me-tab" data-tab="collect" onclick="meShowTab('collect')">Collection notes</button>
+        <button class="btn btn-outline me-tab" data-tab="accr" onclick="meShowTab('accr')">Accruals &amp; prepayments</button>
+    </div>
+
+    <!-- BANK -->
+    <div id="meTab_bank" class="me-pane">
+        <div class="card" style="padding:16px; margin-bottom:14px;">
+            <strong>Enter a bank statement balance</strong>
+            <div style="display:flex; gap:10px; flex-wrap:wrap; margin-top:10px; align-items:end;">
+                <div><label style="font-size:0.8rem;color:#64748b;">Account</label><br>
+                    <select id="meBankAccount" class="form-control"><option value="1121">Bank - ZMW (1121)</option><option value="1120">Bank - USD (1120, enter kwacha value)</option></select></div>
+                <div><label style="font-size:0.8rem;color:#64748b;">Statement date</label><br><input type="date" id="meBankDate" class="form-control"></div>
+                <div><label style="font-size:0.8rem;color:#64748b;">Closing balance on statement (K)</label><br><input type="number" step="0.01" id="meBankBal" class="form-control"></div>
+                <div style="flex:1; min-width:180px;"><label style="font-size:0.8rem;color:#64748b;">Note</label><br><input type="text" id="meBankNote" class="form-control" style="width:100%;"></div>
+                <button class="btn btn-primary" onclick="meSaveBankStatement()"><i class="fa-solid fa-floppy-disk"></i> Save</button>
+            </div>
+        </div>
+        <div class="card" style="padding:0;">
+            <table class="table-minimal" style="width:100%;"><thead><tr>
+                <th style="padding-left:16px;">Date</th><th>Account</th><th style="text-align:right;">Statement</th><th style="text-align:right;">Books</th>
+                <th style="text-align:right;">Items to reconcile</th><th style="text-align:right;">Unexplained</th><th></th></tr></thead>
+                <tbody id="meBankBody"></tbody></table>
+        </div>
+        <div id="meBankDetail" class="card" style="padding:16px; margin-top:14px; display:none;"></div>
+    </div>
+
+    <!-- RETURNS -->
+    <div id="meTab_returns" class="me-pane" style="display:none;">
+        <div class="card" style="padding:16px; margin-bottom:14px;">
+            <strong>Record a filed return</strong>
+            <div style="display:flex; gap:10px; flex-wrap:wrap; margin-top:10px; align-items:end;">
+                <div><label style="font-size:0.8rem;color:#64748b;">Tax</label><br><select id="meRetType" class="form-control"><option>PAYE</option><option>NAPSA</option><option>NHIMA</option><option>VAT</option><option>Other</option></select></div>
+                <div><label style="font-size:0.8rem;color:#64748b;">For month</label><br><input type="month" id="meRetMonth" class="form-control"></div>
+                <div><label style="font-size:0.8rem;color:#64748b;">Amount declared (K)</label><br><input type="number" step="0.01" id="meRetDeclared" class="form-control"></div>
+                <div><label style="font-size:0.8rem;color:#64748b;">Date filed</label><br><input type="date" id="meRetFiled" class="form-control"></div>
+                <div><label style="font-size:0.8rem;color:#64748b;">Receipt no.</label><br><input type="text" id="meRetReceipt" class="form-control"></div>
+                <div><label style="font-size:0.8rem;color:#64748b;">Amount paid (K)</label><br><input type="number" step="0.01" id="meRetPaid" class="form-control"></div>
+                <div><label style="font-size:0.8rem;color:#64748b;">Date paid</label><br><input type="date" id="meRetPaidDate" class="form-control"></div>
+                <button class="btn btn-primary" onclick="meSaveReturn()"><i class="fa-solid fa-floppy-disk"></i> Save</button>
+            </div>
+        </div>
+        <div class="card" style="padding:0;"><table class="table-minimal" style="width:100%;"><thead><tr>
+            <th style="padding-left:16px;">Month</th><th>Tax</th><th style="text-align:right;">Declared</th><th>Filed</th><th>Receipt</th><th style="text-align:right;">Paid</th><th>Paid on</th><th style="text-align:right;">Still to pay</th></tr></thead>
+            <tbody id="meRetBody"></tbody></table></div>
+    </div>
+
+    <!-- COLLECTIONS -->
+    <div id="meTab_collect" class="me-pane" style="display:none;">
+        <div class="card" style="padding:16px; margin-bottom:14px;">
+            <strong>Add a collection note</strong>
+            <div style="display:flex; gap:10px; flex-wrap:wrap; margin-top:10px; align-items:end;">
+                <div><label style="font-size:0.8rem;color:#64748b;">Who</label><br><select id="meColType" class="form-control"><option>NHIMA</option><option>Wholesale customer</option><option>Other</option></select></div>
+                <div><label style="font-size:0.8rem;color:#64748b;">Name</label><br><input type="text" id="meColName" class="form-control"></div>
+                <div><label style="font-size:0.8rem;color:#64748b;">Claim batch / invoice</label><br><input type="text" id="meColRef" class="form-control"></div>
+                <div><label style="font-size:0.8rem;color:#64748b;">Spoke to</label><br><input type="text" id="meColContact" class="form-control"></div>
+                <div style="flex:1; min-width:220px;"><label style="font-size:0.8rem;color:#64748b;">What was said</label><br><input type="text" id="meColSaid" class="form-control" style="width:100%;"></div>
+                <div><label style="font-size:0.8rem;color:#64748b;">Promised (K)</label><br><input type="number" step="0.01" id="meColAmt" class="form-control"></div>
+                <div><label style="font-size:0.8rem;color:#64748b;">Promised date</label><br><input type="date" id="meColPromDate" class="form-control"></div>
+                <div><label style="font-size:0.8rem;color:#64748b;">Follow up on</label><br><input type="date" id="meColNext" class="form-control"></div>
+                <button class="btn btn-primary" onclick="meSaveNote()"><i class="fa-solid fa-floppy-disk"></i> Save</button>
+            </div>
+        </div>
+        <div class="card" style="padding:0;"><table class="table-minimal" style="width:100%;"><thead><tr>
+            <th style="padding-left:16px;">Date</th><th>Who</th><th>Reference</th><th>Spoke to</th><th>What was said</th><th style="text-align:right;">Promised</th><th>By</th><th>Follow up</th><th></th></tr></thead>
+            <tbody id="meColBody"></tbody></table></div>
+    </div>
+
+    <!-- ACCRUALS -->
+    <div id="meTab_accr" class="me-pane" style="display:none;">
+        <div class="card" style="padding:16px; margin-bottom:14px;">
+            <strong>Add a prepayment or accrual</strong>
+            <div style="font-size:0.78rem; color:#64748b; margin:4px 0 10px;">Prepayment = paid now for several months (e.g. a year's insurance): spread to expense month by month. Accrual = cost belongs to a month but is not yet billed/paid: booked to expense now and cleared when paid.</div>
+            <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:end;">
+                <div><label style="font-size:0.8rem;color:#64748b;">Type</label><br><select id="meAcKind" class="form-control"><option>Prepayment</option><option>Accrual</option></select></div>
+                <div style="flex:1; min-width:200px;"><label style="font-size:0.8rem;color:#64748b;">Description</label><br><input type="text" id="meAcDesc" class="form-control" style="width:100%;"></div>
+                <div><label style="font-size:0.8rem;color:#64748b;">Expense account</label><br><select id="meAcExp" class="form-control"></select></div>
+                <div><label style="font-size:0.8rem;color:#64748b;">Total (K)</label><br><input type="number" step="0.01" id="meAcAmt" class="form-control"></div>
+                <div><label style="font-size:0.8rem;color:#64748b;">First month</label><br><input type="month" id="meAcStart" class="form-control"></div>
+                <div><label style="font-size:0.8rem;color:#64748b;">Months</label><br><input type="number" min="1" max="60" value="1" id="meAcMonths" class="form-control" style="width:80px;"></div>
+                <div><label style="font-size:0.8rem;color:#64748b;">Paid from (prepayment)</label><br><select id="meAcFrom" class="form-control"><option value="1121">Bank (ZMW)</option><option value="1111">Cash in Hand</option><option value="">Not posted - already in books</option></select></div>
+                <button class="btn btn-primary" onclick="meSaveAccrual()"><i class="fa-solid fa-floppy-disk"></i> Save &amp; post</button>
+            </div>
+        </div>
+        <div style="display:flex; gap:10px; align-items:center; margin-bottom:10px; flex-wrap:wrap;">
+            <label style="font-size:0.85rem;color:#475569;">Release prepayments up to month:</label>
+            <input type="month" id="meRelMonth" class="form-control">
+            <button class="btn btn-success" onclick="meRunReleases()"><i class="fa-solid fa-play"></i> Post monthly releases</button>
+            <span style="font-size:0.78rem;color:#94a3b8;">Posts one journal per prepayment per month, dated month-end, and never twice for the same month.</span>
+        </div>
+        <div class="card" style="padding:0;"><table class="table-minimal" style="width:100%;"><thead><tr>
+            <th style="padding-left:16px;">Type</th><th>Description</th><th>Expense</th><th style="text-align:right;">Total</th><th>From</th><th>Months</th><th style="text-align:right;">Released</th><th style="text-align:right;">Left</th><th>Status</th><th></th></tr></thead>
+            <tbody id="meAcBody"></tbody></table></div>
+    </div>
+</div>

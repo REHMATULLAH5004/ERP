@@ -71,8 +71,17 @@
         // already used by Account > Cash & Bank and Fixed Assets, so this
         // never creates a duplicate.
         { code: '1120', name: 'Bank - USD', type: 'Asset', category: 'Current Asset', normal_balance: 'Debit' },
-        { code: '2001', name: 'Accounts Payable', type: 'Liability', category: 'Current Liability', normal_balance: 'Credit' }
+        { code: '2001', name: 'Accounts Payable', type: 'Liability', category: 'Current Liability', normal_balance: 'Credit' },
+        // Exchange gain / loss -- posted automatically when a USD invoice is
+        // paid at a different rate from the one it was booked at.
+        { code: '4910', name: 'Foreign Exchange Gain', type: 'Income', category: 'Other Income', normal_balance: 'Credit' },
+        { code: '6910', name: 'Foreign Exchange Loss', type: 'Expense', category: 'Operating Expense', normal_balance: 'Debit' }
     ];
+
+    // Rate used when the supplier's opening balance was loaded into the books.
+    // An opening balance has no invoice rate of its own, so any payment made at
+    // a different rate shows the difference as exchange gain/loss.
+    const OPENING_BALANCE_RATE = 19.50;
 
     // 🔥 PERF FIX: this used to run on every single save -- and twice per
     // save at that, since createPaymentGLEntry() called it directly (via
@@ -157,77 +166,48 @@
                 cash_zmw: accountMap['cash_in_hand_zmw'] || '1111',
                 bank_zmw: accountMap['bank_zmw'] || '1121',
                 bank_usd: accountMap['bank_usd'] || '1120',
-                accounts_payable: accountMap['accounts_payable'] || '2001'
+                accounts_payable: accountMap['accounts_payable'] || '2001',
+                fx_gain: '4910',
+                fx_loss: '6910'
             };
         } catch (error) {
             console.error('Error fetching account codes:', error);
-            return { cash_zmw: '1111', bank_zmw: '1121', bank_usd: '1120', accounts_payable: '2001' };
+            return { cash_zmw: '1111', bank_zmw: '1121', bank_usd: '1120', accounts_payable: '2001', fx_gain: '4910', fx_loss: '6910' };
         }
     }
 
     // ============================================
-    // 🔥 PAYMENT GL ENTRY -- Debit Accounts Payable, Credit Cash in Hand,
-    // Bank (ZMW), or -- 🔥 ADDED -- Bank (USD) when the payment is made
-    // directly out of the USD bank account.
-    //
-    // Two distinct paths:
-    //  - method 'Cash' / 'Bank Transfer': settled in ZMW cash, exactly as
-    //    before -- if the payable being cleared was USD-denominated, the
-    //    USD portion is converted to ZMW at `exchangeRate` first, matching
-    //    the original spec ("Payables get settled by cash or bank —
-    //    always in ZMW, even if the original payable was in USD").
-    //  - method 'Bank Transfer USD': 🔥 ADDED -- settled directly out of
-    //    the USD bank account, no conversion at all. Both lines of this
-    //    journal entry are posted in raw USD numbers (matching how
-    //    Account > Cash & Bank already posts to this same account, e.g.
-    //    its Opening Balance entries) rather than converting to ZMW --
-    //    this is the whole point: no exchange rate is needed or asked for
-    //    on this path.
+    // PAYMENT GL ENTRY (kwacha only)
+    // Dr Accounts Payable (value it was booked at)
+    // Dr Exchange Loss / Cr Exchange Gain (booked value vs value paid)
+    // Cr Cash in Hand, Bank (ZMW) or Bank (USD, kwacha value)
+    // USD invoices are always converted at the payment rate entered on the
+    // form, so the USD bank account is kept in kwacha like everything else.
     // ============================================
-    async function createPaymentGLEntry(paymentNumber, paymentDate, method, amountUsd, amountZmw, exchangeRate, payCurrency) {
+    async function createPaymentGLEntry(paymentNumber, paymentDate, method, amountUsd, amountZmw, exchangeRate, bookedZmw) {
+        // The books are kept in kwacha only. Whatever was paid (ZMW, or USD
+        // converted at the payment rate) is posted in kwacha:
+        //   Dr Accounts Payable   (value the invoice was booked at)
+        //   Dr/Cr Exchange loss/gain  (booked value vs. value paid)
+        //   Cr Cash / Bank        (value paid)
+        // Returns true when the journal was saved, false when it was not.
         try {
             const accountCodes = await getAccountCodesFromChartOfAccounts();
-            const debitAccount = accountCodes.accounts_payable;
 
-            if (payCurrency === 'USD') {
-                // Direct USD payment -- amountUsd is the raw amount that
-                // actually left the USD bank account, no conversion.
-                if (amountUsd <= 0) return;
+            const paidZmw = round2(amountZmw + (amountUsd * (exchangeRate || 1)));
+            if (paidZmw <= 0) return true;
+            const booked = (bookedZmw === undefined || bookedZmw === null) ? paidZmw : round2(bookedZmw);
+            const fx = round2(paidZmw - booked);   // + = we paid more than booked (loss), - = gain
 
-                const journal = {
-                    entry_date: paymentDate,
-                    reference: paymentNumber,
-                    description: `Supplier payment - ${paymentNumber} (USD ${formatNumber(amountUsd)}, paid directly from USD bank)`,
-                    journal_number: `PAY-${new Date().getFullYear()}-${String(Math.floor(Math.random() * 10000)).padStart(4, '0')}`,
-                    status: 'Posted',
-                    created_at: new Date().toISOString()
-                };
-
-                const { data: journalData, error: jError } = await supabaseClient
-                    .from('journal_entries')
-                    .insert([journal])
-                    .select();
-                if (jError) throw jError;
-
-                await supabaseClient.from('journal_lines').insert([
-                    { journal_entry_id: journalData[0].id, account_code: debitAccount, description: `Clearing payable - ${paymentNumber}`, debit: amountUsd, credit: 0 },
-                    { journal_entry_id: journalData[0].id, account_code: accountCodes.bank_usd, description: `USD bank payment: ${paymentNumber}`, debit: 0, credit: amountUsd }
-                ]);
-
-                console.log(`✅ Payment GL entry created for ${paymentNumber}: $${amountUsd.toFixed(2)} (USD bank, direct)`);
-                return;
+            let creditAccount = accountCodes.cash_zmw;
+            let creditDescription = `Cash payment: ${paymentNumber}`;
+            if (method === 'Bank Transfer') {
+                creditAccount = accountCodes.bank_zmw;
+                creditDescription = `Bank payment: ${paymentNumber}`;
+            } else if (method === 'Bank Transfer USD') {
+                creditAccount = accountCodes.bank_usd;
+                creditDescription = `USD bank payment (kwacha value): ${paymentNumber}`;
             }
-
-            // Convert the USD portion (if any) to ZMW for the ledger --
-            // cash/bank on hand is always ZMW, regardless of which
-            // currency bucket the paid-down invoice was in.
-            const zmwTotal = amountZmw + (amountUsd * (exchangeRate || 1));
-            if (zmwTotal <= 0) return;
-
-            const creditAccount = method === 'Bank Transfer' ? accountCodes.bank_zmw : accountCodes.cash_zmw;
-            const creditDescription = method === 'Bank Transfer'
-                ? `Bank payment: ${paymentNumber}`
-                : `Cash payment: ${paymentNumber}`;
 
             const journal = {
                 entry_date: paymentDate,
@@ -243,16 +223,44 @@
                 .insert([journal])
                 .select();
             if (jError) throw jError;
+            const jid = journalData[0].id;
 
-            await supabaseClient.from('journal_lines').insert([
-                { journal_entry_id: journalData[0].id, account_code: debitAccount, description: `Clearing payable - ${paymentNumber}`, debit: zmwTotal, credit: 0 },
-                { journal_entry_id: journalData[0].id, account_code: creditAccount, description: creditDescription, debit: 0, credit: zmwTotal }
-            ]);
+            const lines = [
+                { journal_entry_id: jid, account_code: accountCodes.accounts_payable, description: `Clearing payable - ${paymentNumber}`, debit: booked, credit: 0 }
+            ];
+            if (fx > 0.004) {
+                lines.push({ journal_entry_id: jid, account_code: accountCodes.fx_loss, description: `Exchange loss - ${paymentNumber}`, debit: fx, credit: 0 });
+            } else if (fx < -0.004) {
+                lines.push({ journal_entry_id: jid, account_code: accountCodes.fx_gain, description: `Exchange gain - ${paymentNumber}`, debit: 0, credit: -fx });
+            }
+            lines.push({ journal_entry_id: jid, account_code: creditAccount, description: creditDescription, debit: 0, credit: paidZmw });
 
-            console.log(`✅ Payment GL entry created for ${paymentNumber}: ZK${zmwTotal.toFixed(2)} (${method})`);
+            const { error: lError } = await supabaseClient.from('journal_lines').insert(lines);
+            if (lError) {
+                // Do not leave a journal with no lines behind.
+                await supabaseClient.from('journal_entries').update({ status: 'Voided' }).eq('id', jid);
+                throw lError;
+            }
+
+            console.log(`✅ Payment GL entry created for ${paymentNumber}: ZK${paidZmw.toFixed(2)} (${method}), FX ${fx.toFixed(2)}`);
+            return true;
         } catch (error) {
             console.error('Error creating payment GL entry:', error);
-            showToast('Payment saved, but the accounting entry failed -- please check manually.', 'warning');
+            return false;
+        }
+    }
+
+    function round2(n) { return Math.round((Number(n) || 0) * 100) / 100; }
+
+    // How much cash is physically in the till according to the books.
+    async function getCashInHandBalance() {
+        try {
+            const { data, error } = await supabaseClient.rpc('account_balance', { p_code: '1111' });
+            if (error) throw error;
+            return Number(data) || 0;
+        } catch (e) {
+            console.warn('Could not read cash balance:', e);
+            return null;
         }
     }
 
@@ -586,7 +594,7 @@
         if (usdBankOption && methodSelect) {
             usdBankOption.style.display = settlingCurrency === 'USD' ? '' : 'none';
             if (settlingCurrency !== 'USD' && methodSelect.value === 'Bank Transfer USD') {
-                methodSelect.value = 'Cash';
+                methodSelect.value = 'Bank Transfer';
             }
         }
 
@@ -612,6 +620,7 @@
                                 data-amount="${remaining}"
                                 data-currency="${settlingCurrency}"
                                 data-is-opening="true"
+                                data-booked-rate="${settlingCurrency === 'USD' ? OPENING_BALANCE_RATE : 1}"
                                 onchange="onPaymentInvoiceToggle(this)">
                         </div>
                         <div class="info">
@@ -659,6 +668,7 @@
                         currency: settlingCurrency,
                         total: remaining,
                         original_total: sp.total_amount,
+                        booked_rate: parseFloat(sp.exchange_rate) || 0,
                         paid: paidAmount,
                         date: sp.invoice_date || sp.created_at
                     };
@@ -697,6 +707,7 @@
                             data-amount="${item.total}"
                             data-currency="${settlingCurrency}"
                             data-is-opening="false"
+                            data-booked-rate="${settlingCurrency === 'USD' ? (item.booked_rate || 0) : 1}"
                             onchange="onPaymentInvoiceToggle(this)">
                     </div>
                     <div class="info">
@@ -728,7 +739,7 @@
         // the rate field at all). 🔥 ADDED: never shown at all when paying
         // directly from the USD bank account -- no conversion needed.
         const payingDirectlyInUsd = document.getElementById('paymentMethod')?.value === 'Bank Transfer USD';
-        exchangeGroup.style.display = (settlingCurrency === 'USD' && !payingDirectlyInUsd) ? 'block' : 'none';
+        exchangeGroup.style.display = (settlingCurrency === 'USD') ? 'block' : 'none';
 
         summary.style.display = 'block';
         updatePaymentSummary();
@@ -799,7 +810,7 @@
 
         if (payingDirectlyInUsd) {
             // Amount due IS the USD total selected -- nothing to convert.
-            document.getElementById('selectedTotal').textContent = `Total Selected: $${formatNumber(totalSelected)}`;
+            document.getElementById('selectedTotal').textContent = `Total Selected: $${formatNumber(totalSelected)} = ZK${formatNumber(totalSelected * exchangeRate)} at rate ${exchangeRate} (booked in kwacha)`;
 
             amountLabel.textContent = 'Total to Pay (USD):';
             // 🔥 CHANGED: this field is now read-only and purely reflects
@@ -828,7 +839,7 @@
         // loadInvoicesForSupplier's own, method-aware version) could
         // re-show the rate field even when paying directly in USD.
         const exchangeGroup = document.getElementById('exchangeRateGroup');
-        exchangeGroup.style.display = (settlingCurrency === 'USD' && !payingDirectlyInUsd) ? 'block' : 'none';
+        exchangeGroup.style.display = (settlingCurrency === 'USD') ? 'block' : 'none';
 
         // 🔥 CHANGED: live partial-payment indicator, now driven by the
         // per-invoice Pay Amount boxes rather than one overall figure --
@@ -1756,7 +1767,7 @@
         document.getElementById('paymentDate').value = new Date().toISOString().split('T')[0];
         document.getElementById('paymentCurrency').value = 'USD';
         document.getElementById('paymentAmount').value = '';
-        document.getElementById('paymentMethod').value = 'Cash';
+        document.getElementById('paymentMethod').value = 'Bank Transfer';
         document.getElementById('paymentReference').value = '';
         document.getElementById('paymentNotes').value = '';
         // 🔥 ADDED: defaults from the Dashboard's shared exchange rate
@@ -1884,8 +1895,8 @@
         // ZMW cash/bank -- not needed at all when paying directly out of
         // the USD bank account (payingDirectlyInUsd), since nothing is
         // being converted.
-        if (settlingCurrency === 'USD' && !payingDirectlyInUsd && (!exchangeRate || exchangeRate <= 0)) {
-            showToast('Please enter a valid exchange rate to settle USD invoices with ZMW cash', 'error');
+        if (settlingCurrency === 'USD' && (!exchangeRate || exchangeRate <= 0)) {
+            showToast('Please enter the exchange rate used for this payment', 'error');
             return;
         }
 
@@ -1910,7 +1921,8 @@
                 poId: cb.dataset.poId || null,
                 remaining: remaining,
                 payAmount: payAmount,
-                isOpening: cb.dataset.isOpening === 'true'
+                isOpening: cb.dataset.isOpening === 'true',
+                bookedRate: parseFloat(cb.dataset.bookedRate) || 0
             });
         });
 
@@ -1934,9 +1946,29 @@
         // invoices paid via ZMW cash" needs converting this into the ZMW
         // amount actually handed over.
         const amountInSelectedCurrency = itemsToPay.reduce((sum, item) => sum + item.payAmount, 0);
-        const amountEntered = (settlingCurrency === 'USD' && !payingDirectlyInUsd)
-            ? amountInSelectedCurrency * exchangeRate
+        // Always the kwacha value of what is paid (USD x payment rate).
+        const amountEntered = settlingCurrency === 'USD'
+            ? round2(amountInSelectedCurrency * exchangeRate)
             : amountInSelectedCurrency;
+
+        // Value the invoices were booked at in the ledger (for exchange gain/loss)
+        const bookedZmw = itemsToPay.reduce((sum, item) => {
+            if (settlingCurrency !== 'USD') return sum + item.payAmount;
+            const rate = item.bookedRate > 0 ? item.bookedRate : exchangeRate;
+            return sum + item.payAmount * rate;
+        }, 0);
+
+        // Cash safety: never pay out more cash than the books say is in the till.
+        if (method === 'Cash') {
+            const cashBalance = await getCashInHandBalance();
+            if (cashBalance !== null && amountEntered > cashBalance + 0.005) {
+                const ok = confirm(
+                    `The books show only ZK${formatNumber(cashBalance)} cash in hand, but this payment is ZK${formatNumber(amountEntered)}.\n\n` +
+                    `Paying this from cash would make cash negative. If it was paid from the bank, press Cancel and choose "Bank Account (ZMW)".\n\n` +
+                    `Press OK only if it really came out of the cash drawer.`);
+                if (!ok) return;
+            }
+        }
 
         // FIX: single-currency distribution -- no more bidirectional
         // USD<->ZMW blending. Exactly one of these two is non-zero.
@@ -1956,8 +1988,8 @@
             // for a rate on this path. This does NOT affect the actual
             // accounting: the GL entry and the invoice settlement below
             // both still use the real, raw USD amount.
-            const displayZmwRate = payingDirectlyInUsd ? await getSharedExchangeRate() : exchangeRate;
-            const displayAmount = payingDirectlyInUsd ? amountEntered * displayZmwRate : amountEntered;
+            const displayZmwRate = exchangeRate;
+            const displayAmount = amountEntered;
 
             const paymentData = {
                 supplier_id: supplierId,
@@ -2084,7 +2116,10 @@
             // Cash in Hand, Bank (ZMW), or -- 🔥 ADDED -- Bank (USD) when
             // paying directly. This module had no GL integration at all
             // before this.
-            await createPaymentGLEntry(paymentNumber, paymentDate, method, amountUsd, amountZmw, exchangeRate, payingDirectlyInUsd ? 'USD' : 'ZMW');
+            const glOk = await createPaymentGLEntry(paymentNumber, paymentDate, method, amountUsd, amountZmw, exchangeRate, bookedZmw);
+            if (!glOk) {
+                alert('The payment ' + paymentNumber + ' was saved, but the accounting entry FAILED. Tell the accountant now so it is posted by hand - otherwise the books will not match.');
+            }
 
             // 🔥 ADDED: explicit partial-vs-full confirmation, in the
             // selected invoice(s)' own currency -- so it's never a silent
@@ -2101,7 +2136,9 @@
             // was actually entered), compared against what was entered.
             const totalRemainingSelected = itemsToPay.reduce((sum, item) => sum + item.remaining, 0);
             const shortfallInSelectedCurrency = totalRemainingSelected - amountInSelectedCurrency;
-            const paidSummary = `${payingDirectlyInUsd ? '$' : 'ZK'}${formatNumber(amountEntered)} paid`;
+            const paidSummary = payingDirectlyInUsd
+                ? `$${formatNumber(amountInSelectedCurrency)} (ZK${formatNumber(amountEntered)}) paid`
+                : `ZK${formatNumber(amountEntered)} paid`;
             const toastMessage = shortfallInSelectedCurrency > 0.01
                 ? `Partial payment recorded! ${paidSummary}. ${invoiceSymbol}${formatNumber(shortfallInSelectedCurrency)} still due on the selected invoice(s).`
                 : `Payment recorded successfully! ${paidSummary} -- selected invoice(s) fully cleared.`;

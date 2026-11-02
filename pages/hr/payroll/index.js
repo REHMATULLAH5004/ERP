@@ -31,7 +31,9 @@
         { code: '2160', name: 'NAPSA Payable', type: 'Liability', category: 'Current Liability', normal_balance: 'Credit' },
         { code: '2170', name: 'NHIMA Payable', type: 'Liability', category: 'Current Liability', normal_balance: 'Credit' },
         { code: '1111', name: 'Cash in Hand (ZMW)', type: 'Asset', category: 'Current Asset', normal_balance: 'Debit' },
-        { code: '1121', name: 'Bank - ZMW', type: 'Asset', category: 'Current Asset', normal_balance: 'Debit' }
+        { code: '1121', name: 'Bank - ZMW', type: 'Asset', category: 'Current Asset', normal_balance: 'Debit' },
+        // Salary earned but not yet paid out (e.g. an employee paid later)
+        { code: '2140', name: 'Salaries Payable', type: 'Liability', category: 'Current Liability', normal_balance: 'Credit' }
     ];
 
     async function ensureChartOfAccounts() {
@@ -113,7 +115,7 @@
                 .lte('start_date', monthEnd).gte('end_date', yearStart),
             supabaseClient.from('employee_attendance').select('employee_id, overtime_hours')
                 .gte('attendance_date', monthStart).lte('attendance_date', monthEnd),
-            supabaseClient.from('payroll_records').select('employee_id, net_pay, paid_at')
+            supabaseClient.from('payroll_records').select('id, employee_id, net_pay, paid_at, paid_from')
                 .eq('pay_period_month', month).eq('pay_period_year', year)
         ]);
 
@@ -303,7 +305,10 @@
                 <td style="text-align:right;">K${formatNumber(b.nhimaEmployee)}</td>
                 <td style="text-align:right; font-weight:700; color:#059669;">K${formatNumber(b.netPay)}</td>
                 <td style="text-align:center; padding-right:20px;">
-                    ${alreadyPaid
+                    ${alreadyPaid && alreadyPaid.paid_from === '2140'
+                        ? `<span style="background:#fef3c7;color:#92400e;padding:3px 10px;border-radius:10px;font-size:0.75rem;"><i class="fa-solid fa-hourglass-half"></i> Owed</span>
+                           <button class="btn btn-success btn-sm" style="margin-left:4px;" onclick="openSettleOwed('${b.employeeId}')" title="Record that the salary has now been paid">Settle</button>`
+                        : alreadyPaid
                         ? `<span style="background:#dcfce7;color:#15803d;padding:3px 10px;border-radius:10px;font-size:0.75rem;"><i class="fa-solid fa-check"></i> Paid</span>
                            <button class="btn btn-outline btn-sm" style="margin-left:4px;" onclick="printPayslip('${b.employeeId}')" title="Print payslip"><i class="fa-solid fa-print"></i></button>`
                         : canPay
@@ -329,6 +334,12 @@
     // (many employees, one popup, one slip per printed page). Keeping
     // this in one place means the two print paths can never drift apart
     // in what a payslip actually shows.
+    function paidFromText(code) {
+        if (code === '1121') return 'Bank (ZMW)';
+        if (code === '2140') return 'NOT YET PAID (owed to employee)';
+        return 'Cash in Hand (ZMW)';
+    }
+
     function buildPayslipBlockHtml(emp, r, advanceDeducted, netBeforeAdvance, monthLabel, paidFromLabel) {
         return `
             <h1>Payslip</h1>
@@ -389,7 +400,7 @@
         const netBeforeAdvance = r.net_pay + advanceDeducted;
 
         const monthLabel = new Date(r.pay_period_year, r.pay_period_month - 1, 1).toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
-        const paidFromLabel = r.paid_from === '1121' ? 'Bank (ZMW)' : 'Cash in Hand (ZMW)';
+        const paidFromLabel = paidFromText(r.paid_from);
 
         const printWindow = window.open('', '_blank', 'width=700,height=800');
         if (!printWindow) { alert('Please allow popups to print.'); return; }
@@ -467,7 +478,7 @@
         }
 
         const monthLabel = new Date(year, month - 1, 1).toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
-        const paidFromLabel = code => code === '1121' ? 'Bank (ZMW)' : 'Cash in Hand (ZMW)';
+        const paidFromLabel = code => paidFromText(code);
 
         // Keep register + slips in the same stable order as the payroll table.
         records.sort((a, b) => (empById[a.employee_id]?.first_name || '').localeCompare(empById[b.employee_id]?.first_name || ''));
@@ -954,6 +965,8 @@
         }
 
         const paidFrom = document.getElementById('payFromAccount').value;
+        if (!paidFrom) { alert('Please choose where the salary is paid from.'); return; }
+        if (!(await cashIsEnough(paidFrom, b.netPay - advanceDeduction))) return;
         const btn = document.getElementById('confirmPayBtn');
         btn.disabled = true;
         btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Processing...';
@@ -964,7 +977,7 @@
             if (!result.success) throw result.error;
 
             document.getElementById('payConfirmModal').style.display = 'none';
-            alert(`✅ ${b.name} paid K${formatNumber(result.cashPortion)} net${advanceDeduction > 0 ? ` (K${formatNumber(advanceDeduction)} recovered from advance)` : ''}.`);
+            alert(`✅ ${b.name} ${paidFrom === '2140' ? 'recorded as OWED (Salaries Payable)' : 'paid'} K${formatNumber(result.cashPortion)} net${advanceDeduction > 0 ? ` (K${formatNumber(advanceDeduction)} recovered from advance)` : ''}.`);
             await window.calculatePayroll();
             await loadStatutoryPayments();
         } catch (error) {
@@ -1029,6 +1042,9 @@
         }
 
         const paidFrom = document.getElementById('payAllFromAccount').value;
+        if (!paidFrom) { alert('Please choose where the salaries are paid from.'); return; }
+        const totalToPay = employeeIds.reduce((sum, id) => sum + (currentBreakdown[id]?.netPay || 0), 0);
+        if (!(await cashIsEnough(paidFrom, totalToPay))) return;
         const confirmBtn = document.getElementById('confirmPayAllBtn');
         const cancelBtn = document.getElementById('payAllCancelBtn');
         const progress = document.getElementById('payAllProgress');
@@ -1059,7 +1075,7 @@
         cancelBtn.disabled = false;
         progress.style.display = 'none';
 
-        let summary = `✅ Paid ${succeeded.length} of ${employeeIds.length} employee(s).`;
+        let summary = `✅ ${paidFrom === '2140' ? 'Recorded as owed' : 'Paid'} ${succeeded.length} of ${employeeIds.length} employee(s).`;
         if (failed.length > 0) {
             summary += `\n\n⚠️ ${failed.length} failed:\n` + failed.join('\n');
         }
@@ -1078,6 +1094,109 @@
             // attempted this run are now on record as paid."
             const idsToPrint = employeeIds.filter(id => paidByEmployee[id]);
             await window.printAllPayslips(idsToPrint);
+        }
+    };
+
+    // ============================================
+    // CASH SAFETY + OWED SALARY SETTLEMENT
+    // ============================================
+    async function getAccountBalance(code) {
+        try {
+            const { data, error } = await supabaseClient.rpc('account_balance', { p_code: code });
+            if (error) throw error;
+            return Number(data) || 0;
+        } catch (e) {
+            console.warn('Could not read balance for', code, e);
+            return null;
+        }
+    }
+
+    // Returns true when it is fine to go ahead.
+    async function cashIsEnough(paidFrom, amount) {
+        if (paidFrom !== '1111') return true;
+        const bal = await getAccountBalance('1111');
+        if (bal === null || amount <= bal + 0.005) return true;
+        return confirm(
+            `The books show only K${formatNumber(bal)} cash in hand, but you are paying K${formatNumber(amount)} from cash.\n\n` +
+            `If the salary was paid from the bank, press Cancel and choose Bank (ZMW).\n\nPress OK only if it really came out of the cash drawer.`);
+    }
+
+    // Pay a salary that was booked as owed (Salaries Payable). Clears the
+    // liability only -- the salary cost was already booked when it was owed.
+    window.openSettleOwed = function (employeeId) {
+        const rec = paidByEmployee[employeeId];
+        const b = currentBreakdown && currentBreakdown[employeeId];
+        if (!rec || rec.paid_from !== '2140' || !b) return;
+        let modal = document.getElementById('settleOwedModal');
+        if (modal) modal.remove();
+        modal = document.createElement('div');
+        modal.id = 'settleOwedModal';
+        modal.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(15,23,42,0.6);z-index:1000;display:flex;justify-content:center;align-items:center;';
+        modal.innerHTML = `
+            <div style="background:white;padding:25px;border-radius:12px;width:90%;max-width:440px;">
+                <h4 style="margin:0 0 12px;"><i class="fa-solid fa-money-check-dollar" style="color:#059669;"></i> Settle owed salary - ${b.name}</h4>
+                <p style="font-size:0.85rem;color:#475569;">Owed: <strong>K${formatNumber(rec.net_pay)}</strong>. This only records the payment - the salary cost is not booked a second time.</p>
+                <label style="display:block;font-weight:500;color:#475569;margin:10px 0 4px;font-size:0.85rem;">Paid from *</label>
+                <select id="settleOwedFrom" style="width:100%;padding:8px 10px;border:1px solid #e2e8f0;border-radius:6px;">
+                    <option value="1121">Bank (ZMW)</option>
+                    <option value="1111">Cash in Hand (ZMW)</option>
+                </select>
+                <label style="display:block;font-weight:500;color:#475569;margin:10px 0 4px;font-size:0.85rem;">Date paid *</label>
+                <input type="date" id="settleOwedDate" value="${new Date().toISOString().split('T')[0]}" style="width:100%;padding:8px 10px;border:1px solid #e2e8f0;border-radius:6px;">
+                <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:18px;">
+                    <button type="button" onclick="document.getElementById('settleOwedModal').remove()" style="background:white;border:1px solid #e2e8f0;padding:8px 20px;border-radius:6px;cursor:pointer;">Cancel</button>
+                    <button id="settleOwedBtn" class="btn btn-success" onclick="confirmSettleOwed('${employeeId}')"><i class="fa-solid fa-check"></i> Confirm</button>
+                </div>
+            </div>`;
+        document.body.appendChild(modal);
+    };
+
+    window.confirmSettleOwed = async function (employeeId) {
+        const rec = paidByEmployee[employeeId];
+        const b = currentBreakdown && currentBreakdown[employeeId];
+        if (!rec || !b) return;
+        const paidFrom = document.getElementById('settleOwedFrom').value;
+        const payDate = document.getElementById('settleOwedDate').value;
+        if (!payDate) { alert('Please choose the date paid.'); return; }
+        const amount = Number(rec.net_pay) || 0;
+        if (amount <= 0) { alert('Nothing owed.'); return; }
+        if (!(await cashIsEnough(paidFrom, amount))) return;
+
+        const btn = document.getElementById('settleOwedBtn');
+        btn.disabled = true;
+        try {
+            await ensureChartOfAccounts();
+            const journal = {
+                entry_date: payDate,
+                reference: `PAYROLL-PAID-${b.year}-${String(b.month).padStart(2, '0')}-${employeeId.slice(0, 8)}`,
+                description: `Salary paid (was owed): ${b.name} - ${b.year}-${String(b.month).padStart(2, '0')}`,
+                journal_number: `PR-${b.year}-${String(Math.floor(Math.random() * 10000)).padStart(4, '0')}`,
+                status: 'Posted',
+                created_at: new Date().toISOString()
+            };
+            const { data: jd, error: jErr } = await supabaseClient.from('journal_entries').insert([journal]).select();
+            if (jErr) throw jErr;
+            const { error: lErr } = await supabaseClient.from('journal_lines').insert([
+                { journal_entry_id: jd[0].id, account_code: '2140', description: `Salary paid: ${b.name}`, debit: amount, credit: 0 },
+                { journal_entry_id: jd[0].id, account_code: paidFrom, description: `Salary paid: ${b.name}`, debit: 0, credit: amount }
+            ]);
+            if (lErr) {
+                await supabaseClient.from('journal_entries').update({ status: 'Voided' }).eq('id', jd[0].id);
+                throw lErr;
+            }
+            const { error: uErr } = await supabaseClient.from('payroll_records')
+                .update({ paid_from: paidFrom, paid_at: new Date(payDate + 'T12:00:00').toISOString() })
+                .eq('id', rec.id);
+            if (uErr) throw uErr;
+
+            document.getElementById('settleOwedModal').remove();
+            alert(`✅ ${b.name}: K${formatNumber(amount)} recorded as paid.`);
+            await window.calculatePayroll();
+            await loadStatutoryPayments();
+        } catch (error) {
+            console.error('Settle failed:', error);
+            alert('Could not record the payment: ' + error.message);
+            btn.disabled = false;
         }
     };
 

@@ -443,10 +443,11 @@
         // this account was never touched.
         const { data: payments } = await supabaseClient
             .from('payments')
-            .select('payment_method, amount_usd')
+            .select('payment_method, amount')
             .eq('payment_method', 'Bank Transfer USD')
             .gte('payment_date', reportDate).lte('payment_date', reportDate);
-        (payments || []).forEach(p => { outward.paidUsd += p.amount_usd || 0; });
+        // The books are in kwacha, so the USD bank account is shown in kwacha too.
+        (payments || []).forEach(p => { outward.paidUsd += p.amount || 0; });
 
         return { inward, outward };
     }
@@ -742,20 +743,26 @@
         return (items || []).map(i => [i.label, i.amount]);
     }
 
-    function renderAccountCard(title, icon, color, opening, inwardTotal, outwardTotal, closing, inwardBreakdown, outwardBreakdown, symbol) {
+    // Dollar equivalent shown in brackets next to kwacha amounts of the USD bank account
+    let usdDisplayRate = 0;
+
+    function renderAccountCard(title, icon, color, opening, inwardTotal, outwardTotal, closing, inwardBreakdown, outwardBreakdown, symbol, showUsdRate) {
         const s = symbol || 'K';
+        const usd = (v) => (showUsdRate && usdDisplayRate > 0)
+            ? ` <span style="font-weight:400; color:#64748b; font-size:0.85em;">($${formatNumber(v / usdDisplayRate)} @ ${usdDisplayRate})</span>`
+            : '';
         return `
             <div class="card" style="padding:20px;">
                 <h4 style="margin:0 0 15px 0;"><i class="fa-solid ${icon}" style="color:${color};"></i> ${title}</h4>
-                <div style="display:flex; justify-content:space-between; padding:4px 0;"><span>Opening</span><span>${s}${formatNumber(opening)}</span></div>
+                <div style="display:flex; justify-content:space-between; padding:4px 0;"><span>Opening</span><span>${s}${formatNumber(opening)}${usd(opening)}</span></div>
 
-                <div style="display:flex; justify-content:space-between; padding:4px 0; font-weight:600; color:#059669; margin-top:6px;"><span>Inward (+)</span><span>${s}${formatNumber(inwardTotal)}</span></div>
+                <div style="display:flex; justify-content:space-between; padding:4px 0; font-weight:600; color:#059669; margin-top:6px;"><span>Inward (+)</span><span>${s}${formatNumber(inwardTotal)}${usd(inwardTotal)}</span></div>
                 ${inwardBreakdown}
 
-                <div style="display:flex; justify-content:space-between; padding:4px 0; font-weight:600; color:#dc2626; margin-top:6px;"><span>Outward (-)</span><span>${s}${formatNumber(outwardTotal)}</span></div>
+                <div style="display:flex; justify-content:space-between; padding:4px 0; font-weight:600; color:#dc2626; margin-top:6px;"><span>Outward (-)</span><span>${s}${formatNumber(outwardTotal)}${usd(outwardTotal)}</span></div>
                 ${outwardBreakdown}
 
-                <div style="display:flex; justify-content:space-between; padding:6px 0; margin-top:8px; border-top:2px solid #0f172a; font-weight:700;"><span>Closing</span><span>${s}${formatNumber(closing)}</span></div>
+                <div style="display:flex; justify-content:space-between; padding:6px 0; margin-top:8px; border-top:2px solid #0f172a; font-weight:700;"><span>Closing</span><span>${s}${formatNumber(closing)}${usd(closing)}</span></div>
             </div>
         `;
     }
@@ -872,20 +879,20 @@
         );
 
         const bankUsdCard = renderAccountCard(
-            'Bank (USD)', 'fa-building-columns', '#f59e0b',
+            'Bank (USD account - in kwacha)', 'fa-building-columns', '#f59e0b',
             gl['1120'].opening, gl['1120'].inward, gl['1120'].outward, gl['1120'].closing,
             [
-                breakdownRowRaw('Deposited from Cash', bankUsd.inward.depositedFromCash, '$', '#059669'),
-                breakdownRowRaw('Transfer from Bank (ZMW)', bankUsd.inward.transferFromZmw, '$', '#059669'),
-                otherRowsRaw(bankUsd.inward.otherItems, '$', '#059669')
+                breakdownRowRaw('Deposited from Cash', bankUsd.inward.depositedFromCash, 'K', '#059669'),
+                breakdownRowRaw('Transfer from Bank (ZMW)', bankUsd.inward.transferFromZmw, 'K', '#059669'),
+                otherRowsRaw(bankUsd.inward.otherItems, 'K', '#059669')
             ].join(''),
             [
-                breakdownRowRaw('Paid to Suppliers (USD)', bankUsd.outward.paidUsd, '$'),
-                breakdownRowRaw('Withdrawn to Cash', bankUsd.outward.withdrawnToCash, '$'),
-                breakdownRowRaw('Transfer to Bank (ZMW)', bankUsd.outward.transferToZmw, '$'),
-                otherRowsRaw(bankUsd.outward.otherItems, '$')
+                breakdownRowRaw('Paid to Suppliers', bankUsd.outward.paidUsd, 'K'),
+                breakdownRowRaw('Withdrawn to Cash', bankUsd.outward.withdrawnToCash, 'K'),
+                breakdownRowRaw('Transfer to Bank (ZMW)', bankUsd.outward.transferToZmw, 'K'),
+                otherRowsRaw(bankUsd.outward.otherItems, 'K')
             ].join(''),
-            '$'
+            'K', true
         );
 
         const saleCard = renderSaleCard(todaySale);
@@ -921,6 +928,8 @@
             // "Cannot set properties of null (setting 'innerHTML')". Nothing left
             // to draw into, so just stop quietly.
             if (!document.body.contains(container)) return;
+            // Rate used to show the dollar equivalent of the USD bank account
+            try { usdDisplayRate = (typeof getSharedExchangeRate === 'function') ? await getSharedExchangeRate() : 0; } catch (e) { usdDisplayRate = 0; }
             render(data);
         } catch (error) {
             console.error('Error generating unified report:', error);

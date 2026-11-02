@@ -295,6 +295,16 @@
         if (counted === null) { toast('Enter the counted cash first.', true); return; }
         const expected = round2(state.day.expected);
         const diff = round2(counted - expected);
+        // Same checks the database makes, shown early and clearly.
+        if (expected < 0) {
+            window.alert(`The system expects NEGATIVE cash (K ${fmt(expected)}).\n\nThis means some payment or expense was entered as cash when it was really paid from the bank (or a cash sale is missing). Correct those entries first, then post the Z-report.`);
+            return;
+        }
+        if (Math.abs(diff) > 500 && !$('zrepNotes').value.trim()) {
+            window.alert(`The difference is K ${fmt(Math.abs(diff))}.\n\nType a note in the Notes box explaining it (for example: payroll paid from cash, supplier paid from cash, wrong count) before posting.`);
+            $('zrepNotes').focus();
+            return;
+        }
         const msg = `Post Z-report for ${prettyDate(state.date)}?\n\n` +
             `System cash:   K ${fmt(expected)}\n` +
             `Counted:       K ${fmt(counted)}  (cash K ${fmt(cashValue() || 0)} + Airtel K ${fmt(airtelValue() || 0)})\n` +
@@ -327,6 +337,7 @@
         } catch (e) {
             console.error('Z-Report post failed:', e);
             toast('Not posted: ' + (e.message || e), true);
+            window.alert('Z-report NOT posted.\n\n' + (e.message || e));
             // The screen may be stale -- reload the figures but keep what was typed
             const keepCounted = $('zrepCounted').value, keepAirtel = $('zrepAirtel').value, keepNotes = $('zrepNotes').value;
             await loadDay();

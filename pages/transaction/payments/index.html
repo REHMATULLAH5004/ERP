@@ -164,12 +164,12 @@
                         <div class="form-group">
                             <label class="required">Payment Method</label>
                             <select class="form-control" id="paymentMethod" required>
-                                <option value="Cash">Cash in Hand (ZMW)</option>
-                                <option value="Bank Transfer">Bank Account (ZMW)</option>
+                                <option value="Bank Transfer" selected>Bank Account (ZMW)</option>
+                                <option value="Cash">Cash in Hand (ZMW) - only if paid from the drawer</option>
                                 <!-- 🔥 ADDED: pay a USD invoice directly out of the USD bank
                                      account, no ZMW conversion at all. Only ever shown while
                                      Settling = USD Invoices -- toggled in loadInvoicesForSupplier(). -->
-                                <option value="Bank Transfer USD" id="usdBankPaymentOption" style="display:none;">Bank Account (USD) -- pay directly, no conversion</option>
+                                <option value="Bank Transfer USD" id="usdBankPaymentOption" style="display:none;">Bank Account (USD) -- enter the rate, booked in kwacha</option>
                             </select>
                         </div>
                     </div>

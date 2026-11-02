@@ -512,6 +512,9 @@
         // Set default date to today
         document.getElementById('expenseDate').value = new Date().toISOString().split('T')[0];
 
+        // Default to the bank - cash is the exception, chosen on purpose
+        document.getElementById('expenseAccount').value = 'Bank (ZMW)';
+
         // Hide summary
         document.getElementById('expenseSummary').style.display = 'none';
 
@@ -754,6 +757,29 @@
             return;
         }
 
+        // Salaries: must say WHO and WHICH MONTH, so the payroll report can
+        // list "salaries paid outside payroll" correctly.
+        if (category === 'Salaries') {
+            const hasYear = /20\d\d/.test(description);
+            const hasMonth = /(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)/i.test(description);
+            const hasName = description.replace(/salar(y|ies)|wages?|pay(ment)?|20\d\d|[-–:,.\/]|(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*/gi, '').trim().length >= 3;
+            if (!hasYear || !hasMonth || !hasName) {
+                showToast('For Salaries the description must show the month and the employee, e.g. "Salary Nov 2026 - James Phiri".', 'error');
+                return;
+            }
+            if (!confirm('Normal monthly salaries should be paid from Payroll (so PAYE, NAPSA and NHIMA are booked).\n\nRecord this only if it is a payment made outside payroll. Continue?')) return;
+        }
+
+        // Cash safety: do not let cash go negative without a clear decision.
+        if (account === 'Cash in Hand' && !editId) {
+            try {
+                const { data: bal } = await supabaseClient.rpc('account_balance', { p_code: '1111' });
+                if (typeof bal === 'number' && amount > bal + 0.005) {
+                    if (!confirm(`The books show only ZK${bal.toLocaleString('en-US', {minimumFractionDigits: 2})} cash in hand, but this expense is ZK${amount.toLocaleString('en-US', {minimumFractionDigits: 2})}.\n\nIf it was paid from the bank, press Cancel and choose Bank (ZMW).\n\nPress OK only if it really came out of the cash drawer.`)) return;
+                }
+            } catch (e) { console.warn('Cash balance check skipped:', e); }
+        }
+
         // Generate transaction number
         const txNumber = editId ?
             (state.expenses.find(t => t.id === editId)?.transaction_number || `EXP-${new Date().getFullYear()}-${String(Math.floor(Math.random() * 10000)).padStart(4, '0')}`) :
@@ -966,6 +992,12 @@
         // Auto-fill description from category
         document.getElementById('expenseCategory').addEventListener('change', function() {
             const desc = document.getElementById('expenseDescription');
+            if (this.value === 'Salaries' && !desc.value.trim()) {
+                const d = document.getElementById('expenseDate').value ? new Date(document.getElementById('expenseDate').value + 'T00:00:00') : new Date();
+                desc.value = `Salary ${d.toLocaleDateString('en-US', { month: 'short', year: 'numeric' })} - `;
+                desc.focus();
+                return;
+            }
             if (!desc.value.trim()) {
                 const category = this.options[this.selectedIndex]?.text || '';
                 if (category && category !== 'Select Category') {
