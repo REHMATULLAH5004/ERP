@@ -159,6 +159,16 @@
                         </div>
                     </div>
 
+                    <!-- Salaries: who and which month (fills the description) -->
+                    <div class="form-group" id="salaryPickerRow" style="display:none;">
+                        <label>Salary for (employee and month)</label>
+                        <div style="display:flex; gap:10px;">
+                            <select class="form-control" id="salaryEmployee" style="flex:2;"><option value="">Choose employee, or type a name in the description</option></select>
+                            <input type="month" class="form-control" id="salaryMonth" style="flex:1;">
+                        </div>
+                        <small style="color:#64748b;">Variable-pay staff are listed first. Choosing a name fills in the description below.</small>
+                    </div>
+
                     <!-- Description -->
                     <div class="form-group">
                         <label class="required">Description</label>

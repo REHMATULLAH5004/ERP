@@ -767,7 +767,8 @@
                 showToast('For Salaries the description must show the month and the employee, e.g. "Salary Nov 2026 - James Phiri".', 'error');
                 return;
             }
-            if (!confirm('Normal monthly salaries should be paid from Payroll (so PAYE, NAPSA and NHIMA are booked).\n\nRecord this only if it is a payment made outside payroll. Continue?')) return;
+            // Variable-pay staff are meant to be paid here, so skip the warning for them.
+            if (!window.__salaryPickIsVariable && !confirm('Normal monthly salaries should be paid from Payroll (so PAYE, NAPSA and NHIMA are booked).\n\nRecord this only if it is a payment made outside payroll. Continue?')) return;
         }
 
         // Cash safety: do not let cash go negative without a clear decision.
@@ -988,6 +989,54 @@
 
         // Update currency symbol when account changes
         document.getElementById('expenseAccount').addEventListener('change', updateExpenseCurrencySymbol);
+
+        // ---- Salaries: employee + month picker (fills the description) ----
+        window.__salaryPickIsVariable = false;
+        let salaryEmployeesLoaded = false;
+        async function loadSalaryEmployees() {
+            if (salaryEmployeesLoaded) return;
+            try {
+                const { data: emps } = await supabaseClient.from('employees').select('employee_id, first_name, last_name').eq('status', 'Active').order('first_name');
+                const { data: jobs } = await supabaseClient.from('employee_employment').select('employee_id, pay_category');
+                const cat = {}; (jobs || []).forEach(j => { cat[j.employee_id] = j.pay_category; });
+                const sel = document.getElementById('salaryEmployee');
+                const mk = (e, tag) => `<option value="${(e.first_name + ' ' + e.last_name).replace(/"/g, '')}" data-variable="${tag === 'v' ? '1' : '0'}">${e.first_name} ${e.last_name}${tag === 'v' ? '' : ' (on payroll)'}</option>`;
+                const variable = (emps || []).filter(e => cat[e.employee_id] === 'Variable');
+                const onPayroll = (emps || []).filter(e => cat[e.employee_id] !== 'Variable');
+                sel.innerHTML = '<option value="">Choose employee, or type a name in the description</option>' +
+                    (variable.length ? '<optgroup label="Variable pay (paid here)">' + variable.map(e => mk(e, 'v')).join('') + '</optgroup>' : '') +
+                    '<optgroup label="On payroll">' + onPayroll.map(e => mk(e, 'p')).join('') + '</optgroup>';
+                salaryEmployeesLoaded = true;
+            } catch (err) { console.warn('Could not load employees for the salary picker', err); }
+        }
+        function applySalaryPick() {
+            const sel = document.getElementById('salaryEmployee');
+            const name = sel.value;
+            window.__salaryPickIsVariable = !!(name && sel.options[sel.selectedIndex].dataset.variable === '1');
+            const m = document.getElementById('salaryMonth').value;
+            if (!name || !m) return;
+            const d = new Date(m + '-01T00:00:00');
+            document.getElementById('expenseDescription').value = `Salary ${d.toLocaleDateString('en-US', { month: 'short', year: 'numeric' })} - ${name}`;
+        }
+        function syncSalaryPicker() {
+            const show = document.getElementById('expenseCategory').value === 'Salaries';
+            document.getElementById('salaryPickerRow').style.display = show ? '' : 'none';
+            if (show) {
+                loadSalaryEmployees();
+                const mEl = document.getElementById('salaryMonth');
+                if (!mEl.value) {
+                    const dv = document.getElementById('expenseDate').value;
+                    mEl.value = (dv || new Date().toISOString().split('T')[0]).slice(0, 7);
+                }
+            } else {
+                document.getElementById('salaryEmployee').value = '';
+                window.__salaryPickIsVariable = false;
+            }
+        }
+        document.getElementById('expenseCategory').addEventListener('change', syncSalaryPicker);
+        document.getElementById('salaryEmployee').addEventListener('change', applySalaryPick);
+        document.getElementById('salaryMonth').addEventListener('change', applySalaryPick);
+        document.getElementById('expenseForm').addEventListener('reset', () => { document.getElementById('salaryMonth').value = ''; setTimeout(syncSalaryPicker, 0); });
 
         // Auto-fill description from category
         document.getElementById('expenseCategory').addEventListener('change', function() {

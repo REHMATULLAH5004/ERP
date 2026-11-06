@@ -168,7 +168,10 @@
     // ============================================
     function toggleFixedEmployeeFields() {
         const payCategory = document.getElementById('empPayCategory')?.value;
-        const isFixed = payCategory === 'Fixed';
+        const isFixed = payCategory === 'Fixed' || payCategory === 'Variable';
+        // Variable-pay staff have no fixed salary, so Basic Pay is optional for them.
+        const basicEl = document.getElementById('empBasicPay');
+        if (basicEl) basicEl.required = payCategory !== 'Variable';
 
         const weeklyOffSelect = document.getElementById('empWeeklyOffDay');
         if (weeklyOffSelect) {
@@ -388,7 +391,7 @@
         // actual thing this field is for). Now read directly from the
         // explicit Pay Category field.
         const payCategory = document.getElementById('empPayCategory').value;
-        const isFixedPay = payCategory === 'Fixed';
+        const isFixedPay = payCategory === 'Fixed' || payCategory === 'Variable';
 
         const jobData = {
             department: document.getElementById('empDepartment').value,

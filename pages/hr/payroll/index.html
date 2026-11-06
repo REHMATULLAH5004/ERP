@@ -41,6 +41,7 @@
                 <tr><td colspan="10" style="text-align:center; padding:30px; color:#94a3b8;">Pick a month and click Calculate.</td></tr>
             </tbody>
         </table>
+        <div id="variableStaffNote" style="display:none; padding:10px 20px; font-size:0.8rem; color:#64748b; border-top:1px solid #e2e8f0;"></div>
     </div>
 
     <!-- 🔥 ADDED: STATUTORY PAYMENTS -->
@@ -70,8 +71,8 @@
         <div style="margin-bottom:16px;">
             <label style="display:block; font-weight:500; color:#475569; margin-bottom:4px; font-size:0.85rem;">Pay From *</label>
             <select id="statutoryPayFrom" required style="width:100%; padding:8px 10px; border:1px solid #e2e8f0; border-radius:6px;">
-                <option value="1121" selected>Bank (ZMW)</option>
-                <option value="1111">Cash in Hand (ZMW) - only if paid from the drawer</option>
+                <option value="1111">Cash in Hand (ZMW)</option>
+                <option value="1121">Bank (ZMW)</option>
             </select>
         </div>
         <div style="display:flex; gap:10px; justify-content:flex-end;">
@@ -102,9 +103,8 @@
         <div style="margin-bottom:16px;">
             <label style="display:block; font-weight:500; color:#475569; margin-bottom:4px; font-size:0.85rem;">Pay From *</label>
             <select id="payFromAccount" required style="width:100%; padding:8px 10px; border:1px solid #e2e8f0; border-radius:6px;">
-                <option value="1121" selected>Bank (ZMW)</option>
-                <option value="1111">Cash in Hand (ZMW) - only if paid from the drawer</option>
-                <option value="2140">NOT PAID YET - record as owed (Salaries Payable)</option>
+                <option value="1111">Cash in Hand (ZMW)</option>
+                <option value="1121">Bank (ZMW)</option>
             </select>
         </div>
         <div style="display:flex; gap:10px; justify-content:flex-end;">
@@ -130,9 +130,8 @@
         <div style="margin-bottom:16px;">
             <label style="display:block; font-weight:500; color:#475569; margin-bottom:4px; font-size:0.85rem;">Pay From *</label>
             <select id="payAllFromAccount" required style="width:100%; padding:8px 10px; border:1px solid #e2e8f0; border-radius:6px;">
-                <option value="1121" selected>Bank (ZMW)</option>
-                <option value="1111">Cash in Hand (ZMW) - only if paid from the drawer</option>
-                <option value="2140">NOT PAID YET - record as owed (Salaries Payable)</option>
+                <option value="1111">Cash in Hand (ZMW)</option>
+                <option value="1121">Bank (ZMW)</option>
             </select>
         </div>
         <div id="payAllProgress" style="display:none; margin-bottom:16px; font-size:0.8rem; color:#64748b;"></div>

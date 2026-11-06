@@ -100,7 +100,7 @@
             // payroll calculation itself, just carried through on each
             // breakdown so the Bank Report/CSV export can read them
             // straight off currentBreakdown without a second query.
-            supabaseClient.from('employee_employment').select('employee_id, basic_pay, allowances, is_fixed_pay, annual_leave_days, bank_name, bank_branch, bank_account_number'),
+            supabaseClient.from('employee_employment').select('employee_id, basic_pay, allowances, is_fixed_pay, pay_category, annual_leave_days, bank_name, bank_branch, bank_account_number'),
             supabaseClient.from('leave_requests').select('employee_id, start_date, end_date')
                 .eq('leave_type', 'Unpaid').eq('status', 'Approved')
                 .lte('start_date', monthEnd).gte('end_date', monthStart),
@@ -167,7 +167,19 @@
 
         currentBreakdown = {};
 
-        const rows = (employeesRes.data || []).map(emp => {
+        // Variable-pay staff (e.g. people who work outside the pharmacy) are
+        // NOT on the monthly payroll: they are paid through Expenses ->
+        // Salaries, so no PAYE/NAPSA/NHIMA is calculated and nothing shows as owed.
+        const variableStaff = (employeesRes.data || []).filter(emp => (jobByEmployee[emp.employee_id] || {}).pay_category === 'Variable');
+        const noteEl = document.getElementById('variableStaffNote');
+        if (noteEl) {
+            noteEl.style.display = variableStaff.length ? '' : 'none';
+            noteEl.textContent = variableStaff.length
+                ? 'Not on payroll (variable pay, paid through Expenses > Salaries): ' + variableStaff.map(e => `${e.first_name} ${e.last_name}`).join(', ')
+                : '';
+        }
+
+        const rows = (employeesRes.data || []).filter(emp => (jobByEmployee[emp.employee_id] || {}).pay_category !== 'Variable').map(emp => {
             const job = jobByEmployee[emp.employee_id] || {};
             const basicPay = job.basic_pay || 0;
             const allowances = job.allowances || 0;
