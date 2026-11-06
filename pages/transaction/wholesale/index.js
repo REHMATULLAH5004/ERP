@@ -1718,7 +1718,7 @@
         saleData.items.forEach(item => {
             html += `
                 <tr style="border-bottom: 1px solid #e2e8f0;">
-                    <td style="padding: 10px;">${item.product_name}</td>
+                    <td style="padding: 10px;">${itemLabelWithGeneric(item)}</td>
                     <td style="padding: 10px;">${item.batch_number}</td>
                     <td style="padding: 10px; text-align: center;">${item.pack_size}</td>
                     <td style="padding: 10px; text-align: right;">K${(item.rate || 0).toFixed(2)}</td>
@@ -2502,6 +2502,16 @@
         }
     }
 
+    // 🔥 ADDED: "Product Name (Generic Name)" label for printed invoices and
+    // quotations. Falls back to the plain name when there is no generic name
+    // or when the generic name is just the product name repeated.
+    function itemLabelWithGeneric(item) {
+        const name = item.product_name || '';
+        const generic = (item.generic_name || '').trim();
+        if (!generic || generic.toLowerCase() === name.trim().toLowerCase()) return name;
+        return `${name} (${generic})`;
+    }
+
     // 🔥 ADDED: same defensive cleanup as retail.js -- strips any
     // "- XX units" suffix that might still be on batch_number for sales
     // saved before the source-level fix to how batch_number is captured.
@@ -2572,7 +2582,7 @@
                     <tbody>
                         ${saleData.items.map(item => `
                             <tr>
-                                <td>${item.product_name}</td>
+                                <td>${itemLabelWithGeneric(item)}</td>
                                 <td>${cleanBatchDisplay(item.batch_number)}</td>
                                 <td class="text-center">${item.qty} ${item.pack_size}</td>
                                 <td class="text-right">K${item.rate.toFixed(2)}</td>

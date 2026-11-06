@@ -1953,6 +1953,8 @@
         if (nhimaNumberSearch) nhimaNumberSearch.value = '';
         if (claimNumber) claimNumber.value = '';
         if (bypassNumber) bypassNumber.value = '';
+        const nhimaGrossEl = document.getElementById('retailNhimaGross');
+        if (nhimaGrossEl) nhimaGrossEl.value = '';
 
         const regName = document.getElementById('retailRegName');
         const regAddress = document.getElementById('retailRegAddress');
@@ -2824,7 +2826,8 @@
                         batchSelect.innerHTML = `<option value="${batch.id}"
                             data-cost="${batch.cost_price}"
                             data-qty="${batch.total_qty}"
-                            data-expiry="${expiry}">${batch.batch_number} (Exp: ${expiry})</option>`;
+                            data-expiry="${expiry}"
+                            data-expiry-iso="${batch.expiry_date || ''}">${batch.batch_number} (Exp: ${expiry})</option>`;
                         batchSelect.value = batch.id;
 
                         const rateInput = targetRow.querySelector('.retail-pos-rate');
@@ -2873,6 +2876,18 @@
         console.error("❌ retailPosTableBody not found!");
         return;
     }
+
+    // 🔥 ADDED: keep the Days Supply hint/warning live (typing days, or picking another batch)
+    posTableBody.addEventListener('input', function (e) {
+        if (e.target.classList.contains('retail-pos-days')) updateDaysSupplyHint(e.target.closest('tr'));
+    });
+    posTableBody.addEventListener('change', function (e) {
+        if (e.target.classList.contains('retail-pos-batch') || e.target.classList.contains('retail-pos-days')) {
+            updateDaysSupplyHint(e.target.closest('tr'));
+        }
+    });
+    // safety net for values that are set by code (loading/resetting a sale, switching client type)
+    setInterval(refreshAllDaysSupplyHints, 1000);
 
     posTableBody.addEventListener('input', function (e) {
         if (e.target.classList.contains('retail-pos-qty')) {
@@ -3199,6 +3214,7 @@
                                 data-pack="${product.conversion_rate || 1}"
                                 data-tax="${product.tax_percent || 0}"
                                 data-expiry="${expiry}"
+                                data-expiry-iso="${b.expiry_date || ''}"
                                 data-qty="${b.total_qty}"
                                 data-batch-number="${b.batch_number}">
                                 ${b.batch_number} (Exp: ${expiry}) - ${stockLabel} @ K${costPrice.toFixed(2)}
@@ -4007,6 +4023,270 @@
     // ============================================
     // UPDATE ROW FUNCTIONS
     // ============================================
+    // ============================================
+    // 🔥 ADDED: NHIMA DAYS SUPPLY -- expiry warning + next collection date
+    // ============================================
+    // NHIMA dispenses by DAYS SUPPLY. On an NHIMA sale, for each row with a
+    // Days Supply entered:
+    //   * if the chosen batch expires BEFORE that many days from today, a
+    //     warning is shown under the Days Supply box (it does not block the
+    //     sale);
+    //   * the NEXT COLLECTION DATE is shown: invoice date + (days - 3), but
+    //     never earlier than the invoice date. It is also saved on each item
+    //     (item.next_collection) and printed on the invoice.
+    const NHIMA_COLLECTION_BUFFER_DAYS = 3;
+    const DAY_MS = 24 * 60 * 60 * 1000;
+
+    function startOfToday() { const d = new Date(); d.setHours(0, 0, 0, 0); return d; }
+    function isoDate(d) {
+        return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+    }
+    function parseIsoDate(str) {
+        const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(str || ''));
+        return m ? new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3])) : null;
+    }
+    function formatCollectionDate(d) {
+        return d.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
+    }
+    // base = the invoice date (a Date); returns a Date or null
+    function nextCollectionDate(days, base) {
+        days = parseInt(days) || 0;
+        if (days <= 0 || !base || isNaN(base.getTime())) return null;
+        const d = new Date(base.getFullYear(), base.getMonth(), base.getDate());
+        d.setDate(d.getDate() + Math.max(days - NHIMA_COLLECTION_BUFFER_DAYS, 0));
+        return d;
+    }
+
+    (function addDaysSupplyStyle() {
+        if (document.getElementById('daysSupplyStyle')) return;
+        const st = document.createElement('style');
+        st.id = 'daysSupplyStyle';
+        st.textContent = '.days-supply-hint { margin-top: 4px; font-size: 0.72rem; line-height: 1.3; font-weight: 600; white-space: normal; min-width: 150px; }' +
+            '.days-supply-hint.ok { color: #15803d; }' +
+            '.days-supply-hint.warn { background: #fff7ed; border: 1px solid #fb923c; color: #9a3412; border-radius: 6px; padding: 4px 6px; }' +
+            'tr.days-expiry-warning { background: #fffbf5; }' +
+            'tr.days-expiry-warning .retail-pos-days { border-color: #fb923c !important; }';
+        document.head.appendChild(st);
+    })();
+
+    function updateDaysSupplyHint(row) {
+        if (!row) return;
+        const daysInput = row.querySelector('.retail-pos-days');
+        if (!daysInput) return;
+
+        let text = '', cls = '', warning = false;
+        const days = parseInt(daysInput.value) || 0;
+        const batchSelect = row.querySelector('.retail-pos-batch');
+        const selected = batchSelect ? batchSelect.options[batchSelect.selectedIndex] : null;
+
+        if (currentClientType === 'NHIMA' && days > 0) {
+            const today = startOfToday();
+            const next = nextCollectionDate(days, today);
+            let expiry = null;
+            if (selected && selected.value) {
+                expiry = parseIsoDate(selected.dataset.expiryIso);
+                if (!expiry && selected.dataset.expiry) { const t = new Date(selected.dataset.expiry); if (!isNaN(t.getTime())) expiry = t; }
+            }
+            const supplyEnd = new Date(today.getTime() + days * DAY_MS);
+            if (expiry && expiry < supplyEnd) {
+                const left = Math.round((expiry - today) / DAY_MS);
+                text = left < 0
+                    ? `\u26A0 This batch has already expired (${formatCollectionDate(expiry)}).`
+                    : `\u26A0 This batch expires in ${left} day${left === 1 ? '' : 's'} (${formatCollectionDate(expiry)}) \u2014 before the ${days} days supply ends. Choose a later batch or reduce the days.`;
+                cls = 'warn'; warning = true;
+                if (next) text += `<br><span style="color:#15803d">Next collection: ${formatCollectionDate(next)}</span>`;
+            } else if (next) {
+                text = `Next collection: ${formatCollectionDate(next)}`;
+                cls = 'ok';
+            }
+        }
+
+        // only touch the DOM when something changed (this also runs on a timer)
+        const key = cls + '|' + text;
+        if (row.dataset.daysHintKey === key) return;
+        row.dataset.daysHintKey = key;
+
+        let hint = row.querySelector('.days-supply-hint');
+        if (!text) {
+            if (hint) hint.remove();
+        } else {
+            if (!hint) {
+                hint = document.createElement('div');
+                daysInput.insertAdjacentElement('afterend', hint);
+            }
+            hint.className = 'days-supply-hint ' + cls;
+            hint.innerHTML = text;
+        }
+        row.classList.toggle('days-expiry-warning', warning);
+    }
+
+    function refreshAllDaysSupplyHints() {
+        if (typeof posTableBody === 'undefined' || !posTableBody) return;
+        posTableBody.querySelectorAll('tr').forEach(updateDaysSupplyHint);
+    }
+
+    // What gets saved on each item and printed: the ISO date, or '' when not applicable.
+    function nextCollectionISO(days) {
+        const d = nextCollectionDate(days, startOfToday());
+        return d ? isoDate(d) : '';
+    }
+
+    // Used when printing: the saved date if there is one, otherwise worked out from the invoice's own date.
+    function nextCollectionForPrint(item, saleData) {
+        if (item && item.next_collection) {
+            const d = parseIsoDate(item.next_collection);
+            if (d) return d;
+        }
+        const baseRaw = saleData && (saleData.created_at || saleData.date);
+        const base = baseRaw ? new Date(baseRaw) : null;
+        return nextCollectionDate(item && item.days_supplied, base);
+    }
+
+    function buildNextCollectionNoteHTML(saleData) {
+        if (!saleData || saleData.client_sub_type !== 'NHIMA' || saleData.is_quotation) return '';
+        const dates = (saleData.items || []).map(i => nextCollectionForPrint(i, saleData)).filter(Boolean);
+        if (!dates.length) return '';
+        const earliest = dates.reduce((a, b) => (a < b ? a : b));
+        return `<div class="collection-note"><strong>NEXT COLLECTION (NHIMA)</strong>Earliest next collection: <u>${formatCollectionDate(earliest)}</u>. Collections are due ${NHIMA_COLLECTION_BUFFER_DAYS} days before each supply runs out (Days Supply &minus; ${NHIMA_COLLECTION_BUFFER_DAYS}). Please bring this invoice and your NHIMA card.</div>`;
+    }
+
+    // ============================================
+    // NHIMA AMOUNT CHECK (Nov 2026)
+    // SOP: capture the claim on the NHIMA site first, then paste the claim
+    // number here. Next to the Claim Number we now ask for the "Gross
+    // Amount" printed on NHIMA's Claim Capture Result page and compare it,
+    // live, with this invoice's Grand Total. A difference shows a red
+    // warning immediately, and again as a confirm when saving.
+    // The typed amount is kept in sale.payment.nhima_gross_amount.
+    // ============================================
+    const NHIMA_AMOUNT_TOLERANCE = 0.01;
+
+    function ensureNhimaAmountField() {
+        const claimEl = document.getElementById('retailClaimNumber');
+        if (!claimEl) return null;
+        let box = document.getElementById('nhimaAmountBox');
+        if (box) return box;
+        box = document.createElement('div');
+        box.id = 'nhimaAmountBox';
+        box.style.cssText = 'margin-top:8px;';
+        box.innerHTML =
+            '<label for="retailNhimaGross" style="display:block;font-weight:600;font-size:0.85rem;margin-bottom:4px;">NHIMA Gross Amount (K) <span style="font-weight:400;color:#64748b;">&ndash; fills in by itself when NHIMA has reported the claim, otherwise type it from the NHIMA result page</span></label>' +
+            '<input type="number" step="0.01" min="0" id="retailNhimaGross" placeholder="e.g. 18.57" autocomplete="off" style="width:100%;padding:8px 10px;border:1px solid #cbd5e1;border-radius:6px;font-size:0.95rem;box-sizing:border-box;">' +
+            '<div id="nhimaAmountMsg" style="margin-top:6px;font-size:0.85rem;font-weight:600;line-height:1.4;display:none;border-radius:6px;padding:7px 10px;"></div>';
+        // Preferred spot: right under the Total in the Order Summary, so the
+        // NHIMA amount is typed next to the invoice total it is compared
+        // with. Falls back to just under the Claim Number field.
+        const totalEl = document.getElementById('retailGrandTotal');
+        const totalRow = totalEl && totalEl.parentElement;
+        if (totalRow && totalRow.parentElement) {
+            box.style.cssText = 'margin-top:14px;padding-top:12px;border-top:1px dashed #cbd5e1;';
+            totalRow.insertAdjacentElement('afterend', box);
+        } else {
+            const host = claimEl.closest('.form-group') || claimEl.parentElement;
+            host.insertAdjacentElement('afterend', box);
+        }
+        return box;
+    }
+
+    // The Griffins NHIMA Chrome helper sends each claim's Gross Amount to the
+    // nhima_claim_results table the moment NHIMA's result page opens. Once a
+    // claim number is entered here we look it up, fill the amount in by itself
+    // and lock the box. If the helper has not reported that claim (not
+    // installed on this computer, or a typo in the claim number), the box
+    // stays open for the amount to be typed by hand.
+    const nhimaLookup = { claim: '', row: null, tries: 0, nextAt: 0, busy: false };
+
+    async function pollNhimaLookup(claim) {
+        if (nhimaLookup.claim !== claim) { nhimaLookup.claim = claim; nhimaLookup.row = null; nhimaLookup.tries = 0; nhimaLookup.nextAt = 0; }
+        if (!claim || claim.length < 10 || nhimaLookup.row || nhimaLookup.busy || nhimaLookup.tries >= 40 || Date.now() < nhimaLookup.nextAt) return;
+        nhimaLookup.busy = true;
+        try {
+            const { data, error } = await supabaseClient.from('nhima_claim_results').select('*').eq('claim_number', claim).maybeSingle();
+            if (nhimaLookup.claim === claim) {
+                if (!error && data) nhimaLookup.row = data;
+                else { nhimaLookup.tries++; nhimaLookup.nextAt = Date.now() + 3000; }
+            }
+        } catch (e) { nhimaLookup.tries++; nhimaLookup.nextAt = Date.now() + 3000; }
+        nhimaLookup.busy = false;
+    }
+
+    function nhimaAmountStatus() {
+        if (currentClientType !== 'NHIMA') return { state: 'none' };
+        const claim = (document.getElementById('retailClaimNumber')?.value || '').trim();
+        if (!claim) return { state: 'none' };
+        const total = parseFloat((document.getElementById('retailGrandTotal')?.textContent || '0').replace(/[^0-9.\-]/g, '')) || 0;
+        const row = (nhimaLookup.claim === claim) ? nhimaLookup.row : null;
+        let member = null;
+        if (row && row.member_number) {
+            const nhimaMember = row.member_number + '/' + (row.dependant_code || '00');
+            const erpMember = String(document.getElementById('retailNhimaNumber')?.value || '').replace(/\s+/g, '');
+            if (erpMember) member = { ok: erpMember === nhimaMember, erp: erpMember, nhima: nhimaMember };
+        }
+        let gross, auto = false;
+        if (row) { gross = Number(row.gross_amount); auto = true; }
+        else {
+            const raw = (document.getElementById('retailNhimaGross')?.value || '').trim();
+            if (raw === '' || isNaN(parseFloat(raw))) return { state: 'missing', total, member, waiting: nhimaLookup.tries < 40 };
+            gross = parseFloat(raw);
+        }
+        const diff = Math.round((total - gross) * 100) / 100;
+        return { state: Math.abs(diff) <= NHIMA_AMOUNT_TOLERANCE ? 'match' : 'mismatch', gross, total, diff, auto, member };
+    }
+
+    function refreshNhimaAmountCheck() {
+        const box = document.getElementById('nhimaAmountBox');
+        const nhimaVisible = currentClientType === 'NHIMA';
+        if (!box) { if (nhimaVisible) ensureNhimaAmountField(); return; }
+        box.style.display = nhimaVisible ? '' : 'none';
+        const msg = document.getElementById('nhimaAmountMsg');
+        const inp = document.getElementById('retailNhimaGross');
+        if (!msg || !nhimaVisible) return;
+        const claim = (document.getElementById('retailClaimNumber')?.value || '').trim();
+        pollNhimaLookup(claim); // async; the next tick (0.7s) picks up the result
+        const st = nhimaAmountStatus();
+        const k = n => 'K' + Number(n).toFixed(2);
+        if (st.state === 'none') { msg.style.display = 'none'; inp.style.borderColor = '#cbd5e1'; inp.readOnly = false; inp.style.background = '#fff'; return; }
+        // lock + fill the box when the amount came from NHIMA itself
+        if (st.auto) { inp.value = Number(st.gross).toFixed(2); inp.readOnly = true; inp.style.background = '#f1f5f9'; }
+        else { inp.readOnly = false; inp.style.background = '#fff'; }
+        msg.style.display = 'block';
+        const src = st.auto ? ' (read from NHIMA automatically)' : '';
+        let text;
+        if (st.state === 'missing') {
+            msg.style.background = '#fef3c7'; msg.style.color = '#92400e';
+            text = st.waiting
+                ? 'Checking NHIMA for this claim... If it does not appear in a few seconds, type the Gross Amount from the NHIMA result page (invoice ' + k(st.total) + ').'
+                : 'NHIMA has not reported this claim number to the ERP. Check the claim number for a typo, or type the Gross Amount from the NHIMA result page (invoice ' + k(st.total) + ').';
+            inp.style.borderColor = '#f59e0b';
+        } else if (st.state === 'match') {
+            msg.style.background = '#dcfce7'; msg.style.color = '#166534';
+            text = '✓ Matches: NHIMA ' + k(st.gross) + ' = invoice ' + k(st.total) + '.' + src;
+            inp.style.borderColor = '#16a34a';
+        } else {
+            msg.style.background = '#fee2e2'; msg.style.color = '#991b1b';
+            text = '⚠ MISMATCH: NHIMA ' + k(st.gross) + ' but invoice ' + k(st.total) + ' (invoice is ' + (st.diff > 0 ? 'HIGHER' : 'LOWER') + ' by ' + k(Math.abs(st.diff)) + '). Check the items, batches and prices against the NHIMA claim.' + src;
+            inp.style.borderColor = '#dc2626';
+        }
+        if (st.member && !st.member.ok) {
+            text += '  ⚠ MEMBER DIFFERS: this claim on NHIMA is for ' + st.member.nhima + ' but the selected member is ' + st.member.erp + '.';
+            if (st.state !== 'mismatch') { msg.style.background = '#fee2e2'; msg.style.color = '#991b1b'; }
+        }
+        msg.textContent = text;
+    }
+
+    function nhimaPaymentExtras() {
+        const st = nhimaAmountStatus();
+        if (st.state === 'match' || st.state === 'mismatch') {
+            return { nhima_gross_amount: st.gross, nhima_amount_diff: st.diff, nhima_amount_source: st.auto ? 'helper' : 'typed' };
+        }
+        return {};
+    }
+
+    document.addEventListener('input', function (e) {
+        if (e.target && (e.target.id === 'retailNhimaGross' || e.target.id === 'retailClaimNumber')) refreshNhimaAmountCheck();
+    });
+    setInterval(refreshNhimaAmountCheck, 700); // also follows Grand Total / client-type changes
+
     function updateRowRate(row) {
         if (!row) return;
         const batchSelect = row.querySelector('.retail-pos-batch');
@@ -4307,6 +4587,9 @@
                 type: sale.type,
                 prefix: sale.prefix,
                 client_type: sale.client_type,
+                client_sub_type: sale.client_sub_type,
+                is_quotation: !!sale.is_quotation,
+                created_at: sale.created_at,
                 customer: sale.customer_data || {},
                 items: sale.items || [],
                 payment: sale.payment || { type: 'Credit', note: '' },
@@ -4823,6 +5106,8 @@
                         tax_rate: parseFloat(taxInput.value) || 0,
                         total: parseFloat(totalInput.value) || 0,
                         days_supplied: parseInt(daysInput.value) || 0,
+                        // 🔥 ADDED: NHIMA next collection date (invoice date + days - 3), saved so a reprint shows the same date
+                        next_collection: currentClientType === 'NHIMA' ? nextCollectionISO(parseInt(daysInput.value) || 0) : '',
                         how_to_take: howToTakeInput?.value || '',
                         cost_per_unit: costPerUnit,
                         available_qty: availableQty
@@ -4927,6 +5212,19 @@
                 }
             }
 
+            // NHIMA amount check (see ensureNhimaAmountField): warn at save
+            // if the NHIMA Gross Amount is missing or differs from this invoice.
+            if (status !== 'QUOTATION' && claimNumber) {
+                const amt = nhimaAmountStatus();
+                if (amt.state === 'mismatch') {
+                    if (!confirm('\u26A0 AMOUNT MISMATCH\n\nNHIMA claim: K' + amt.gross.toFixed(2) + '\nThis invoice: K' + amt.total.toFixed(2) + '\nDifference: K' + Math.abs(amt.diff).toFixed(2) + (amt.diff > 0 ? ' (invoice higher)' : ' (invoice lower)') + '\n\nPress Cancel to go back and fix it, or OK to save anyway.')) return null;
+                } else if (amt.member && !amt.member.ok) {
+                    if (!confirm('\u26A0 MEMBER DIFFERS\n\nThe claim on NHIMA is for member ' + amt.member.nhima + '\nbut the member selected here is ' + amt.member.erp + '.\n\nPress Cancel to go back and fix it, or OK to save anyway.')) return null;
+                } else if (amt.state === 'missing') {
+                    if (!confirm('You have not typed the NHIMA Gross Amount, so this claim has NOT been checked against the invoice (K' + amt.total.toFixed(2) + ').\n\nPress Cancel to type it, or OK to save without checking.')) return null;
+                }
+            }
+
             customerData = {
                 type: 'NHIMA',
                 nhima_number: nhimaNumber,
@@ -4969,7 +5267,8 @@
             items: items,
             payment: {
                 type: paymentType,
-                note: paymentNote
+                note: paymentNote,
+                ...nhimaPaymentExtras()
             },
             totals: {
                 subtotal: subtotal,
@@ -5834,6 +6133,9 @@
                     .totals-row { display: flex; justify-content: space-between; padding: 6px 12px; font-size: 0.9rem; }
                     .totals-row.grand { background: #000000; color: white; font-weight: bold; font-size: 1rem; border-radius: 4px; margin-top: 4px; }
 
+                    .collection-note { border: 2px solid #000000; border-radius: 6px; padding: 9px 12px; font-size: 0.85rem; margin: 0 0 20px; line-height: 1.5; }
+                    .collection-note strong { display: block; margin-bottom: 3px; }
+
                     .footer-note { border-top: 1px solid #e2e8f0; padding-top: 16px; font-size: 0.85rem; color: #334155; text-align: center; }
                     .footer-note p { margin: 0 0 6px; line-height: 1.6; }
 
@@ -5883,6 +6185,7 @@
                             <th class="text-right">Rate</th>
                             <th class="text-right">Total</th>
                             <th class="text-center">Days Supply</th>
+                            ${(saleData.client_sub_type === 'NHIMA' && !isQuotation) ? '<th class="text-center">Next Collection</th>' : ''}
                             <th>Dosage</th>
                         </tr>
                     </thead>
@@ -5897,6 +6200,7 @@
                                 <td class="text-right">K${item.rate.toFixed(2)}</td>
                                 <td class="text-right">K${item.total.toFixed(2)}</td>
                                 <td class="text-center">${item.days_supplied || 0}</td>
+                                ${(saleData.client_sub_type === 'NHIMA' && !isQuotation) ? `<td class="text-center"><strong>${(() => { const d = nextCollectionForPrint(item, saleData); return d ? formatCollectionDate(d) : '-'; })()}</strong></td>` : ''}
                                 <td>${item.how_to_take || 'As directed'}</td>
                             </tr>
                         `).join('')}
@@ -5911,6 +6215,8 @@
                     <div class="totals-row"><span>Total Tax</span><span>K${saleData.totals.tax.toFixed(2)}</span></div>
                     <div class="totals-row grand"><span>GRAND TOTAL</span><span>K${saleData.totals.grand_total.toFixed(2)}</span></div>
                 </div>
+
+                ${buildNextCollectionNoteHTML(saleData)}
 
                 <div class="footer-note">
                     <!-- 🔥 CHANGED: Admin > Invoicing Settings > Retail Invoicing
@@ -6163,6 +6469,9 @@
                     // has now issued, Save (updates this same row).
                     const bypassNumberEl = document.getElementById('retailBypassNumber');
                     if (bypassNumberEl) bypassNumberEl.value = customer.bypass_number || '';
+                    ensureNhimaAmountField();
+                    const nhimaGrossEl = document.getElementById('retailNhimaGross');
+                    if (nhimaGrossEl) nhimaGrossEl.value = (saleData.payment && saleData.payment.nhima_gross_amount != null) ? saleData.payment.nhima_gross_amount : '';
                 } else {
                     const phoneSelectEl = document.getElementById('retailRegPhone');
                     if (phoneSelectEl && customer.phone) {
@@ -6367,7 +6676,8 @@
                             data-cost="${item.cost_per_unit || 0}"
                             data-qty="${effectiveAvailable}"
                             data-batch-number="${item.batch_number || batchInfo?.batch_number || ''}"
-                            data-expiry="${expiry}">
+                            data-expiry="${expiry}"
+                            data-expiry-iso="${batchInfo?.expiry_date || ''}">
                             ${item.batch_number || batchInfo?.batch_number || 'Unknown batch'} ${expiry ? `(Exp: ${expiry})` : ''}
                         </option>`;
                         batchSelect.value = item.batch_id;

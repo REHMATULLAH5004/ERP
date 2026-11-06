@@ -288,7 +288,12 @@
 
         const query = input.value.trim().toLowerCase();
         const options = comboOptionsFor(field);
-        const matches = query ? options.filter(o => o.name.toLowerCase().includes(query)) : options;
+        // 🔥 CHANGED: best matches first (exact, then starts-with, then contains)
+        // so the first (auto-highlighted) row is the one the user most likely means.
+        const rank = o => { const n = o.name.toLowerCase(); return n === query ? 0 : n.startsWith(query) ? 1 : 2; };
+        const matches = query
+            ? options.filter(o => o.name.toLowerCase().includes(query)).sort((a, b) => rank(a) - rank(b))
+            : options;
 
         if (matches.length === 0) {
             let emptyMsg = 'No existing entries -- start typing to add one';
@@ -299,9 +304,135 @@
             }
             list.innerHTML = `<div class="combo-empty">${emptyMsg}</div>`;
         } else {
-            list.innerHTML = matches.map(o =>
-                `<div class="combo-option" data-name="${escapeComboHtml(o.name)}">${escapeComboHtml(o.name)}</div>`
+            list.innerHTML = matches.map((o, i) =>
+                `<div class="combo-option${query && i === 0 ? ' active' : ''}" data-name="${escapeComboHtml(o.name)}">${escapeComboHtml(o.name)}</div>`
             ).join('');
+        }
+    }
+
+    // ============================================
+    // 🔥 ADDED: KEYBOARD SUPPORT FOR THE SEARCH LISTS
+    // ============================================
+    // Up/Down arrows move through the list, Enter or Tab picks the
+    // highlighted row (Tab then carries on to the next field as usual),
+    // Esc closes the list and keeps whatever was typed (use this to add a
+    // brand-new name that happens to start like an existing one). While
+    // typing, the first/best match is highlighted automatically.
+    (function addComboKeyboardStyle() {
+        if (document.getElementById('comboKeyboardStyle')) return;
+        const st = document.createElement('style');
+        st.id = 'comboKeyboardStyle';
+        st.textContent = '.combo-option.active { background: #dbeafe !important; color: #0f172a; }';
+        document.head.appendChild(st);
+    })();
+
+    // Used by mouse, Enter and Tab alike.
+    function pickComboOption(field, name) {
+        const input = document.getElementById(field);
+        if (!input) return;
+        const changed = (input.value || '').trim().toLowerCase() !== String(name).trim().toLowerCase();
+        input.value = name;
+        closeComboList(field);
+        if (field === 'category' && changed) {
+            // A different Category was picked -- clear a stale
+            // Sub-Category that may have belonged to the old one.
+            document.getElementById('subCategory').value = '';
+        }
+        if (field === 'genericName') fillNhimaPriceFromGeneric();
+    }
+
+    function comboKeydown(field, e) {
+        const list = document.getElementById(field + 'ComboList');
+        if (!list) return;
+        const isOpen = list.classList.contains('open');
+        const opts = Array.from(list.querySelectorAll('.combo-option'));
+        const activeIdx = opts.findIndex(o => o.classList.contains('active'));
+
+        if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+            e.preventDefault();
+            if (!isOpen) { openComboList(field); return; }
+            if (!opts.length) return;
+            const next = e.key === 'ArrowDown'
+                ? (activeIdx + 1) % opts.length
+                : (activeIdx <= 0 ? opts.length - 1 : activeIdx - 1);
+            opts.forEach(o => o.classList.remove('active'));
+            opts[next].classList.add('active');
+            opts[next].scrollIntoView({ block: 'nearest' });
+        } else if (e.key === 'Enter') {
+            if (isOpen && activeIdx >= 0) { e.preventDefault(); pickComboOption(field, opts[activeIdx].dataset.name); }
+        } else if (e.key === 'Tab') {
+            // no preventDefault: after picking, focus moves on to the next field as normal
+            if (isOpen && activeIdx >= 0) pickComboOption(field, opts[activeIdx].dataset.name);
+        } else if (e.key === 'Escape') {
+            if (isOpen) { e.preventDefault(); e.stopPropagation(); closeComboList(field); }
+        }
+    }
+
+    // ============================================
+    // 🔥 ADDED: NHIMA PRICE FROM THE SAME GENERIC NAME
+    // ============================================
+    // When a Generic Name that already exists is chosen (or typed in full),
+    // the NHIMA price is filled in from the products that already use that
+    // generic name. If their prices differ, the most common one is used and
+    // a note says so. A price the user typed by hand is never overwritten.
+    let nhimaAutoValue = null;   // the value this function last wrote (so we know it is still "ours")
+    let nhimaFillSeq = 0;
+
+    function setNhimaHint(text, warn) {
+        const input = document.getElementById('nhimaPrice');
+        if (!input) return;
+        let hint = document.getElementById('nhimaAutoHint');
+        if (!text) { if (hint) hint.remove(); return; }
+        if (!hint) {
+            hint = document.createElement('small');
+            hint.id = 'nhimaAutoHint';
+            hint.style.cssText = 'display:block; margin-top:4px; font-size:0.8rem;';
+            input.insertAdjacentElement('afterend', hint);
+        }
+        hint.style.color = warn ? '#b45309' : '#15803d';
+        hint.textContent = text;
+    }
+
+    async function fillNhimaPriceFromGeneric() {
+        const mySeq = ++nhimaFillSeq;
+        const nhimaInput = document.getElementById('nhimaPrice');
+        const genInput = document.getElementById('genericName');
+        if (!nhimaInput || !genInput) return;
+        const typed = (genInput.value || '').trim().toLowerCase();
+        const generic = typed ? (comboCache.genericName || []).find(g => g.name.trim().toLowerCase() === typed) : null;
+        if (!generic) { setNhimaHint(''); return; }   // new generic name -- nothing to copy from
+
+        try {
+            const { data, error } = await supabaseClient
+                .from('products')
+                .select('nhima_price_fixed')
+                .eq('generic_name_id', generic.id)
+                .gt('nhima_price_fixed', 0);
+            if (error) throw error;
+            if (mySeq !== nhimaFillSeq) return;       // a newer choice has been made meanwhile
+            if (!data || data.length === 0) { setNhimaHint(''); return; }
+
+            const counts = new Map();
+            data.forEach(r => { const v = Number(r.nhima_price_fixed); counts.set(v, (counts.get(v) || 0) + 1); });
+            const ranked = [...counts.entries()].sort((a, b) => b[1] - a[1] || b[0] - a[0]);
+            const price = ranked[0][0];
+
+            const current = parseFloat(nhimaInput.value) || 0;
+            const isOurs = nhimaAutoValue !== null && Math.abs(current - nhimaAutoValue) < 0.005;
+            if (current > 0 && !isOurs) {
+                // user already typed their own price -- leave it, just tell them
+                setNhimaHint(`Existing products with this generic name use NHIMA K${price.toFixed(2)}.`, price.toFixed(2) !== current.toFixed(2));
+                return;
+            }
+            nhimaInput.value = price.toFixed(2);
+            nhimaAutoValue = price;
+            if (ranked.length > 1) {
+                setNhimaHint(`Prices differ between existing products (${ranked.map(r => 'K' + r[0].toFixed(2)).join(', ')}). Used the most common, K${price.toFixed(2)} -- please check.`, true);
+            } else {
+                setNhimaHint(`NHIMA price taken from ${data.length} existing product${data.length > 1 ? 's' : ''} with this generic name.`, false);
+            }
+        } catch (err) {
+            console.error('Could not look up the NHIMA price for this generic name:', err);
         }
     }
 
@@ -332,6 +463,9 @@
                 if (field === 'category') renderComboList('subCategory');
             });
             input.addEventListener('focus', () => openComboList(field));
+            input.addEventListener('keydown', (e) => comboKeydown(field, e));
+            // typed the full name of an existing generic name and moved on (without picking from the list)
+            if (field === 'genericName') input.addEventListener('change', fillNhimaPriceFromGeneric);
 
             arrow?.addEventListener('click', () => {
                 const isOpen = list.classList.contains('open');
@@ -345,13 +479,7 @@
                 const opt = e.target.closest('.combo-option');
                 if (!opt) return;
                 e.preventDefault();
-                input.value = opt.dataset.name;
-                closeComboList(field);
-                if (field === 'category') {
-                    // A different Category was picked -- clear a stale
-                    // Sub-Category that may have belonged to the old one.
-                    document.getElementById('subCategory').value = '';
-                }
+                pickComboOption(field, opt.dataset.name);
             });
 
             input.addEventListener('blur', () => {
@@ -1247,13 +1375,18 @@ ${errorMessages.length > 8 ? `\n... and ${errorMessages.length - 8} more` : ''}
     async function findOrCreate(table, name) {
         if (!name || name.trim() === '') return null;
 
-        const { data: existing, error: findError } = await supabaseClient
+        // 🔥 FIX: a "%" or "_" typed in a name (e.g. "Chloramphenicol 5%W/V") was read as a LIKE
+        // wildcard, so it also matched longer names and .maybeSingle() failed with PGRST116
+        // ("2 rows returned"). Escape them, and just take the first match.
+        const { data: foundRows, error: findError } = await supabaseClient
             .from(table)
             .select('id')
-            .ilike('name', name.trim())
-            .maybeSingle();
+            .ilike('name', name.trim().replace(/[\\%_]/g, '\\$&'))
+            .order('id', { ascending: true })
+            .limit(1);
 
         if (findError) throw findError;
+        const existing = foundRows && foundRows[0];
 
         if (existing) return existing.id;
 
@@ -1270,14 +1403,16 @@ ${errorMessages.length > 8 ? `\n... and ${errorMessages.length - 8} more` : ''}
     async function findOrCreateSubCategory(name, categoryId) {
         if (!name || name.trim() === '' || !categoryId) return null;
 
-        const { data: existing, error: findError } = await supabaseClient
+        const { data: foundRows, error: findError } = await supabaseClient
             .from('sub_categories')
             .select('id')
             .eq('category_id', categoryId)
-            .ilike('name', name.trim())
-            .maybeSingle();
+            .ilike('name', name.trim().replace(/[\\%_]/g, '\\$&'))
+            .order('id', { ascending: true })
+            .limit(1);
 
         if (findError) throw findError;
+        const existing = foundRows && foundRows[0];
 
         if (existing) return existing.id;
 
@@ -1418,6 +1553,8 @@ ${errorMessages.length > 8 ? `\n... and ${errorMessages.length - 8} more` : ''}
         document.getElementById('tax').value = 0;
         document.getElementById('packSize').value = 1;
         document.getElementById('nhimaPrice').value = 0;
+        nhimaAutoValue = null;
+        setNhimaHint('');
         document.getElementById('openingQty').value = 0;
         document.getElementById('openingBatchNo').value = '';
         document.getElementById('openingExpiry').value = '';
