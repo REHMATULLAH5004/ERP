@@ -4194,19 +4194,40 @@
     // and lock the box. If the helper has not reported that claim (not
     // installed on this computer, or a typo in the claim number), the box
     // stays open for the amount to be typed by hand.
-    const nhimaLookup = { claim: '', row: null, tries: 0, nextAt: 0, busy: false };
+    const NHIMA_WAIT_MAX_MS = 30 * 60 * 1000;   // keep waiting up to 30 minutes for the claim to be captured on NHIMA
+    const nhimaLookup = { claim: '', row: null, nextAt: 0, busy: false, since: 0, channel: null };
 
+    function nhimaDropChannel() {
+        try { if (nhimaLookup.channel) supabaseClient.removeChannel(nhimaLookup.channel); } catch (e) { /* ignore */ }
+        nhimaLookup.channel = null;
+    }
+
+    // Works whichever comes first: the claim number typed here, or the claim
+    // captured on NHIMA. A realtime subscription delivers the amount the instant
+    // the helper reports it; a 2-second lookup is the safety net.
     async function pollNhimaLookup(claim) {
-        if (nhimaLookup.claim !== claim) { nhimaLookup.claim = claim; nhimaLookup.row = null; nhimaLookup.tries = 0; nhimaLookup.nextAt = 0; }
-        if (!claim || claim.length < 10 || nhimaLookup.row || nhimaLookup.busy || nhimaLookup.tries >= 40 || Date.now() < nhimaLookup.nextAt) return;
+        if (nhimaLookup.claim !== claim) {
+            nhimaDropChannel();
+            nhimaLookup.claim = claim; nhimaLookup.row = null; nhimaLookup.nextAt = 0; nhimaLookup.since = Date.now();
+            if (claim && claim.length >= 10) {
+                try {
+                    nhimaLookup.channel = supabaseClient.channel('nhima-claim-' + claim)
+                        .on('postgres_changes', { event: '*', schema: 'public', table: 'nhima_claim_results', filter: 'claim_number=eq.' + claim },
+                            (payload) => { if (payload && payload.new && payload.new.claim_number === claim && nhimaLookup.claim === claim) nhimaLookup.row = payload.new; })
+                        .subscribe();
+                } catch (e) { console.warn('NHIMA realtime not available, using polling only:', e); }
+            }
+        }
+        if (!claim || claim.length < 10 || nhimaLookup.row || nhimaLookup.busy || Date.now() < nhimaLookup.nextAt) return;
+        if (Date.now() - nhimaLookup.since > NHIMA_WAIT_MAX_MS) return;
         nhimaLookup.busy = true;
         try {
             const { data, error } = await supabaseClient.from('nhima_claim_results').select('*').eq('claim_number', claim).maybeSingle();
             if (nhimaLookup.claim === claim) {
                 if (!error && data) nhimaLookup.row = data;
-                else { nhimaLookup.tries++; nhimaLookup.nextAt = Date.now() + 3000; }
+                else nhimaLookup.nextAt = Date.now() + 2000;
             }
-        } catch (e) { nhimaLookup.tries++; nhimaLookup.nextAt = Date.now() + 3000; }
+        } catch (e) { nhimaLookup.nextAt = Date.now() + 2000; }
         nhimaLookup.busy = false;
     }
 
@@ -4226,7 +4247,7 @@
         if (row) { gross = Number(row.gross_amount); auto = true; }
         else {
             const raw = (document.getElementById('retailNhimaGross')?.value || '').trim();
-            if (raw === '' || isNaN(parseFloat(raw))) return { state: 'missing', total, member, waiting: nhimaLookup.tries < 4 };
+            if (raw === '' || isNaN(parseFloat(raw))) return { state: 'missing', total, member, waiting: (Date.now() - nhimaLookup.since) < NHIMA_WAIT_MAX_MS };
             gross = parseFloat(raw);
         }
         const diff = Math.round((total - gross) * 100) / 100;
@@ -4253,10 +4274,10 @@
         const src = st.auto ? ' (read from NHIMA automatically)' : '';
         let text;
         if (st.state === 'missing') {
-            msg.style.background = '#fef3c7'; msg.style.color = '#92400e';
+            msg.style.background = st.waiting ? '#e0f2fe' : '#fef3c7'; msg.style.color = st.waiting ? '#075985' : '#92400e';
             text = st.waiting
-                ? 'Checking NHIMA for this claim...'
-                : 'NHIMA has not sent this claim to the ERP yet (invoice ' + k(st.total) + '). Open the claim on the NHIMA site (Past Claims > View) and the amount fills in by itself, or type the Gross Amount from the NHIMA result page. Also check the claim number for a typo.';
+                ? '\u23F3 Waiting for this claim to be captured on NHIMA... The NHIMA amount will appear here by itself the moment NHIMA confirms the claim (invoice ' + k(st.total) + '). You can also type it yourself.'
+                : 'NHIMA has not sent this claim to the ERP (invoice ' + k(st.total) + '). Check the claim number for a typo, make sure the claim was captured on NHIMA, or type the Gross Amount from the NHIMA result page.';
             inp.style.borderColor = '#f59e0b';
         } else if (st.state === 'match') {
             msg.style.background = '#dcfce7'; msg.style.color = '#166534';
@@ -5221,7 +5242,7 @@
                 } else if (amt.member && !amt.member.ok) {
                     if (!confirm('\u26A0 MEMBER DIFFERS\n\nThe claim on NHIMA is for member ' + amt.member.nhima + '\nbut the member selected here is ' + amt.member.erp + '.\n\nPress Cancel to go back and fix it, or OK to save anyway.')) return null;
                 } else if (amt.state === 'missing') {
-                    if (!confirm('You have not typed the NHIMA Gross Amount, so this claim has NOT been checked against the invoice (K' + amt.total.toFixed(2) + ').\n\nPress Cancel to type it, or OK to save without checking.')) return null;
+                    if (!confirm('NHIMA has NOT confirmed this claim yet, so it has NOT been checked against the invoice (K' + amt.total.toFixed(2) + ').\n\nHave you captured it on NHIMA? Press Cancel to wait for NHIMA (or type the amount), or OK to save without checking.')) return null;
                 }
             }
 
