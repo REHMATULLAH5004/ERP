@@ -4226,7 +4226,7 @@
         if (row) { gross = Number(row.gross_amount); auto = true; }
         else {
             const raw = (document.getElementById('retailNhimaGross')?.value || '').trim();
-            if (raw === '' || isNaN(parseFloat(raw))) return { state: 'missing', total, member, waiting: nhimaLookup.tries < 40 };
+            if (raw === '' || isNaN(parseFloat(raw))) return { state: 'missing', total, member, waiting: nhimaLookup.tries < 4 };
             gross = parseFloat(raw);
         }
         const diff = Math.round((total - gross) * 100) / 100;
@@ -4255,8 +4255,8 @@
         if (st.state === 'missing') {
             msg.style.background = '#fef3c7'; msg.style.color = '#92400e';
             text = st.waiting
-                ? 'Checking NHIMA for this claim... If it does not appear in a few seconds, type the Gross Amount from the NHIMA result page (invoice ' + k(st.total) + ').'
-                : 'NHIMA has not reported this claim number to the ERP. Check the claim number for a typo, or type the Gross Amount from the NHIMA result page (invoice ' + k(st.total) + ').';
+                ? 'Checking NHIMA for this claim...'
+                : 'NHIMA has not sent this claim to the ERP yet (invoice ' + k(st.total) + '). Open the claim on the NHIMA site (Past Claims > View) and the amount fills in by itself, or type the Gross Amount from the NHIMA result page. Also check the claim number for a typo.';
             inp.style.borderColor = '#f59e0b';
         } else if (st.state === 'match') {
             msg.style.background = '#dcfce7'; msg.style.color = '#166534';
