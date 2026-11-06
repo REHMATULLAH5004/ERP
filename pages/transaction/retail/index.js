@@ -4151,16 +4151,31 @@
     }
 
     // ============================================
-    // NHIMA AMOUNT CHECK (Nov 2026)
-    // SOP: capture the claim on the NHIMA site first, then paste the claim
-    // number here. Next to the Claim Number we now ask for the "Gross
-    // Amount" printed on NHIMA's Claim Capture Result page and compare it,
-    // live, with this invoice's Grand Total. A difference shows a red
-    // warning immediately, and again as a confirm when saving.
-    // The typed amount is kept in sale.payment.nhima_gross_amount.
+    // NHIMA AMOUNT CHECK (Nov 2026, v4 - checked when you press SAVE)
+    // SOP: capture the claim on the NHIMA site first, paste the claim number
+    // here, press Save. At Save the ERP looks up NHIMA's Gross Amount for that
+    // claim number (claim number only - the member is not compared) and
+    // compares it with this invoice's Grand Total:
+    //   * equal      -> the invoice saves.
+    //   * different  -> a box opens: "Go back to invoice", "Check NHIMA again"
+    //                   (after the NHIMA claim has been corrected) or
+    //                   "Save anyway".
+    // If NHIMA's amount is not in the ERP yet, the ERP asks the Griffins NHIMA
+    // helper (on the computer sitting on NHIMA's Past Claims page) to open that
+    // claim and read it - this takes a few seconds (nhima_claim_requests table).
+    // The outcome is kept in sale.payment.nhima_gross_amount / nhima_amount_diff /
+    // nhima_amount_source ('helper' | 'unchecked') / nhima_amount_override.
     // ============================================
     const NHIMA_AMOUNT_TOLERANCE = 0.01;
+    const NHIMA_ASK_MAX_MS = 45 * 1000;      // how long Save waits for the helper to read the claim
+    let nhimaLastCheck = null;               // { claim, total, extras } of the check done at the last Save
 
+    function nhimaEsc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
+    function nhimaK(n) { return 'K' + Number(n).toFixed(2); }
+    function nhimaGrandTotal() { return parseFloat((document.getElementById('retailGrandTotal')?.textContent || '0').replace(/[^0-9.\-]/g, '')) || 0; }
+    function nhimaClaimKey() { return (document.getElementById('retailClaimNumber')?.value || '').trim().toUpperCase(); }
+
+    // Small read-only box under the Total that shows the result of the last check.
     function ensureNhimaAmountField() {
         const claimEl = document.getElementById('retailClaimNumber');
         if (!claimEl) return null;
@@ -4170,12 +4185,9 @@
         box.id = 'nhimaAmountBox';
         box.style.cssText = 'margin-top:8px;';
         box.innerHTML =
-            '<label for="retailNhimaGross" style="display:block;font-weight:600;font-size:0.85rem;margin-bottom:4px;">NHIMA Gross Amount (K) <span style="font-weight:400;color:#64748b;">&ndash; fills in by itself when NHIMA has reported the claim, otherwise type it from the NHIMA result page</span></label>' +
-            '<input type="number" step="0.01" min="0" id="retailNhimaGross" placeholder="e.g. 18.57" autocomplete="off" style="width:100%;padding:8px 10px;border:1px solid #cbd5e1;border-radius:6px;font-size:0.95rem;box-sizing:border-box;">' +
+            '<label for="retailNhimaGross" style="display:block;font-weight:600;font-size:0.85rem;margin-bottom:4px;">NHIMA Gross Amount (K) <span style="font-weight:400;color:#64748b;">&ndash; checked automatically when you press Save</span></label>' +
+            '<input type="text" id="retailNhimaGross" readonly placeholder="checked when you press Save" autocomplete="off" style="width:100%;padding:8px 10px;border:1px solid #cbd5e1;border-radius:6px;font-size:0.95rem;box-sizing:border-box;background:#f1f5f9;">' +
             '<div id="nhimaAmountMsg" style="margin-top:6px;font-size:0.85rem;font-weight:600;line-height:1.4;display:none;border-radius:6px;padding:7px 10px;"></div>';
-        // Preferred spot: right under the Total in the Order Summary, so the
-        // NHIMA amount is typed next to the invoice total it is compared
-        // with. Falls back to just under the Claim Number field.
         const totalEl = document.getElementById('retailGrandTotal');
         const totalRow = totalEl && totalEl.parentElement;
         if (totalRow && totalRow.parentElement) {
@@ -4188,125 +4200,189 @@
         return box;
     }
 
-    // The Griffins NHIMA Chrome helper sends each claim's Gross Amount to the
-    // nhima_claim_results table the moment NHIMA's result page opens. Once a
-    // claim number is entered here we look it up, fill the amount in by itself
-    // and lock the box. If the helper has not reported that claim (not
-    // installed on this computer, or a typo in the claim number), the box
-    // stays open for the amount to be typed by hand.
-    const NHIMA_WAIT_MAX_MS = 30 * 60 * 1000;   // keep waiting up to 30 minutes for the claim to be captured on NHIMA
-    const nhimaLookup = { claim: '', row: null, nextAt: 0, busy: false, since: 0, channel: null };
-
-    function nhimaDropChannel() {
-        try { if (nhimaLookup.channel) supabaseClient.removeChannel(nhimaLookup.channel); } catch (e) { /* ignore */ }
-        nhimaLookup.channel = null;
+    function nhimaShowResult(kind, text, gross) {
+        const msg = document.getElementById('nhimaAmountMsg');
+        const inp = document.getElementById('retailNhimaGross');
+        if (!msg || !inp) return;
+        if (!kind) { msg.style.display = 'none'; inp.value = ''; inp.style.borderColor = '#cbd5e1'; return; }
+        const styles = { ok: ['#dcfce7', '#166534', '#16a34a'], warn: ['#fef3c7', '#92400e', '#f59e0b'], bad: ['#fee2e2', '#991b1b', '#dc2626'] }[kind];
+        msg.style.background = styles[0]; msg.style.color = styles[1]; inp.style.borderColor = styles[2];
+        msg.style.display = 'block'; msg.textContent = text;
+        inp.value = (gross == null) ? '' : Number(gross).toFixed(2);
     }
 
-    // Works whichever comes first: the claim number typed here, or the claim
-    // captured on NHIMA. A realtime subscription delivers the amount the instant
-    // the helper reports it; a 2-second lookup is the safety net.
-    async function pollNhimaLookup(claim) {
-        if (nhimaLookup.claim !== claim) {
-            nhimaDropChannel();
-            nhimaLookup.claim = claim; nhimaLookup.row = null; nhimaLookup.nextAt = 0; nhimaLookup.since = Date.now();
-            if (claim && claim.length >= 10) {
-                try {
-                    nhimaLookup.channel = supabaseClient.channel('nhima-claim-' + claim)
-                        .on('postgres_changes', { event: '*', schema: 'public', table: 'nhima_claim_results', filter: 'claim_number=eq.' + claim },
-                            (payload) => { if (payload && payload.new && payload.new.claim_number === claim && nhimaLookup.claim === claim) nhimaLookup.row = payload.new; })
-                        .subscribe();
-                } catch (e) { console.warn('NHIMA realtime not available, using polling only:', e); }
-            }
-        }
-        if (!claim || claim.length < 10 || nhimaLookup.row || nhimaLookup.busy || Date.now() < nhimaLookup.nextAt) return;
-        if (Date.now() - nhimaLookup.since > NHIMA_WAIT_MAX_MS) return;
-        nhimaLookup.busy = true;
-        try {
-            const { data, error } = await supabaseClient.from('nhima_claim_results').select('*').eq('claim_number', claim).maybeSingle();
-            if (nhimaLookup.claim === claim) {
-                if (!error && data) nhimaLookup.row = data;
-                else nhimaLookup.nextAt = Date.now() + 2000;
-            }
-        } catch (e) { nhimaLookup.nextAt = Date.now() + 2000; }
-        nhimaLookup.busy = false;
-    }
-
-    function nhimaAmountStatus() {
-        if (currentClientType !== 'NHIMA') return { state: 'none' };
-        const claim = (document.getElementById('retailClaimNumber')?.value || '').trim();
-        if (!claim) return { state: 'none' };
-        const total = parseFloat((document.getElementById('retailGrandTotal')?.textContent || '0').replace(/[^0-9.\-]/g, '')) || 0;
-        const row = (nhimaLookup.claim === claim) ? nhimaLookup.row : null;
-        let member = null;
-        if (row && row.member_number) {
-            const nhimaMember = row.member_number + '/' + (row.dependant_code || '00');
-            const erpMember = String(document.getElementById('retailNhimaNumber')?.value || '').replace(/\s+/g, '');
-            if (erpMember) member = { ok: erpMember === nhimaMember, erp: erpMember, nhima: nhimaMember };
-        }
-        let gross, auto = false;
-        if (row) { gross = Number(row.gross_amount); auto = true; }
-        else {
-            const raw = (document.getElementById('retailNhimaGross')?.value || '').trim();
-            if (raw === '' || isNaN(parseFloat(raw))) return { state: 'missing', total, member, waiting: (Date.now() - nhimaLookup.since) < NHIMA_WAIT_MAX_MS };
-            gross = parseFloat(raw);
-        }
-        const diff = Math.round((total - gross) * 100) / 100;
-        return { state: Math.abs(diff) <= NHIMA_AMOUNT_TOLERANCE ? 'match' : 'mismatch', gross, total, diff, auto, member };
-    }
-
+    // A result belongs to one claim number and one total: forget it when either changes.
     function refreshNhimaAmountCheck() {
         const box = document.getElementById('nhimaAmountBox');
         const nhimaVisible = currentClientType === 'NHIMA';
         if (!box) { if (nhimaVisible) ensureNhimaAmountField(); return; }
         box.style.display = nhimaVisible ? '' : 'none';
-        const msg = document.getElementById('nhimaAmountMsg');
-        const inp = document.getElementById('retailNhimaGross');
-        if (!msg || !nhimaVisible) return;
-        const claim = (document.getElementById('retailClaimNumber')?.value || '').trim();
-        pollNhimaLookup(claim); // async; the next tick (0.7s) picks up the result
-        const st = nhimaAmountStatus();
-        const k = n => 'K' + Number(n).toFixed(2);
-        if (st.state === 'none') { msg.style.display = 'none'; inp.style.borderColor = '#cbd5e1'; inp.readOnly = false; inp.style.background = '#fff'; return; }
-        // lock + fill the box when the amount came from NHIMA itself
-        if (st.auto) { inp.value = Number(st.gross).toFixed(2); inp.readOnly = true; inp.style.background = '#f1f5f9'; }
-        else { inp.readOnly = false; inp.style.background = '#fff'; }
-        msg.style.display = 'block';
-        const src = st.auto ? ' (read from NHIMA automatically)' : '';
-        let text;
-        if (st.state === 'missing') {
-            msg.style.background = st.waiting ? '#e0f2fe' : '#fef3c7'; msg.style.color = st.waiting ? '#075985' : '#92400e';
-            text = st.waiting
-                ? '\u23F3 Waiting for this claim to be captured on NHIMA... The NHIMA amount will appear here by itself the moment NHIMA confirms the claim (invoice ' + k(st.total) + '). You can also type it yourself.'
-                : 'NHIMA has not sent this claim to the ERP (invoice ' + k(st.total) + '). Check the claim number for a typo, make sure the claim was captured on NHIMA, or type the Gross Amount from the NHIMA result page.';
-            inp.style.borderColor = '#f59e0b';
-        } else if (st.state === 'match') {
-            msg.style.background = '#dcfce7'; msg.style.color = '#166534';
-            text = '✓ Matches: NHIMA ' + k(st.gross) + ' = invoice ' + k(st.total) + '.' + src;
-            inp.style.borderColor = '#16a34a';
-        } else {
-            msg.style.background = '#fee2e2'; msg.style.color = '#991b1b';
-            text = '⚠ MISMATCH: NHIMA ' + k(st.gross) + ' but invoice ' + k(st.total) + ' (invoice is ' + (st.diff > 0 ? 'HIGHER' : 'LOWER') + ' by ' + k(Math.abs(st.diff)) + '). Check the items, batches and prices against the NHIMA claim.' + src;
-            inp.style.borderColor = '#dc2626';
+        if (nhimaLastCheck && (nhimaClaimKey() !== nhimaLastCheck.claim || Math.abs(nhimaGrandTotal() - nhimaLastCheck.total) > 0.001)) {
+            nhimaLastCheck = null;
+            nhimaShowResult(null);
         }
-        if (st.member && !st.member.ok) {
-            text += '  ⚠ MEMBER DIFFERS: this claim on NHIMA is for ' + st.member.nhima + ' but the selected member is ' + st.member.erp + '.';
-            if (st.state !== 'mismatch') { msg.style.background = '#fee2e2'; msg.style.color = '#991b1b'; }
-        }
-        msg.textContent = text;
     }
 
     function nhimaPaymentExtras() {
-        const st = nhimaAmountStatus();
-        if (st.state === 'match' || st.state === 'mismatch') {
-            return { nhima_gross_amount: st.gross, nhima_amount_diff: st.diff, nhima_amount_source: st.auto ? 'helper' : 'typed' };
-        }
+        if (nhimaLastCheck && nhimaLastCheck.claim === nhimaClaimKey() && Math.abs(nhimaLastCheck.total - nhimaGrandTotal()) <= 0.001) return nhimaLastCheck.extras;
         return {};
     }
 
+    // ---- a simple modal: returns { setBody, close, result } ; result resolves with the clicked button's value ----
+    function nhimaOpenModal({ title, tone, html, buttons }) {
+        const c = { red: ['#991b1b', '#fee2e2'], amber: ['#92400e', '#fef3c7'], blue: ['#075985', '#e0f2fe'], green: ['#166534', '#dcfce7'] }[tone || 'blue'];
+        const ov = document.createElement('div');
+        ov.style.cssText = 'position:fixed;inset:0;background:rgba(15,23,42,.55);z-index:100000;display:flex;align-items:center;justify-content:center;padding:16px;';
+        ov.innerHTML =
+            '<div role="dialog" aria-modal="true" style="background:#fff;border-radius:12px;max-width:580px;width:100%;max-height:90vh;overflow:auto;box-shadow:0 20px 50px rgba(0,0,0,.35);">' +
+            '<div data-t style="padding:14px 18px;font-weight:700;font-size:1.05rem;border-radius:12px 12px 0 0;background:' + c[1] + ';color:' + c[0] + ';"></div>' +
+            '<div data-b style="padding:16px 18px;font-size:.95rem;line-height:1.5;color:#1e293b;"></div>' +
+            '<div data-f style="padding:0 18px 16px;display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end;"></div></div>';
+        ov.querySelector('[data-t]').textContent = title;
+        ov.querySelector('[data-b]').innerHTML = html;
+        let done = null;
+        const result = new Promise(r => { done = r; });
+        let closed = false;
+        const close = () => { if (closed) return; closed = true; document.removeEventListener('keydown', onKey, true); ov.remove(); };
+        const finish = (v) => { close(); done(v); };
+        const bar = ov.querySelector('[data-f]');
+        const kinds = { primary: 'background:#1d4ed8;color:#fff;border:1px solid #1d4ed8;', warn: 'background:#fff;color:#92400e;border:1px solid #f59e0b;', plain: 'background:#fff;color:#475569;border:1px solid #cbd5e1;' };
+        let first = null;
+        (buttons || []).forEach(b => {
+            const el = document.createElement('button');
+            el.type = 'button'; el.textContent = b.label;
+            el.style.cssText = 'padding:9px 14px;border-radius:8px;font-weight:600;font-size:.9rem;cursor:pointer;' + (kinds[b.kind] || kinds.plain);
+            el.addEventListener('click', () => finish(b.value));
+            bar.appendChild(el);
+            if (!first || b.kind === 'primary') first = first && first.dataset.p ? first : el;
+            if (b.kind === 'primary') el.dataset.p = '1';
+        });
+        const escBtn = (buttons || []).find(b => b.value === 'back' || b.value === 'cancel');
+        function onKey(e) { if (e.key === 'Escape' && escBtn) { e.stopPropagation(); e.preventDefault(); finish(escBtn.value); } }
+        document.addEventListener('keydown', onKey, true);
+        document.body.appendChild(ov);
+        if (first) try { first.focus(); } catch (e) { /* ignore */ }
+        return { el: ov, close, result, setBody: (h) => { ov.querySelector('[data-b]').innerHTML = h; } };
+    }
+    function nhimaAsk(opts) { return nhimaOpenModal(opts).result; }
+
+    function nhimaItemsHtml(row) {
+        const items = (row && Array.isArray(row.items)) ? row.items.filter(i => i && (i.name || i.code)) : [];
+        if (!items.length) return '';
+        const trs = items.slice(0, 15).map(i =>
+            '<tr><td style="padding:3px 6px;border-top:1px solid #e2e8f0;">' + nhimaEsc(i.name || i.code) + '</td><td style="padding:3px 6px;border-top:1px solid #e2e8f0;text-align:right;white-space:nowrap;">' + (i.gross == null ? '' : nhimaK(i.gross)) + '</td></tr>').join('');
+        return '<div style="margin-top:10px;font-size:.8rem;color:#475569;"><div style="font-weight:700;margin-bottom:3px;">Lines on NHIMA for this claim</div>' +
+            '<table style="width:100%;border-collapse:collapse;">' + trs + '</table>' + (items.length > 15 ? '<div>+ ' + (items.length - 15) + ' more</div>' : '') + '</div>';
+    }
+
+    async function nhimaLookupRow(claim) {
+        const { data, error } = await supabaseClient.from('nhima_claim_results').select('*').eq('claim_number', claim).maybeSingle();
+        return { data: error ? null : data, error };
+    }
+
+    // Finds NHIMA's record of this claim: already in the ERP, or asked for through the helper.
+    // Returns { row } | { notFound } | { timeout } | { cancelled } | { error }
+    async function nhimaGetClaim(claim, force, oldStamp) {
+        if (!force) {
+            const first = await nhimaLookupRow(claim);
+            if (first.data) return { row: first.data };
+        }
+        const nowIso = new Date().toISOString();
+        const { error: reqErr } = await supabaseClient.from('nhima_claim_requests')
+            .upsert({ claim_number: claim, status: 'pending', force_refresh: !!force, requested_at: nowIso, updated_at: nowIso }, { onConflict: 'claim_number' });
+        if (reqErr) return { error: reqErr.message || String(reqErr) };
+        let cancelled = false;
+        const modal = nhimaOpenModal({
+            title: 'Checking claim ' + claim + ' on NHIMA...', tone: 'blue',
+            html: '<div>Asking NHIMA for this claim\'s amount. This takes a few seconds (<b data-sec>0</b>s).</div>' +
+                  '<div style="margin-top:6px;color:#64748b;font-size:.85rem;">The computer that stays on NHIMA\'s Past Claims page reads it for us. Please wait.</div>',
+            buttons: [{ label: 'Cancel', value: 'cancel' }]
+        });
+        modal.result.then(v => { if (v === 'cancel') cancelled = true; });
+        const t0 = Date.now();
+        try {
+            while (!cancelled && Date.now() - t0 < NHIMA_ASK_MAX_MS) {
+                await new Promise(r => setTimeout(r, 1500));
+                if (cancelled) break;
+                const s = modal.el.querySelector('[data-sec]'); if (s) s.textContent = Math.round((Date.now() - t0) / 1000);
+                const got = await nhimaLookupRow(claim);
+                if (got.data && (!force || got.data.updated_at !== oldStamp)) return { row: got.data };
+                const rq = await supabaseClient.from('nhima_claim_requests').select('status').eq('claim_number', claim).maybeSingle();
+                if (rq.data && rq.data.status === 'not_found') return { notFound: true };
+            }
+        } finally { modal.close(); }
+        return cancelled ? { cancelled: true } : { timeout: true };
+    }
+
+    // The check done at Save. Returns { proceed: true|false }.
+    async function nhimaSaveCheck(claimRaw, total) {
+        const claim = String(claimRaw || '').trim().toUpperCase();
+        let force = false, oldStamp = null;
+        for (;;) {
+            const res = await nhimaGetClaim(claim, force, oldStamp);
+            if (res.cancelled) return { proceed: false };
+
+            if (res.row) {
+                const row = res.row;
+                const gross = Number(row.gross_amount);
+                const diff = Math.round((total - gross) * 100) / 100;
+                if (Math.abs(diff) <= NHIMA_AMOUNT_TOLERANCE) {
+                    nhimaLastCheck = { claim, total, extras: { nhima_gross_amount: gross, nhima_amount_diff: diff, nhima_amount_source: 'helper' } };
+                    nhimaShowResult('ok', '✓ Matches NHIMA: ' + nhimaK(gross) + ' = invoice ' + nhimaK(total) + '.', gross);
+                    return { proceed: true };
+                }
+                const choice = await nhimaAsk({
+                    title: '⚠ AMOUNT DOES NOT MATCH NHIMA', tone: 'red',
+                    html: '<div>NHIMA claim <b>' + nhimaEsc(claim) + '</b>: <b>' + nhimaK(gross) + '</b></div>' +
+                          '<div>This invoice: <b>' + nhimaK(total) + '</b> &mdash; ' + (diff > 0 ? 'HIGHER' : 'LOWER') + ' than NHIMA by <b>' + nhimaK(Math.abs(diff)) + '</b></div>' +
+                          '<div style="margin-top:10px;">Fix one of them: change the invoice items/prices to match NHIMA, or &mdash; if the NHIMA claim is the one that is wrong &mdash; correct it on NHIMA and press <b>Check NHIMA again</b>.</div>' +
+                          nhimaItemsHtml(row),
+                    buttons: [
+                        { label: 'Save anyway', value: 'anyway', kind: 'warn' },
+                        { label: 'Check NHIMA again', value: 'again', kind: 'plain' },
+                        { label: 'Go back to invoice', value: 'back', kind: 'primary' }
+                    ]
+                });
+                if (choice === 'again') { force = true; oldStamp = row.updated_at; continue; }
+                if (choice === 'anyway') {
+                    nhimaLastCheck = { claim, total, extras: { nhima_gross_amount: gross, nhima_amount_diff: diff, nhima_amount_source: 'helper', nhima_amount_override: true } };
+                    nhimaShowResult('bad', '⚠ Saved with a difference: NHIMA ' + nhimaK(gross) + ' vs invoice ' + nhimaK(total) + '.', gross);
+                    return { proceed: true };
+                }
+                return { proceed: false };
+            }
+
+            let title, text;
+            if (res.notFound) {
+                title = 'NHIMA does not show this claim'; text = 'Claim <b>' + nhimaEsc(claim) + '</b> is not on NHIMA\'s Past Claims list. Check the claim number for a typo, or make sure the claim has been captured on NHIMA first.';
+            } else if (res.timeout) {
+                title = 'Could not read this claim from NHIMA'; text = 'No answer came back in ' + (NHIMA_ASK_MAX_MS / 1000) + ' seconds. The computer that stays on NHIMA\'s <b>Past Claims</b> page (with the Griffins helper) may be off, signed out of NHIMA, or not on that page.';
+            } else {
+                title = 'Could not ask NHIMA'; text = 'The request could not be sent (' + nhimaEsc(res.error || 'unknown error') + '). Check the internet connection.';
+            }
+            const choice = await nhimaAsk({
+                title, tone: 'amber',
+                html: '<div>' + text + '</div><div style="margin-top:8px;">This invoice has <b>not</b> been checked against NHIMA (' + nhimaK(total) + ').</div>',
+                buttons: [
+                    { label: 'Save without checking', value: 'skip', kind: 'warn' },
+                    { label: 'Try again', value: 'again', kind: 'plain' },
+                    { label: 'Go back to invoice', value: 'back', kind: 'primary' }
+                ]
+            });
+            if (choice === 'again') { force = false; oldStamp = null; continue; }
+            if (choice === 'skip') {
+                nhimaLastCheck = { claim, total, extras: { nhima_amount_source: 'unchecked' } };
+                nhimaShowResult('warn', 'Saved WITHOUT an NHIMA check (invoice ' + nhimaK(total) + ').', null);
+                return { proceed: true };
+            }
+            return { proceed: false };
+        }
+    }
+
     document.addEventListener('input', function (e) {
-        if (e.target && (e.target.id === 'retailNhimaGross' || e.target.id === 'retailClaimNumber')) refreshNhimaAmountCheck();
+        if (e.target && e.target.id === 'retailClaimNumber') refreshNhimaAmountCheck();
     });
-    setInterval(refreshNhimaAmountCheck, 700); // also follows Grand Total / client-type changes
+    setInterval(refreshNhimaAmountCheck, 700); // follows Grand Total / client-type changes (no network)
 
     function updateRowRate(row) {
         if (!row) return;
@@ -5233,17 +5309,11 @@
                 }
             }
 
-            // NHIMA amount check (see ensureNhimaAmountField): warn at save
-            // if the NHIMA Gross Amount is missing or differs from this invoice.
+            // NHIMA amount check (see "NHIMA AMOUNT CHECK" above): at Save, compare
+            // NHIMA's amount for this claim number with the invoice total.
             if (status !== 'QUOTATION' && claimNumber) {
-                const amt = nhimaAmountStatus();
-                if (amt.state === 'mismatch') {
-                    if (!confirm('\u26A0 AMOUNT MISMATCH\n\nNHIMA claim: K' + amt.gross.toFixed(2) + '\nThis invoice: K' + amt.total.toFixed(2) + '\nDifference: K' + Math.abs(amt.diff).toFixed(2) + (amt.diff > 0 ? ' (invoice higher)' : ' (invoice lower)') + '\n\nPress Cancel to go back and fix it, or OK to save anyway.')) return null;
-                } else if (amt.member && !amt.member.ok) {
-                    if (!confirm('\u26A0 MEMBER DIFFERS\n\nThe claim on NHIMA is for member ' + amt.member.nhima + '\nbut the member selected here is ' + amt.member.erp + '.\n\nPress Cancel to go back and fix it, or OK to save anyway.')) return null;
-                } else if (amt.state === 'missing') {
-                    if (!confirm('NHIMA has NOT confirmed this claim yet, so it has NOT been checked against the invoice (K' + amt.total.toFixed(2) + ').\n\nHave you captured it on NHIMA? Press Cancel to wait for NHIMA (or type the amount), or OK to save without checking.')) return null;
-                }
+                const chk = await nhimaSaveCheck(claimNumber, nhimaGrandTotal());
+                if (!chk.proceed) return null;
             }
 
             customerData = {
